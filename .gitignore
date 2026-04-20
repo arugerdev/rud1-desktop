@@ -1,0 +1,7 @@
+node_modules/
+dist/
+release/
+*.conf
+priv.key
+pub.key
+.env

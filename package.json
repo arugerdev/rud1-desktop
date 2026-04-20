@@ -1,0 +1,77 @@
+{
+  "name": "rud1-desktop",
+  "version": "0.1.0",
+  "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
+  "main": "dist/main/index.js",
+  "author": "rud1",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run watch\" \"wait-on dist/main/index.js && electron .\"",
+    "watch": "tsc -w --outDir dist",
+    "build": "tsc --outDir dist",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "dist:mac": "npm run build && electron-builder --mac"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.1.0",
+    "electron": "^36.9.5",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.0",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "es.rud1.desktop",
+    "productName": "rud1",
+    "copyright": "Copyright © 2025 rud1",
+    "directories": {
+      "output": "release"
+    },
+    "extraResources": [
+      {
+        "from": "resources/${os}",
+        "to": "bin",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "resources/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64", "arm64"] },
+        { "target": "deb", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "resources/icon.png",
+      "category": "Network"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "icon": "resources/icon.icns",
+      "hardenedRuntime": true,
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.plist"
+    },
+    "protocols": [
+      {
+        "name": "rud1",
+        "schemes": ["rud1"]
+      }
+    ]
+  }
+}
