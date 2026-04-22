@@ -12,6 +12,8 @@
  *   net:ping          — ICMP reachability probe (LAN-route diagnostics)
  *   net:interfaces    — enumerate local NICs
  *   net:resolveRoute  — which local iface egresses packets to an IP
+ *   net:traceroute    — hop-by-hop path with RTT per hop
+ *   net:dnsLookup     — A / AAAA / CNAME records for a hostname
  *   app:version       — get app version
  *   app:platform      — get OS platform
  */
@@ -19,7 +21,13 @@
 import { ipcMain, app } from "electron";
 import { vpnConnect, vpnDisconnect, vpnStatus } from "./vpn-manager";
 import { usbAttach, usbDetach, usbList } from "./usb-manager";
-import { ping, interfaces, resolveRoute } from "./net-diag-manager";
+import {
+  ping,
+  interfaces,
+  resolveRoute,
+  traceroute,
+  dnsLookup,
+} from "./net-diag-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
 
@@ -114,6 +122,26 @@ export function registerIpcHandlers(): void {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     try {
       const result = await resolveRoute(destination);
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("net:traceroute", async (event, host: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await traceroute(host);
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("net:dnsLookup", async (event, hostname: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await dnsLookup(hostname);
       return { ok: true, result };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

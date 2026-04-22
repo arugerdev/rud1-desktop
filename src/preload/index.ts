@@ -70,6 +70,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
           raw: string;
         };
       }>,
+
+    traceroute: (host: string) =>
+      ipcRenderer.invoke("net:traceroute", host) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          host: string;
+          hops: { index: number; host: string | null; rttMs: number | null }[];
+          raw: string;
+        };
+      }>,
+
+    dnsLookup: (hostname: string) =>
+      ipcRenderer.invoke("net:dnsLookup", hostname) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          hostname: string;
+          a: string[];
+          aaaa: string[];
+          cname: string | null;
+        };
+      }>,
   },
 
   app: {

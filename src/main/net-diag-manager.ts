@@ -8,19 +8,28 @@
  * being passed to execFile so we never invoke a shell.
  *
  * Exposed probes:
- *   ping(host)       — 3 ICMP echoes, returns avg RTT (ms) + packet loss
- *   interfaces()     — local NIC enumeration with IPv4 addresses & CIDR
- *   resolveRoute(ip) — which local interface would egress packets to <ip>
+ *   ping(host)         — 3 ICMP echoes, returns avg RTT (ms) + packet loss
+ *   interfaces()       — local NIC enumeration with IPv4 addresses & CIDR
+ *   resolveRoute(ip)   — which local interface would egress packets to <ip>
+ *   traceroute(host)   — hop-by-hop path with RTT per hop (max 15 hops)
+ *   dnsLookup(host)    — A / AAAA / CNAME records via dns/promises
  */
 
 import { execFile } from "child_process";
 import { promisify } from "util";
 import os from "os";
+import { resolve4, resolve6, resolveCname } from "dns/promises";
 
 const execFileAsync = promisify(execFile);
 
 const HOST_REGEX = /^[a-zA-Z0-9.\-:]{1,253}$/;
 const IP_REGEX = /^(\d{1,3}\.){3}\d{1,3}$/;
+const HOSTNAME_REGEX = /^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+const IPV6_REGEX = /^[0-9a-fA-F:]+$/;
+
+export function validateHost(h: string): boolean {
+  return typeof h === "string" && HOST_REGEX.test(h);
+}
 
 export interface PingResult {
   host: string;
@@ -45,9 +54,45 @@ export interface RouteInfo {
   raw: string;
 }
 
+export interface Hop {
+  index: number;
+  host: string | null;
+  rttMs: number | null;
+}
+
+export interface TracerouteResult {
+  host: string;
+  hops: Hop[];
+  raw: string;
+}
+
+export interface TracerouteOptions {
+  maxHops?: number;
+}
+
+export interface DnsLookupResult {
+  hostname: string;
+  a: string[];
+  aaaa: string[];
+  cname: string | null;
+}
+
 function assertHost(host: string): void {
-  if (typeof host !== "string" || !HOST_REGEX.test(host)) {
+  if (!validateHost(host)) {
     throw new Error("invalid host");
+  }
+}
+
+function assertHostname(hostname: string): void {
+  if (typeof hostname !== "string" || !HOSTNAME_REGEX.test(hostname)) {
+    throw new Error("invalid hostname");
+  }
+  // Reject input that parses as an IP (v4 or v6) — dnsLookup only accepts names.
+  if (IP_REGEX.test(hostname)) {
+    throw new Error("invalid hostname: looks like IPv4");
+  }
+  if (hostname.includes(":") && IPV6_REGEX.test(hostname)) {
+    throw new Error("invalid hostname: looks like IPv6");
   }
 }
 
@@ -183,4 +228,140 @@ function parseWinRoute(destination: string, stdout: string): RouteInfo {
     // fall through
   }
   return { destination, iface: null, gateway: null, raw: stdout.slice(0, 2_000) };
+}
+
+export async function traceroute(
+  host: string,
+  _opts?: TracerouteOptions,
+): Promise<TracerouteResult> {
+  assertHost(host);
+  const isWin = process.platform === "win32";
+  const cmd = isWin ? "tracert" : "traceroute";
+  const args = isWin
+    ? ["-d", "-w", "2000", "-h", "15", host]
+    : ["-q", "1", "-w", "2", "-m", "15", "-n", host];
+
+  let raw = "";
+  try {
+    const { stdout, stderr } = await execFileAsync(cmd, args, {
+      timeout: 20_000,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+    raw = (stdout || "") + (stderr || "");
+  } catch (err: unknown) {
+    const maybe = err as { stdout?: string; stderr?: string };
+    raw = (maybe?.stdout || "") + (maybe?.stderr || "");
+  }
+
+  const hops = isWin ? parseWinTraceroute(raw) : parsePosixTraceroute(raw);
+  return { host, hops, raw: raw.slice(0, 2_048) };
+}
+
+function parsePosixTraceroute(raw: string): Hop[] {
+  const hops: Hop[] = [];
+  const lines = raw.split(/\r?\n/);
+  for (const line of lines) {
+    // Example lines:
+    //   " 1  192.168.1.1  1.234 ms"
+    //   " 2  * * *"
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const index = parseInt(m[1]!, 10);
+    const rest = m[2]!.trim();
+    if (/^\*(\s+\*)*$/.test(rest) || rest === "*") {
+      hops.push({ index, host: null, rttMs: null });
+      continue;
+    }
+    const ipMatch = rest.match(/((?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*)/);
+    const rttMatch = rest.match(/([\d.]+)\s*ms/);
+    hops.push({
+      index,
+      host: ipMatch ? ipMatch[1]! : null,
+      rttMs: rttMatch ? parseFloat(rttMatch[1]!) : null,
+    });
+  }
+  return hops;
+}
+
+function parseWinTraceroute(raw: string): Hop[] {
+  const hops: Hop[] = [];
+  const lines = raw.split(/\r?\n/);
+  for (const line of lines) {
+    // Windows tracert lines look like:
+    //   "  1    <1 ms    <1 ms    <1 ms  192.168.1.1"
+    //   "  2     *        *        *     Request timed out."
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const index = parseInt(m[1]!, 10);
+    const rest = m[2]!;
+    if (/Request timed out/i.test(rest) || /^(?:\s*\*\s*)+$/.test(rest.trim())) {
+      hops.push({ index, host: null, rttMs: null });
+      continue;
+    }
+    const ipMatch = rest.match(/((?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*)\s*$/);
+    // Collect RTT samples like "<1 ms", "12 ms", "123 ms"
+    const rttSamples: number[] = [];
+    const rttRegex = /(<\s*\d+|\d+)\s*ms/g;
+    let rm: RegExpExecArray | null;
+    while ((rm = rttRegex.exec(rest)) !== null) {
+      const token = rm[1]!.replace(/</, "").trim();
+      const v = parseFloat(token);
+      if (!Number.isNaN(v)) rttSamples.push(v);
+    }
+    const rttMs = rttSamples.length
+      ? rttSamples.reduce((a, b) => a + b, 0) / rttSamples.length
+      : null;
+    hops.push({
+      index,
+      host: ipMatch ? ipMatch[1]! : null,
+      rttMs,
+    });
+  }
+  return hops;
+}
+
+export async function dnsLookup(hostname: string): Promise<DnsLookupResult> {
+  assertHostname(hostname);
+
+  const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> => {
+    return new Promise<T>((resolvePromise, rejectPromise) => {
+      const timer = setTimeout(() => rejectPromise(new Error("dns timeout")), ms);
+      p.then(
+        (v) => {
+          clearTimeout(timer);
+          resolvePromise(v);
+        },
+        (e) => {
+          clearTimeout(timer);
+          rejectPromise(e);
+        },
+      );
+    });
+  };
+
+  const safe = async <T>(p: Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await withTimeout(p, 5_000);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code === "ENOTFOUND" || code === "ENODATA") {
+        return fallback;
+      }
+      throw err;
+    }
+  };
+
+  const [a, aaaa, cnameArr] = await Promise.all([
+    safe<string[]>(resolve4(hostname), []),
+    safe<string[]>(resolve6(hostname), []),
+    safe<string[]>(resolveCname(hostname), []),
+  ]);
+
+  return {
+    hostname,
+    a,
+    aaaa,
+    cname: cnameArr.length > 0 ? cnameArr[0]! : null,
+  };
 }
