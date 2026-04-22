@@ -32,6 +32,46 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("usb:list") as Promise<{ port: number; host: string; busId: string }[]>,
   },
 
+  net: {
+    ping: (host: string) =>
+      ipcRenderer.invoke("net:ping", host) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          host: string;
+          alive: boolean;
+          avgRttMs: number | null;
+          lossPct: number;
+          raw: string;
+        };
+      }>,
+
+    interfaces: () =>
+      ipcRenderer.invoke("net:interfaces") as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          name: string;
+          mac: string;
+          up: boolean;
+          internal: boolean;
+          addresses: { address: string; cidr: string | null; family: "IPv4" | "IPv6" }[];
+        }[];
+      }>,
+
+    resolveRoute: (destination: string) =>
+      ipcRenderer.invoke("net:resolveRoute", destination) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          destination: string;
+          iface: string | null;
+          gateway: string | null;
+          raw: string;
+        };
+      }>,
+  },
+
   app: {
     getVersion: () =>
       ipcRenderer.invoke("app:version") as Promise<string>,

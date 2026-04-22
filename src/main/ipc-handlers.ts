@@ -3,19 +3,23 @@
  * Called once from the main process after the app is ready.
  *
  * Channels (must match preload/index.ts):
- *   vpn:connect     — start WireGuard tunnel
- *   vpn:disconnect  — stop WireGuard tunnel
- *   vpn:status      — check tunnel status
- *   usb:attach      — attach a remote USB device via USB/IP
- *   usb:detach      — detach an attached USB device
- *   usb:list        — list currently attached devices
- *   app:version     — get app version
- *   app:platform    — get OS platform
+ *   vpn:connect       — start WireGuard tunnel
+ *   vpn:disconnect    — stop WireGuard tunnel
+ *   vpn:status        — check tunnel status
+ *   usb:attach        — attach a remote USB device via USB/IP
+ *   usb:detach        — detach an attached USB device
+ *   usb:list          — list currently attached devices
+ *   net:ping          — ICMP reachability probe (LAN-route diagnostics)
+ *   net:interfaces    — enumerate local NICs
+ *   net:resolveRoute  — which local iface egresses packets to an IP
+ *   app:version       — get app version
+ *   app:platform      — get OS platform
  */
 
 import { ipcMain, app } from "electron";
 import { vpnConnect, vpnDisconnect, vpnStatus } from "./vpn-manager";
 import { usbAttach, usbDetach, usbList } from "./usb-manager";
+import { ping, interfaces, resolveRoute } from "./net-diag-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
 
@@ -84,6 +88,35 @@ export function registerIpcHandlers(): void {
       return await usbList();
     } catch {
       return [];
+    }
+  });
+
+  ipcMain.handle("net:ping", async (event, host: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await ping(host);
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("net:interfaces", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      return { ok: true, result: interfaces() };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("net:resolveRoute", async (event, destination: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await resolveRoute(destination);
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
 
