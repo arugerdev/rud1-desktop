@@ -93,6 +93,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
           cname: string | null;
         };
       }>,
+
+    publicIp: () =>
+      ipcRenderer.invoke("net:publicIp") as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          ipv4: string | null;
+          ipv6: string | null;
+          source: string;
+        };
+      }>,
+
+    portCheck: (opts: { host: string; port: number; timeoutMs?: number }) =>
+      ipcRenderer.invoke("net:portCheck", opts) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          open: boolean;
+          errorCode: string | null;
+          latencyMs: number | null;
+        };
+      }>,
   },
 
   app: {

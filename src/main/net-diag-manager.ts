@@ -13,11 +13,15 @@
  *   resolveRoute(ip)   — which local interface would egress packets to <ip>
  *   traceroute(host)   — hop-by-hop path with RTT per hop (max 15 hops)
  *   dnsLookup(host)    — A / AAAA / CNAME records via dns/promises
+ *   publicIp()         — detect operator's public IPv4 / IPv6 via ipify
+ *   portCheck(opts)    — TCP connect probe with timeout + latency
  */
 
 import { execFile } from "child_process";
 import { promisify } from "util";
 import os from "os";
+import net from "net";
+import https from "https";
 import { resolve4, resolve6, resolveCname } from "dns/promises";
 
 const execFileAsync = promisify(execFile);
@@ -75,6 +79,24 @@ export interface DnsLookupResult {
   a: string[];
   aaaa: string[];
   cname: string | null;
+}
+
+export interface PublicIpResult {
+  ipv4: string | null;
+  ipv6: string | null;
+  source: string;
+}
+
+export interface PortCheckOptions {
+  host: string;
+  port: number;
+  timeoutMs?: number;
+}
+
+export interface PortCheckResult {
+  open: boolean;
+  errorCode: string | null;
+  latencyMs: number | null;
 }
 
 function assertHost(host: string): void {
@@ -364,4 +386,165 @@ export async function dnsLookup(hostname: string): Promise<DnsLookupResult> {
     aaaa,
     cname: cnameArr.length > 0 ? cnameArr[0]! : null,
   };
+}
+
+/**
+ * Fetch the operator machine's public IPv4 and IPv6 addresses via ipify.
+ *
+ * Two parallel HTTPS GETs are issued. Each is independently raced against a
+ * 5s timeout; a failure in one endpoint does not invalidate the other. If
+ * api64.ipify.org returns an IPv4 (v4-only network) we treat that as "no
+ * IPv6" by detecting the absence of ':' in the returned address.
+ *
+ * Certificate validation is intentionally left enabled (https default).
+ * Never throws — both failures yield `{ipv4:null, ipv6:null, source:""}`.
+ */
+export async function publicIp(): Promise<PublicIpResult> {
+  const fetchJsonIp = (url: string): Promise<string | null> =>
+    new Promise<string | null>((resolvePromise) => {
+      let settled = false;
+      const finish = (value: string | null) => {
+        if (settled) return;
+        settled = true;
+        resolvePromise(value);
+      };
+      const timer = setTimeout(() => finish(null), 5_000);
+      try {
+        const req = https.get(url, { timeout: 5_000 }, (res) => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            res.resume();
+            clearTimeout(timer);
+            finish(null);
+            return;
+          }
+          let data = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            data += chunk;
+            // Guard against absurd payloads (ipify returns ~50 bytes).
+            if (data.length > 4_096) {
+              res.destroy();
+              clearTimeout(timer);
+              finish(null);
+            }
+          });
+          res.on("end", () => {
+            clearTimeout(timer);
+            try {
+              const parsed = JSON.parse(data) as { ip?: unknown };
+              if (typeof parsed.ip === "string" && parsed.ip.length > 0) {
+                finish(parsed.ip);
+              } else {
+                finish(null);
+              }
+            } catch {
+              finish(null);
+            }
+          });
+          res.on("error", () => {
+            clearTimeout(timer);
+            finish(null);
+          });
+        });
+        req.on("timeout", () => {
+          req.destroy();
+          clearTimeout(timer);
+          finish(null);
+        });
+        req.on("error", () => {
+          clearTimeout(timer);
+          finish(null);
+        });
+      } catch {
+        clearTimeout(timer);
+        finish(null);
+      }
+    });
+
+  const [v4Ip, v64Ip] = await Promise.all([
+    fetchJsonIp("https://api.ipify.org?format=json"),
+    fetchJsonIp("https://api64.ipify.org?format=json"),
+  ]);
+
+  // api64 may return an IPv4 on v4-only networks; only count it as IPv6 if
+  // the returned address actually contains a ':'.
+  const ipv6 = v64Ip && v64Ip.includes(":") ? v64Ip : null;
+  const ipv4 = v4Ip ?? null;
+
+  const sources: string[] = [];
+  if (ipv4) sources.push("api.ipify.org");
+  if (ipv6) sources.push("api64.ipify.org");
+
+  return {
+    ipv4,
+    ipv6,
+    source: sources.join(","),
+  };
+}
+
+/**
+ * TCP connect probe. Returns whether a given host:port accepts a connection
+ * from this machine, with a measured latency to first ACK.
+ *
+ * Note: this is TCP-only. WireGuard runs over UDP/51820 so this bridge
+ * cannot directly verify WG reachability — but it is useful for probing
+ * usbipd (TCP/3240) or the firmware HTTP API (:7070) through the tunnel.
+ */
+export async function portCheck(opts: PortCheckOptions): Promise<PortCheckResult> {
+  if (!opts || typeof opts !== "object") {
+    throw new Error("invalid options");
+  }
+  const { host, port } = opts;
+  assertHost(host);
+  if (
+    typeof port !== "number" ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535
+  ) {
+    throw new Error("invalid port");
+  }
+  const rawTimeout =
+    typeof opts.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)
+      ? opts.timeoutMs
+      : 4_000;
+  const timeoutMs = Math.max(500, Math.min(20_000, Math.floor(rawTimeout)));
+
+  return new Promise<PortCheckResult>((resolvePromise) => {
+    const started = Date.now();
+    let settled = false;
+    const socket = net.createConnection({ host, port });
+    socket.setTimeout(timeoutMs);
+
+    const finish = (result: PortCheckResult) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      resolvePromise(result);
+    };
+
+    socket.once("connect", () => {
+      finish({
+        open: true,
+        errorCode: null,
+        latencyMs: Date.now() - started,
+      });
+    });
+
+    socket.once("timeout", () => {
+      finish({ open: false, errorCode: "ETIMEDOUT", latencyMs: null });
+    });
+
+    socket.once("error", (err: NodeJS.ErrnoException) => {
+      finish({
+        open: false,
+        errorCode: err.code ?? "EUNKNOWN",
+        latencyMs: null,
+      });
+    });
+  });
 }

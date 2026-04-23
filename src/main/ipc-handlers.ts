@@ -14,6 +14,8 @@
  *   net:resolveRoute  — which local iface egresses packets to an IP
  *   net:traceroute    — hop-by-hop path with RTT per hop
  *   net:dnsLookup     — A / AAAA / CNAME records for a hostname
+ *   net:publicIp      — detect operator's public IPv4 / IPv6 via ipify
+ *   net:portCheck     — TCP connect probe with timeout + latency
  *   app:version       — get app version
  *   app:platform      — get OS platform
  */
@@ -27,6 +29,8 @@ import {
   resolveRoute,
   traceroute,
   dnsLookup,
+  publicIp,
+  portCheck,
 } from "./net-diag-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
@@ -147,6 +151,35 @@ export function registerIpcHandlers(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  ipcMain.handle("net:publicIp", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await publicIp();
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle(
+    "net:portCheck",
+    async (
+      event,
+      opts: { host: string; port: number; timeoutMs?: number },
+    ) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const result = await portCheck(opts);
+        return { ok: true, result };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
 
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:platform", () => process.platform);
