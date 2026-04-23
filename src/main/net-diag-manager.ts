@@ -548,3 +548,24 @@ export async function portCheck(opts: PortCheckOptions): Promise<PortCheckResult
     });
   });
 }
+
+/**
+ * Test-only hatch — exposes internal helpers and regexes so the unit tests
+ * can exercise them directly without spinning up real OS probes. Keep this
+ * export narrow: only helpers that are pure / near-pure belong here.
+ * Production callers must use the named public exports above.
+ */
+export const __test = {
+  assertHost,
+  assertHostname,
+  assertIp,
+  parsePing,
+  parsePosixTraceroute,
+  parseWinTraceroute,
+  parseLinuxRoute,
+  parseWinRoute,
+  HOST_REGEX,
+  HOSTNAME_REGEX,
+  IP_REGEX,
+  IPV6_REGEX,
+};
