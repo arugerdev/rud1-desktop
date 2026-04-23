@@ -173,6 +173,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
           hints: string[];
         };
       }>,
+
+    // DF-flagged progressive ping bisect to discover effective path MTU to
+    // `host`. Useful for spotting WG-over-WG / PPPoE MTU mismatches that
+    // present as "handshake works, big transfers stall". Bounded by
+    // `timeoutMs` (outer budget, default 15000ms) with at most 8 bisect
+    // iterations. Returns `mtu: null` on unsupported platforms, full-path
+    // failure, or timeout — partial `attempts` are always surfaced.
+    mtuProbe: (args: {
+      host: string;
+      opts?: { start?: number; min?: number; timeoutMs?: number };
+    }) =>
+      ipcRenderer.invoke("diag:mtuProbe", args) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          host: string;
+          mtu: number | null;
+          attempts: { size: number; ok: boolean; errorMsg?: string }[];
+          durationMs: number;
+          platform: "linux" | "darwin" | "win32" | "other";
+          errorMsg?: string;
+        };
+      }>,
   },
 
   system: {

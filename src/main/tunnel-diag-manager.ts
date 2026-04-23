@@ -24,6 +24,10 @@ import { ping, portCheck, validateHost } from "./net-diag-manager";
 
 const execFileAsync = promisify(execFile);
 
+// IPv4 header (20) + ICMP header (8) = 28 bytes of overhead that the OS
+// adds on top of the `-s <payloadSize>` / `-l <payloadSize>` argument.
+const ICMP_IP_OVERHEAD = 28;
+
 const TUNNEL_NAME_REGEX = /^[a-zA-Z0-9_-]{1,32}$/;
 const WG_WINDOWS_PATH = "C:\\Program Files\\WireGuard\\wg.exe";
 
@@ -418,5 +422,263 @@ export async function tunnelHealth(
     tcpProbe: tcpResult,
     verdict,
     hints,
+  };
+}
+
+// ─── mtuProbe ────────────────────────────────────────────────────────────────
+
+export type MtuProbePlatform = "linux" | "darwin" | "win32" | "other";
+
+export interface MtuProbeOptions {
+  start?: number;
+  min?: number;
+  /** Outer budget for the whole bisect, in ms. */
+  timeoutMs?: number;
+}
+
+export interface MtuProbeAttempt {
+  size: number;
+  ok: boolean;
+  errorMsg?: string;
+}
+
+export interface MtuProbeResult {
+  host: string;
+  /** Highest confirmed-passing size, or null if even `min` failed / platform unsupported. */
+  mtu: number | null;
+  attempts: MtuProbeAttempt[];
+  durationMs: number;
+  platform: MtuProbePlatform;
+  /** Populated on platform=other or when the outer timeout triggers. */
+  errorMsg?: string;
+}
+
+function detectPlatform(): MtuProbePlatform {
+  switch (process.platform) {
+    case "linux":
+      return "linux";
+    case "darwin":
+      return "darwin";
+    case "win32":
+      return "win32";
+    default:
+      return "other";
+  }
+}
+
+/**
+ * Cross-platform indicators that the packet was dropped because DF was set
+ * AND the payload exceeded a link's MTU on the path. We check these *in
+ * addition* to exit code — some platforms return 0 even when the packet
+ * was fragmented-needed-and-DF-set.
+ */
+const MTU_FAIL_PATTERNS = [
+  /message too long/i,
+  /frag(?:mentation)?\s*needed/i,
+  /packet needs to be fragmented/i,
+  /needs? to be fragmented/i,
+  /pmtu/i,
+];
+
+function looksLikeMtuFailure(output: string): boolean {
+  return MTU_FAIL_PATTERNS.some((re) => re.test(output));
+}
+
+interface PingOneShotArgs {
+  host: string;
+  size: number;
+  platform: MtuProbePlatform;
+  signal: AbortSignal;
+}
+
+/**
+ * Issue a single DF-flagged ping with the requested *total* IP packet size.
+ * Resolves `{ok: true}` if the packet made it through, `{ok: false, errorMsg}`
+ * if the path dropped it (MTU too small), the binary exited non-zero, or the
+ * outer AbortController fired.
+ */
+async function pingOneShot(args: PingOneShotArgs): Promise<{ ok: boolean; errorMsg?: string }> {
+  const { host, size, platform, signal } = args;
+  const payload = size - ICMP_IP_OVERHEAD;
+  if (payload <= 0) {
+    return { ok: false, errorMsg: `size ${size} below ICMP overhead` };
+  }
+
+  let cmd: string;
+  let argv: string[];
+  switch (platform) {
+    case "linux":
+      cmd = "ping";
+      argv = ["-M", "do", "-c", "1", "-W", "2", "-s", String(payload), host];
+      break;
+    case "darwin":
+      cmd = "ping";
+      argv = ["-D", "-c", "1", "-t", "2", "-s", String(payload), host];
+      break;
+    case "win32":
+      cmd = "ping";
+      argv = ["-f", "-n", "1", "-w", "2000", "-l", String(payload), host];
+      break;
+    default:
+      return { ok: false, errorMsg: "platform not supported" };
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync(cmd, argv, {
+      timeout: 4_000,
+      windowsHide: true,
+      signal,
+    });
+    const out = (stdout || "") + (stderr || "");
+    if (looksLikeMtuFailure(out)) {
+      return { ok: false, errorMsg: "mtu exceeded (df set)" };
+    }
+    // Windows `ping -f` can exit 0 even when every probe was dropped — rely
+    // on "Received = 0" / "Lost = 1 (100% loss)" as a secondary signal.
+    if (platform === "win32") {
+      const lostAll = /Lost\s*=\s*1\s*\(100%\s*loss\)/i.test(out);
+      const receivedZero = /Received\s*=\s*0/i.test(out);
+      if (lostAll || receivedZero) {
+        return { ok: false, errorMsg: "no reply (likely mtu exceeded)" };
+      }
+    }
+    return { ok: true };
+  } catch (err: unknown) {
+    if (signal.aborted) {
+      return { ok: false, errorMsg: "aborted" };
+    }
+    const e = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: string | number };
+    const combined = (e?.stdout || "") + (e?.stderr || "");
+    if (looksLikeMtuFailure(combined)) {
+      return { ok: false, errorMsg: "mtu exceeded (df set)" };
+    }
+    if (e?.code === "ENOENT") {
+      return { ok: false, errorMsg: "ping binary not found" };
+    }
+    const msg = combined.trim() || (err instanceof Error ? err.message : String(err));
+    return { ok: false, errorMsg: msg.slice(0, 200) };
+  }
+}
+
+/**
+ * Discover the effective MTU to `host` by DF-flagged ping bisection between
+ * `min` and `start`. Returns the highest size that produced a reply; null if
+ * even `min` failed, the platform is unsupported, or the outer budget ran out
+ * before anything was confirmed.
+ *
+ * Strategy:
+ *   1. Probe `start`. If it passes, we're done — that's the MTU.
+ *   2. Otherwise probe `min`. If that also fails, give up (mtu=null).
+ *   3. Bisect: probe (lo+hi)/2 where lo is the highest known-pass and hi the
+ *      lowest known-fail. Each iteration halves the window. Capped at 8
+ *      iterations — sufficient to narrow 576..1500 down to ~4-byte precision.
+ */
+export async function mtuProbe(
+  host: string,
+  opts?: MtuProbeOptions,
+): Promise<MtuProbeResult> {
+  const started = Date.now();
+  const platform = detectPlatform();
+
+  if (!validateHost(host)) {
+    throw new Error("invalid host");
+  }
+
+  // Defaults + bounds-sanity. We accept the caller's `start`/`min` only if
+  // they're finite integers within a sensible IPv4 MTU envelope.
+  const rawStart = typeof opts?.start === "number" && Number.isFinite(opts.start) ? Math.floor(opts.start) : 1500;
+  const rawMin = typeof opts?.min === "number" && Number.isFinite(opts.min) ? Math.floor(opts.min) : 576;
+  const rawTimeout =
+    typeof opts?.timeoutMs === "number" && Number.isFinite(opts.timeoutMs) ? Math.floor(opts.timeoutMs) : 15_000;
+
+  const start = Math.max(ICMP_IP_OVERHEAD + 1, Math.min(9_000, rawStart));
+  const min = Math.max(ICMP_IP_OVERHEAD + 1, Math.min(start, rawMin));
+  const timeoutMs = Math.max(1_000, Math.min(60_000, rawTimeout));
+
+  // Simulation mode — deterministic output for UI tests & CI, never shells out.
+  if (process.env.RUD1_SIMULATE === "1") {
+    return {
+      host,
+      mtu: 1420,
+      attempts: [
+        { size: 1500, ok: false, errorMsg: "mtu exceeded (df set)" },
+        { size: 1420, ok: true },
+      ],
+      durationMs: 12,
+      platform: platform === "win32" ? "win32" : "linux",
+    };
+  }
+
+  if (platform === "other") {
+    return {
+      host,
+      mtu: null,
+      attempts: [],
+      durationMs: Date.now() - started,
+      platform: "other",
+      errorMsg: "platform not supported",
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const attempts: MtuProbeAttempt[] = [];
+  let mtu: number | null = null;
+  let outerErr: string | undefined;
+
+  const probe = async (size: number): Promise<boolean> => {
+    const clamped = Math.max(min, Math.min(start, Math.floor(size)));
+    const r = await pingOneShot({ host, size: clamped, platform, signal: controller.signal });
+    attempts.push(r.ok ? { size: clamped, ok: true } : { size: clamped, ok: false, errorMsg: r.errorMsg });
+    return r.ok;
+  };
+
+  try {
+    // Step 1 — try the upper bound first. Common case: path MTU == link MTU
+    // and we finish in a single ping.
+    if (await probe(start)) {
+      mtu = start;
+    } else if (controller.signal.aborted) {
+      outerErr = "timeout";
+    } else {
+      // Step 2 — floor check. If the minimum viable MTU also fails, the link
+      // is broken at layers below IP; we cannot recover a number.
+      const minOk = await probe(min);
+      if (!minOk) {
+        mtu = null;
+      } else {
+        // Step 3 — bisect between the known-good floor and the known-bad ceiling.
+        mtu = min;
+        let lo = min;
+        let hi = start;
+        let iterations = 0;
+        const MAX_ITER = 8;
+        while (iterations < MAX_ITER && hi - lo > 1 && !controller.signal.aborted) {
+          const mid = Math.floor((lo + hi) / 2);
+          if (mid === lo || mid === hi) break;
+          const ok = await probe(mid);
+          if (ok) {
+            mtu = mid;
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+          iterations++;
+        }
+        if (controller.signal.aborted) outerErr = "timeout";
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return {
+    host,
+    mtu,
+    attempts,
+    durationMs: Date.now() - started,
+    platform,
+    ...(outerErr ? { errorMsg: outerErr } : {}),
   };
 }

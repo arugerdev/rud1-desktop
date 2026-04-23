@@ -18,6 +18,7 @@
  *   net:portCheck     — TCP connect probe with timeout + latency
  *   diag:wgStatus     — parsed `wg show` output (tunnels + peers)
  *   diag:tunnelHealth — combined WG/public ping + TCP probe + verdict
+ *   diag:mtuProbe     — DF-flag bisect ping to discover path MTU
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
@@ -35,7 +36,7 @@ import {
   publicIp,
   portCheck,
 } from "./net-diag-manager";
-import { wgStatus, tunnelHealth } from "./tunnel-diag-manager";
+import { wgStatus, tunnelHealth, mtuProbe } from "./tunnel-diag-manager";
 import { getStats as getSystemStats } from "./system-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
@@ -205,6 +206,28 @@ export function registerIpcHandlers(): void {
       if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
       try {
         const result = await tunnelHealth(opts);
+        return { ok: true, result };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "diag:mtuProbe",
+    async (
+      event,
+      args: { host: string; opts?: { start?: number; min?: number; timeoutMs?: number } },
+    ) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        if (!args || typeof args !== "object" || typeof args.host !== "string") {
+          return { ok: false, error: "invalid args" };
+        }
+        const result = await mtuProbe(args.host, args.opts);
         return { ok: true, result };
       } catch (err) {
         return {
