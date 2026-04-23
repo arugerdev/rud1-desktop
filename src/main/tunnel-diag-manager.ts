@@ -1381,3 +1381,14 @@ export async function exportReport(
     diagnosis,
   };
 }
+
+// ---- internal exports for tests ---------------------------------------------
+// Not part of the public surface; underscore-prefixed to signal "do not touch
+// from feature code". Keeps test coverage of the private path-traversal guard
+// + snapshot extractor without leaking those helpers as public API.
+export const __test = {
+  REPORT_FILENAME_REGEX,
+  resolveDiagDir,
+  validateReportPath,
+  extractSnapshot,
+};
