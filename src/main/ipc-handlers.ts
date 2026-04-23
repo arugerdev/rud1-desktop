@@ -16,6 +16,7 @@
  *   net:dnsLookup     — A / AAAA / CNAME records for a hostname
  *   net:publicIp      — detect operator's public IPv4 / IPv6 via ipify
  *   net:portCheck     — TCP connect probe with timeout + latency
+ *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
  */
@@ -32,6 +33,7 @@ import {
   publicIp,
   portCheck,
 } from "./net-diag-manager";
+import { getStats as getSystemStats } from "./system-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
 
@@ -180,6 +182,16 @@ export function registerIpcHandlers(): void {
       }
     },
   );
+
+  ipcMain.handle("system:stats", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await getSystemStats();
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:platform", () => process.platform);

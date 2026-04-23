@@ -117,6 +117,50 @@ contextBridge.exposeInMainWorld("electronAPI", {
       }>,
   },
 
+  system: {
+    // Snapshot of the operator's machine — dashboards pair this with the
+    // Pi's reported stats so the user can diff "which side is sick" at a
+    // glance. Never throws; on failure the renderer sees `ok: false`.
+    getStats: () =>
+      ipcRenderer.invoke("system:stats") as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          hostname: string;
+          platform: NodeJS.Platform;
+          release: string;
+          arch: string;
+          uptimeSec: number;
+          appUptimeSec: number;
+          cpu: {
+            model: string;
+            speedMhz: number;
+            count: number;
+            loadavg: [number, number, number];
+            utilisation: number | null;
+          };
+          memory: {
+            totalBytes: number;
+            freeBytes: number;
+            usedBytes: number;
+            usagePct: number;
+          };
+          interfaces: {
+            name: string;
+            mac: string;
+            up: boolean;
+            internal: boolean;
+            addresses: {
+              family: "IPv4" | "IPv6";
+              address: string;
+              cidr: string | null;
+            }[];
+          }[];
+          capturedAt: string;
+        };
+      }>,
+  },
+
   app: {
     getVersion: () =>
       ipcRenderer.invoke("app:version") as Promise<string>,
