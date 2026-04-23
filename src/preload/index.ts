@@ -452,6 +452,31 @@ contextBridge.exposeInMainWorld("electronAPI", {
         | { ok: true; result: { path: string; deleted: true } }
         | { ok: false; error: string }
       >,
+
+    // Reveal `~/.rud1/diag/` in the OS file explorer (Finder/Explorer/xdg-open).
+    // The directory is mkdir -p'd first so first-run with no reports yet
+    // doesn't fail — the user gets an empty folder instead of an error.
+    openReportsFolder: () =>
+      ipcRenderer.invoke("diag:openReportsFolder") as Promise<
+        | { ok: true; result: { opened: boolean; path: string } }
+        | { ok: false; error: string }
+      >,
+
+    // Copy a report out of `~/.rud1/diag/` to a user-chosen location via the
+    // native "Save As" dialog. Same path-traversal guard as read/delete. The
+    // dialog defaults to `~/Downloads/<defaultFilename or source basename>`.
+    // Three-way result: success, explicit user cancel, or thrown error
+    // (wrapped in the `{ok:false, error}` envelope by the main process).
+    saveReportCopy: (opts: { path: string; defaultFilename?: string }) =>
+      ipcRenderer.invoke("diag:saveReportCopy", opts) as Promise<
+        | {
+            ok: true;
+            result:
+              | { savedPath: string; bytes: number }
+              | { cancelled: true };
+          }
+        | { ok: false; error: string }
+      >,
   },
 
   system: {

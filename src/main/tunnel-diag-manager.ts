@@ -24,7 +24,7 @@ import { createHash } from "crypto";
 import { promises as fsp } from "fs";
 import * as os from "os";
 import * as path from "path";
-import { app } from "electron";
+import { app, shell, dialog, BrowserWindow } from "electron";
 import { ping, portCheck, validateHost } from "./net-diag-manager";
 import { getStats as getSystemStats, type SystemStats } from "./system-manager";
 
@@ -1031,6 +1031,99 @@ export async function deleteReport(reportPath: string): Promise<DeleteReportResu
     throw err;
   }
   return { path: abs, deleted: true };
+}
+
+// ─── openReportsFolder / saveReportCopy ─────────────────────────────────────
+
+/**
+ * Reveal the `~/.rud1/diag/` directory in the operator's OS file explorer
+ * (Finder on macOS, Explorer on Windows, xdg-open on Linux). The directory is
+ * `mkdir -p`'d first so a fresh install with no reports yet doesn't surface
+ * an "ENOENT" error to the user. Electron's `shell.openPath` returns an empty
+ * string on success and an error message on failure — we translate the latter
+ * into a thrown Error so the IPC envelope wraps it uniformly.
+ */
+export async function openReportsFolder(): Promise<{ opened: boolean; path: string }> {
+  const dir = resolveDiagDir();
+  await fsp.mkdir(dir, { recursive: true });
+  const errorMsg = await shell.openPath(dir);
+  if (errorMsg) {
+    throw new Error(errorMsg);
+  }
+  return { opened: true, path: dir };
+}
+
+/**
+ * Copy a report out of `~/.rud1/diag/` to a user-chosen location via the
+ * native "Save As" dialog. Source path is validated with the same guard used
+ * by readReport/deleteReport (path-traversal + filename shape). The dialog
+ * defaults to `~/Downloads/<defaultFilename or source basename>`.
+ *
+ * Return shape:
+ *   - `{savedPath, bytes}` on successful copy.
+ *   - `{cancelled: true}` if the user backs out of the dialog.
+ *   - throws on missing source (`"report not found"`) or any I/O failure; the
+ *     IPC handler wraps the error into `{ok:false, error}`.
+ *
+ * The optional `parentWindow` anchors the dialog as a sheet on macOS; passing
+ * `null` (or omitting it) falls back to a free-floating window, which
+ * `dialog.showSaveDialog` accepts.
+ */
+export async function saveReportCopy(opts: {
+  path: string;
+  defaultFilename?: string;
+  parentWindow?: BrowserWindow | null;
+}): Promise<{ savedPath: string; bytes: number } | { cancelled: true }> {
+  if (!opts || typeof opts !== "object") {
+    throw new Error("invalid args");
+  }
+  // Reuse the iter 11 guard verbatim — keeps validation semantics identical
+  // across read/delete/save.
+  const { abs } = validateReportPath(opts.path);
+
+  // Confirm source exists and capture its size upfront, so we can report a
+  // precise `bytes` value and fail fast with a clear error if it vanished.
+  let sourceBytes: number;
+  try {
+    const st = await fsp.stat(abs);
+    if (!st.isFile()) {
+      throw new Error("report not found");
+    }
+    sourceBytes = st.size;
+  } catch (err: unknown) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === "ENOENT") {
+      throw new Error("report not found");
+    }
+    throw err;
+  }
+
+  const defaultName =
+    typeof opts.defaultFilename === "string" && opts.defaultFilename.length > 0
+      ? opts.defaultFilename
+      : path.basename(abs);
+  const defaultPath = path.join(os.homedir(), "Downloads", defaultName);
+
+  const parent = opts.parentWindow ?? null;
+  // Electron's overloads distinguish between "with parent" and "no parent"
+  // signatures — call each explicitly so TS picks the right one.
+  const dialogOpts = {
+    defaultPath,
+    filters: [
+      { name: "Diagnosis JSON", extensions: ["json"] },
+      { name: "All", extensions: ["*"] },
+    ],
+  };
+  const result = parent
+    ? await dialog.showSaveDialog(parent, dialogOpts)
+    : await dialog.showSaveDialog(dialogOpts);
+
+  if (result.canceled || !result.filePath) {
+    return { cancelled: true };
+  }
+
+  await fsp.copyFile(abs, result.filePath);
+  return { savedPath: result.filePath, bytes: sourceBytes };
 }
 
 export async function exportReport(

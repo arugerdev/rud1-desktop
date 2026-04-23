@@ -24,12 +24,14 @@
  *   diag:listReports  — enumerate previously-written reports under ~/.rud1/diag/
  *   diag:readReport   — read + sha256 + JSON.parse a report (path-traversal guarded)
  *   diag:deleteReport — unlink a report file (path-traversal guarded)
+ *   diag:openReportsFolder — reveal ~/.rud1/diag/ in the OS file explorer
+ *   diag:saveReportCopy    — copy a report to a user-chosen location via Save As dialog
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
  */
 
-import { ipcMain, app } from "electron";
+import { ipcMain, app, BrowserWindow } from "electron";
 import { vpnConnect, vpnDisconnect, vpnStatus } from "./vpn-manager";
 import { usbAttach, usbDetach, usbList } from "./usb-manager";
 import {
@@ -50,6 +52,8 @@ import {
   listReports,
   readReport,
   deleteReport,
+  openReportsFolder,
+  saveReportCopy,
 } from "./tunnel-diag-manager";
 import { getStats as getSystemStats } from "./system-manager";
 
@@ -351,6 +355,44 @@ export function registerIpcHandlers(): void {
       };
     }
   });
+
+  ipcMain.handle("diag:openReportsFolder", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await openReportsFolder();
+      return { ok: true, result };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    "diag:saveReportCopy",
+    async (event, opts: { path: string; defaultFilename?: string }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        // Anchor the native dialog to the invoking window when possible so
+        // macOS renders it as a sheet. `BrowserWindow.fromWebContents` may
+        // return null (e.g. sender is a detached webview) — saveReportCopy
+        // accepts null and falls back to a free-floating dialog.
+        const parentWindow = BrowserWindow.fromWebContents(event.sender);
+        const result = await saveReportCopy({
+          path: opts?.path,
+          defaultFilename: opts?.defaultFilename,
+          parentWindow,
+        });
+        return { ok: true, result };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
 
   ipcMain.handle("system:stats", async (event) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
