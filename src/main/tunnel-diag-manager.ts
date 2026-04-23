@@ -283,6 +283,15 @@ export interface TunnelHealthOptions {
   publicHost: string;
   publicPort: number;
   timeoutMs?: number;
+  /**
+   * When true, and the computed verdict is `degraded` or `broken`, run an
+   * extra MTU bisect probe against `wgHost` and attach the discovered value
+   * (plus a matching hint) to the result. Default: false — keeps the call
+   * cheap and backwards-compatible.
+   */
+  autoMtuProbe?: boolean;
+  /** Outer budget for the auxiliary MTU probe, in ms. Default 12000. */
+  mtuProbeTimeoutMs?: number;
 }
 
 export type PingProbe = { reachable: boolean; rttMs: number | null } | { error: string };
@@ -296,6 +305,12 @@ export interface TunnelHealthResult {
   tcpProbe: TcpProbe;
   verdict: "healthy" | "degraded" | "broken";
   hints: string[];
+  /**
+   * Populated only when `autoMtuProbe` was requested AND the probe ran to
+   * completion with a discovered value. `simulated` is true when the result
+   * came from the RUD1_SIMULATE short-circuit inside `mtuProbe`.
+   */
+  mtu?: { discovered: number; simulated?: boolean };
 }
 
 function toPingProbe(result: { alive: boolean; avgRttMs: number | null }): PingProbe {
@@ -416,12 +431,49 @@ export async function tunnelHealth(
     hints.push("Túnel WG responde correctamente — latencia normal y handshake activo");
   }
 
+  // Optional auxiliary probe: when the caller opted in and the tunnel is
+  // looking sick, run an MTU bisect so the caller gets an actionable value
+  // in a single IPC round-trip. Any failure is caught and surfaced as a
+  // hint — it must never fail the whole tunnelHealth call.
+  let mtuInfo: { discovered: number; simulated?: boolean } | undefined;
+  if (
+    opts.autoMtuProbe === true &&
+    (verdict === "degraded" || verdict === "broken") &&
+    typeof wgHost === "string" &&
+    wgHost.length > 0
+  ) {
+    const rawMtuTimeout =
+      typeof opts.mtuProbeTimeoutMs === "number" &&
+      Number.isFinite(opts.mtuProbeTimeoutMs)
+        ? Math.floor(opts.mtuProbeTimeoutMs)
+        : 12_000;
+    try {
+      const probeRes = await mtuProbe(wgHost, { timeoutMs: rawMtuTimeout });
+      if (probeRes && typeof probeRes.mtu === "number" && probeRes.mtu > 0) {
+        const simulated = process.env.RUD1_SIMULATE === "1" ? true : undefined;
+        mtuInfo = simulated
+          ? { discovered: probeRes.mtu, simulated: true }
+          : { discovered: probeRes.mtu };
+        hints.push(
+          `MTU sugerido para el túnel: ${probeRes.mtu} (añade MTU = ${probeRes.mtu} en la sección [Interface] del .conf)`,
+        );
+      } else {
+        const why = probeRes?.errorMsg ? `: ${probeRes.errorMsg}` : "";
+        hints.push(`Auto-MTU probe no pudo determinar un valor${why}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      hints.push(`Auto-MTU probe falló: ${msg}`);
+    }
+  }
+
   return {
     wgPing: wgPingResult,
     publicPing: publicPingResult,
     tcpProbe: tcpResult,
     verdict,
     hints,
+    ...(mtuInfo ? { mtu: mtuInfo } : {}),
   };
 }
 

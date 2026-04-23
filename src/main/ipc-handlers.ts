@@ -201,7 +201,14 @@ export function registerIpcHandlers(): void {
     "diag:tunnelHealth",
     async (
       event,
-      opts: { wgHost: string; publicHost: string; publicPort: number; timeoutMs?: number },
+      opts: {
+        wgHost: string;
+        publicHost: string;
+        publicPort: number;
+        timeoutMs?: number;
+        autoMtuProbe?: boolean;
+        mtuProbeTimeoutMs?: number;
+      },
     ) => {
       if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
       try {

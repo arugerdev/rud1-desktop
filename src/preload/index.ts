@@ -155,6 +155,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       publicHost: string;
       publicPort: number;
       timeoutMs?: number;
+      /** Opt-in: run MTU bisect when verdict is degraded/broken. */
+      autoMtuProbe?: boolean;
+      /** Outer budget for the auxiliary MTU probe (default 12000ms). */
+      mtuProbeTimeoutMs?: number;
     }) =>
       ipcRenderer.invoke("diag:tunnelHealth", opts) as Promise<{
         ok: boolean;
@@ -171,6 +175,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
             | { error: string };
           verdict: "healthy" | "degraded" | "broken";
           hints: string[];
+          mtu?: { discovered: number; simulated?: boolean };
         };
       }>,
 
