@@ -486,11 +486,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     // are always "newer minus older" (i.e. `b - a`) and individual fields
     // fall back to `null` when either side's value is missing. Throws
     // `"report not parseable"` if either file isn't valid JSON.
-    // Opt-in periodic snapshotter. Persists `{enabled, intervalMs, opts}` to
-    // `~/.rud1/diag/autosnapshot.json` so the schedule survives app restarts.
-    // Minimum interval is clamped to 5 minutes in the main process — passing
-    // anything smaller gets silently raised to 300_000 ms.
-    // `runNow` triggers an immediate snapshot without altering the schedule.
+    // Opt-in periodic snapshotter. Persists `{enabled, intervalMs, opts, history}`
+    // to `~/.rud1/diag/autosnapshot.json` so the schedule + run history
+    // survive app restarts. Interval is clamped server-side: minimum 5 min
+    // (300_000 ms), maximum 24 h (86_400_000 ms). Out-of-range values are
+    // silently coerced rather than rejected.
+    // `runNow` triggers an immediate snapshot without altering the schedule;
+    // it returns `{ok:false, error:"already running", result:<status>}` when
+    // a scheduled (or other manual) run is already in flight.
+    // `history` is a rolling ring buffer of the last 20 runs (success + error)
+    // for the renderer to draw a timeline.
     autoSnapshotStatus: () =>
       ipcRenderer.invoke("diag:autoSnapshotStatus") as Promise<
         | {
@@ -510,6 +515,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
               lastStatus?: "ok" | "error";
               lastError?: string;
               lastPath?: string;
+              history?: {
+                startedAt: string;
+                finishedAt: string;
+                status: "success" | "error";
+                durationMs: number;
+                path?: string;
+                error?: string;
+              }[];
               nextRunAt: string | null;
               running: boolean;
             };
@@ -541,6 +554,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
               lastStatus?: "ok" | "error";
               lastError?: string;
               lastPath?: string;
+              history?: {
+                startedAt: string;
+                finishedAt: string;
+                status: "success" | "error";
+                durationMs: number;
+                path?: string;
+                error?: string;
+              }[];
             };
           }
         | { ok: false; error: string }
@@ -559,9 +580,39 @@ contextBridge.exposeInMainWorld("electronAPI", {
               lastStatus?: "ok" | "error";
               lastError?: string;
               lastPath?: string;
+              history?: {
+                startedAt: string;
+                finishedAt: string;
+                status: "success" | "error";
+                durationMs: number;
+                path?: string;
+                error?: string;
+              }[];
             };
           }
-        | { ok: false; error: string }
+        | {
+            ok: false;
+            error: string;
+            // Present when error === "already running"; absent on transport errors.
+            result?: {
+              enabled: boolean;
+              intervalMs: number;
+              nextRunAt: string | null;
+              running: boolean;
+              lastRunAt?: string;
+              lastStatus?: "ok" | "error";
+              lastError?: string;
+              lastPath?: string;
+              history?: {
+                startedAt: string;
+                finishedAt: string;
+                status: "success" | "error";
+                durationMs: number;
+                path?: string;
+                error?: string;
+              }[];
+            };
+          }
       >,
 
     compareReports: (args: { pathA: string; pathB: string }) =>

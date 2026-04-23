@@ -470,8 +470,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("diag:autoSnapshotRunNow", async (event) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     try {
-      const result = await triggerAutoSnapshotNow();
-      return { ok: true, result };
+      // The manager already returns an envelope: success carries the new
+      // status; "already running" is a soft failure that includes the current
+      // status so the renderer can still refresh its view without a separate
+      // round-trip.
+      return await triggerAutoSnapshotNow();
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
