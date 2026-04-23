@@ -27,6 +27,9 @@
  *   diag:openReportsFolder — reveal ~/.rud1/diag/ in the OS file explorer
  *   diag:saveReportCopy    — copy a report to a user-chosen location via Save As dialog
  *   diag:compareReports    — read two reports and return a structured diff (deltas, swapped flag)
+ *   diag:autoSnapshotStatus    — return the persisted opt-in snapshot config + next-run timestamp
+ *   diag:autoSnapshotConfigure — persist opt-in, interval, and diagnosis options; (re)start timer
+ *   diag:autoSnapshotRunNow    — trigger a snapshot immediately (does not change the schedule)
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
@@ -57,6 +60,11 @@ import {
   saveReportCopy,
   compareReports,
 } from "./tunnel-diag-manager";
+import {
+  configureAutoSnapshot,
+  getAutoSnapshotStatus,
+  triggerAutoSnapshotNow,
+} from "./auto-snapshot-manager";
 import { getStats as getSystemStats } from "./system-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
@@ -419,6 +427,55 @@ export function registerIpcHandlers(): void {
       }
     },
   );
+
+  ipcMain.handle("diag:autoSnapshotStatus", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      return { ok: true, result: getAutoSnapshotStatus() };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle(
+    "diag:autoSnapshotConfigure",
+    async (
+      event,
+      next: {
+        enabled: boolean;
+        intervalMs?: number;
+        opts?: {
+          wgInterface?: string;
+          wgHost?: string;
+          publicHost?: string;
+          publicPort?: number;
+          autoMtuProbe?: boolean;
+          mtuProbeTimeoutMs?: number;
+        };
+      },
+    ) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        if (!next || typeof next !== "object" || typeof next.enabled !== "boolean") {
+          return { ok: false, error: "invalid args" };
+        }
+        const result = await configureAutoSnapshot(next);
+        return { ok: true, result };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle("diag:autoSnapshotRunNow", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await triggerAutoSnapshotNow();
+      return { ok: true, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 
   ipcMain.handle("system:stats", async (event) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };

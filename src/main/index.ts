@@ -14,6 +14,7 @@
 import { app, BrowserWindow, shell, Menu, Tray, nativeImage } from "electron";
 import path from "path";
 import { registerIpcHandlers } from "./ipc-handlers";
+import { resumeAutoSnapshotFromDisk } from "./auto-snapshot-manager";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
@@ -75,6 +76,14 @@ app.whenReady().then(() => {
   registerIpcHandlers();
   mainWindow = createWindow();
   createTray();
+
+  // Resume opt-in periodic diagnosis snapshots if the operator had them
+  // enabled. Fire-and-forget: startup must not block on disk I/O, and
+  // resume failures are recoverable — the next configure() call overwrites
+  // whatever state was persisted.
+  void resumeAutoSnapshotFromDisk().catch(() => {
+    /* ignore — surfaced on next status query */
+  });
 
   // macOS: re-create window when dock icon is clicked
   app.on("activate", () => {

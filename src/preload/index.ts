@@ -486,6 +486,84 @@ contextBridge.exposeInMainWorld("electronAPI", {
     // are always "newer minus older" (i.e. `b - a`) and individual fields
     // fall back to `null` when either side's value is missing. Throws
     // `"report not parseable"` if either file isn't valid JSON.
+    // Opt-in periodic snapshotter. Persists `{enabled, intervalMs, opts}` to
+    // `~/.rud1/diag/autosnapshot.json` so the schedule survives app restarts.
+    // Minimum interval is clamped to 5 minutes in the main process — passing
+    // anything smaller gets silently raised to 300_000 ms.
+    // `runNow` triggers an immediate snapshot without altering the schedule.
+    autoSnapshotStatus: () =>
+      ipcRenderer.invoke("diag:autoSnapshotStatus") as Promise<
+        | {
+            ok: true;
+            result: {
+              enabled: boolean;
+              intervalMs: number;
+              opts?: {
+                wgInterface?: string;
+                wgHost?: string;
+                publicHost?: string;
+                publicPort?: number;
+                autoMtuProbe?: boolean;
+                mtuProbeTimeoutMs?: number;
+              };
+              lastRunAt?: string;
+              lastStatus?: "ok" | "error";
+              lastError?: string;
+              lastPath?: string;
+              nextRunAt: string | null;
+              running: boolean;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    autoSnapshotConfigure: (next: {
+      enabled: boolean;
+      intervalMs?: number;
+      opts?: {
+        wgInterface?: string;
+        wgHost?: string;
+        publicHost?: string;
+        publicPort?: number;
+        autoMtuProbe?: boolean;
+        mtuProbeTimeoutMs?: number;
+      };
+    }) =>
+      ipcRenderer.invoke("diag:autoSnapshotConfigure", next) as Promise<
+        | {
+            ok: true;
+            result: {
+              enabled: boolean;
+              intervalMs: number;
+              nextRunAt: string | null;
+              running: boolean;
+              lastRunAt?: string;
+              lastStatus?: "ok" | "error";
+              lastError?: string;
+              lastPath?: string;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    autoSnapshotRunNow: () =>
+      ipcRenderer.invoke("diag:autoSnapshotRunNow") as Promise<
+        | {
+            ok: true;
+            result: {
+              enabled: boolean;
+              intervalMs: number;
+              nextRunAt: string | null;
+              running: boolean;
+              lastRunAt?: string;
+              lastStatus?: "ok" | "error";
+              lastError?: string;
+              lastPath?: string;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
     compareReports: (args: { pathA: string; pathB: string }) =>
       ipcRenderer.invoke("diag:compareReports", args) as Promise<
         | {
