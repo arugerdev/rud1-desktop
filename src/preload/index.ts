@@ -201,6 +201,107 @@ contextBridge.exposeInMainWorld("electronAPI", {
           errorMsg?: string;
         };
       }>,
+
+    // Consolidated one-call probe: runs wgStatus + tunnelHealth (with
+    // autoMtuProbe defaulted to true) + system.getStats() in parallel using
+    // Promise.allSettled under the hood. Each sub-call is isolated — a
+    // single failure surfaces in its `*Error` field while the other probes
+    // still populate. Outer budget is 30s to accommodate the MTU bisect.
+    // When `publicHost`/`publicPort` are omitted, `wgHost` is reused as the
+    // public host and port 51820 (WG's default listen port) is assumed.
+    fullDiagnosis: (opts?: {
+      wgInterface?: string;
+      wgHost?: string;
+      publicHost?: string;
+      publicPort?: number;
+      autoMtuProbe?: boolean;
+      mtuProbeTimeoutMs?: number;
+    }) =>
+      ipcRenderer.invoke("diag:fullDiagnosis", opts) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          timestamp: number;
+          wgStatus:
+            | {
+                available: true;
+                tunnels: {
+                  interface: string;
+                  publicKey: string | null;
+                  listenPort: number | null;
+                  peers: {
+                    publicKey: string;
+                    endpoint: string | null;
+                    allowedIps: string[];
+                    latestHandshake: number;
+                    transferRx: number;
+                    transferTx: number;
+                    persistentKeepalive: number | null;
+                  }[];
+                }[];
+              }
+            | { available: false; reason: string }
+            | null;
+          wgStatusError: string | null;
+          tunnelHealth:
+            | {
+                wgPing:
+                  | { reachable: boolean; rttMs: number | null }
+                  | { error: string };
+                publicPing:
+                  | { reachable: boolean; rttMs: number | null }
+                  | { error: string };
+                tcpProbe:
+                  | {
+                      open: boolean;
+                      errorCode: string | null;
+                      latencyMs: number | null;
+                    }
+                  | { error: string };
+                verdict: "healthy" | "degraded" | "broken";
+                hints: string[];
+                mtu?: { discovered: number; simulated?: boolean };
+              }
+            | null;
+          tunnelHealthError: string | null;
+          systemStats:
+            | {
+                hostname: string;
+                platform: NodeJS.Platform;
+                release: string;
+                arch: string;
+                uptimeSec: number;
+                appUptimeSec: number;
+                cpu: {
+                  model: string;
+                  speedMhz: number;
+                  count: number;
+                  loadavg: [number, number, number];
+                  utilisation: number | null;
+                };
+                memory: {
+                  totalBytes: number;
+                  freeBytes: number;
+                  usedBytes: number;
+                  usagePct: number;
+                };
+                interfaces: {
+                  name: string;
+                  mac: string;
+                  up: boolean;
+                  internal: boolean;
+                  addresses: {
+                    family: "IPv4" | "IPv6";
+                    address: string;
+                    cidr: string | null;
+                  }[];
+                }[];
+                capturedAt: string;
+              }
+            | null;
+          systemStatsError: string | null;
+        };
+      }>,
   },
 
   system: {

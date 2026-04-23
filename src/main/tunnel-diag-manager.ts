@@ -21,6 +21,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { ping, portCheck, validateHost } from "./net-diag-manager";
+import { getStats as getSystemStats, type SystemStats } from "./system-manager";
 
 const execFileAsync = promisify(execFile);
 
@@ -732,5 +733,138 @@ export async function mtuProbe(
     durationMs: Date.now() - started,
     platform,
     ...(outerErr ? { errorMsg: outerErr } : {}),
+  };
+}
+
+// ─── fullDiagnosis ───────────────────────────────────────────────────────────
+
+/**
+ * Consolidated one-call probe: runs `wgStatus` + `tunnelHealth` (with
+ * `autoMtuProbe` defaulted to true) + `systemStats` in parallel and returns
+ * a single report. Each sub-call is isolated with `Promise.allSettled` so a
+ * single failure never blocks the other signals from arriving.
+ *
+ * Why: the rud1.es dashboard wants to render a "device diagnosis" panel in
+ * one IPC round-trip rather than orchestrating three calls itself. Under the
+ * hood it's still the same probes — we just consolidate the plumbing.
+ *
+ * NOTE on inputs: `tunnelHealth` also needs `publicHost`/`publicPort`; when
+ * callers don't supply them here we reuse `wgHost` as the public host and
+ * default the port to 51820 (WireGuard's well-known listen port). If
+ * `wgHost` isn't provided, `tunnelHealth` will throw and the error surfaces
+ * in `tunnelHealthError` while the other two probes still populate.
+ *
+ * Outer budget: 30s. MTU bisect alone can use up to 15s, plus tunnelHealth's
+ * parallel pings (≤4s each) and the CPU sampling window (250ms) in
+ * systemStats. 30s gives a comfortable headroom.
+ */
+export interface FullDiagnosisOptions {
+  wgInterface?: string;
+  wgHost?: string;
+  publicHost?: string;
+  publicPort?: number;
+  autoMtuProbe?: boolean;
+  mtuProbeTimeoutMs?: number;
+}
+
+export interface FullDiagnosisResult {
+  timestamp: number;
+  wgStatus: WgStatusResult | null;
+  wgStatusError: string | null;
+  tunnelHealth: TunnelHealthResult | null;
+  tunnelHealthError: string | null;
+  systemStats: SystemStats | null;
+  systemStatsError: string | null;
+}
+
+const FULL_DIAGNOSIS_OUTER_TIMEOUT_MS = 30_000;
+const WG_DEFAULT_LISTEN_PORT = 51820;
+
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  try {
+    return String(e);
+  } catch {
+    return "unknown error";
+  }
+}
+
+export async function fullDiagnosis(
+  opts?: FullDiagnosisOptions,
+): Promise<FullDiagnosisResult> {
+  const o = opts && typeof opts === "object" ? opts : {};
+  const wgInterface = typeof o.wgInterface === "string" ? o.wgInterface : undefined;
+  const wgHost = typeof o.wgHost === "string" ? o.wgHost : undefined;
+  const publicHost =
+    typeof o.publicHost === "string" && o.publicHost.length > 0 ? o.publicHost : wgHost;
+  const publicPort =
+    typeof o.publicPort === "number" &&
+    Number.isInteger(o.publicPort) &&
+    o.publicPort >= 1 &&
+    o.publicPort <= 65535
+      ? o.publicPort
+      : WG_DEFAULT_LISTEN_PORT;
+  const autoMtuProbe = o.autoMtuProbe ?? true;
+  const mtuProbeTimeoutMs =
+    typeof o.mtuProbeTimeoutMs === "number" && Number.isFinite(o.mtuProbeTimeoutMs)
+      ? o.mtuProbeTimeoutMs
+      : undefined;
+
+  // Per-call wrapper: captures thrown errors into a sibling `*Error` field
+  // while letting the successful value flow through unchanged.
+  const safeRun = <T>(fn: () => Promise<T>): Promise<T> => fn();
+
+  const wgStatusTask = safeRun(() => wgStatus(wgInterface));
+  const tunnelHealthTask = safeRun(() =>
+    tunnelHealth({
+      wgHost: wgHost ?? "",
+      publicHost: publicHost ?? "",
+      publicPort,
+      autoMtuProbe,
+      ...(mtuProbeTimeoutMs !== undefined ? { mtuProbeTimeoutMs } : {}),
+    }),
+  );
+  const systemStatsTask = safeRun(() => getSystemStats());
+
+  // Outer timeout: racing Promise.allSettled against a sentinel ensures we
+  // never exceed the budget even if an individual probe misbehaves.
+  let timer: NodeJS.Timeout | null = null;
+  const timeoutSentinel = Symbol("fullDiagnosisTimeout");
+  const timeoutPromise = new Promise<typeof timeoutSentinel>((resolve) => {
+    timer = setTimeout(() => resolve(timeoutSentinel), FULL_DIAGNOSIS_OUTER_TIMEOUT_MS);
+  });
+
+  const settledPromise = Promise.allSettled([wgStatusTask, tunnelHealthTask, systemStatsTask]);
+
+  const raced = await Promise.race([settledPromise, timeoutPromise]);
+  if (timer) clearTimeout(timer);
+
+  const timestamp = Date.now();
+
+  if (raced === timeoutSentinel) {
+    const timeoutMsg = `fullDiagnosis outer timeout (${FULL_DIAGNOSIS_OUTER_TIMEOUT_MS}ms)`;
+    return {
+      timestamp,
+      wgStatus: null,
+      wgStatusError: timeoutMsg,
+      tunnelHealth: null,
+      tunnelHealthError: timeoutMsg,
+      systemStats: null,
+      systemStatsError: timeoutMsg,
+    };
+  }
+
+  const [wgStatusSettled, tunnelHealthSettled, systemStatsSettled] = raced;
+
+  return {
+    timestamp,
+    wgStatus: wgStatusSettled.status === "fulfilled" ? wgStatusSettled.value : null,
+    wgStatusError: wgStatusSettled.status === "rejected" ? errMsg(wgStatusSettled.reason) : null,
+    tunnelHealth: tunnelHealthSettled.status === "fulfilled" ? tunnelHealthSettled.value : null,
+    tunnelHealthError:
+      tunnelHealthSettled.status === "rejected" ? errMsg(tunnelHealthSettled.reason) : null,
+    systemStats: systemStatsSettled.status === "fulfilled" ? systemStatsSettled.value : null,
+    systemStatsError:
+      systemStatsSettled.status === "rejected" ? errMsg(systemStatsSettled.reason) : null,
   };
 }
