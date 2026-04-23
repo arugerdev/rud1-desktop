@@ -302,6 +302,113 @@ contextBridge.exposeInMainWorld("electronAPI", {
           systemStatsError: string | null;
         };
       }>,
+
+    // Serialize a `fullDiagnosis` run to a timestamped JSON file under
+    // `~/.rud1/diag/` and return its absolute path plus a SHA-256 of the
+    // written bytes. Probe failures inside the diagnosis are preserved as
+    // `*Error` fields in the embedded result, NOT thrown — so the export
+    // always succeeds even on a sick device, as long as mkdir/write work.
+    // The caller gets `ok:false` only on filesystem errors.
+    exportReport: (opts?: {
+      wgInterface?: string;
+      wgHost?: string;
+      publicHost?: string;
+      publicPort?: number;
+      autoMtuProbe?: boolean;
+      mtuProbeTimeoutMs?: number;
+    }) =>
+      ipcRenderer.invoke("diag:exportReport", opts) as Promise<
+        | {
+            ok: true;
+            result: {
+              path: string;
+              bytes: number;
+              sha256: string;
+              diagnosis: {
+                timestamp: number;
+                wgStatus:
+                  | {
+                      available: true;
+                      tunnels: {
+                        interface: string;
+                        publicKey: string | null;
+                        listenPort: number | null;
+                        peers: {
+                          publicKey: string;
+                          endpoint: string | null;
+                          allowedIps: string[];
+                          latestHandshake: number;
+                          transferRx: number;
+                          transferTx: number;
+                          persistentKeepalive: number | null;
+                        }[];
+                      }[];
+                    }
+                  | { available: false; reason: string }
+                  | null;
+                wgStatusError: string | null;
+                tunnelHealth:
+                  | {
+                      wgPing:
+                        | { reachable: boolean; rttMs: number | null }
+                        | { error: string };
+                      publicPing:
+                        | { reachable: boolean; rttMs: number | null }
+                        | { error: string };
+                      tcpProbe:
+                        | {
+                            open: boolean;
+                            errorCode: string | null;
+                            latencyMs: number | null;
+                          }
+                        | { error: string };
+                      verdict: "healthy" | "degraded" | "broken";
+                      hints: string[];
+                      mtu?: { discovered: number; simulated?: boolean };
+                    }
+                  | null;
+                tunnelHealthError: string | null;
+                systemStats:
+                  | {
+                      hostname: string;
+                      platform: NodeJS.Platform;
+                      release: string;
+                      arch: string;
+                      uptimeSec: number;
+                      appUptimeSec: number;
+                      cpu: {
+                        model: string;
+                        speedMhz: number;
+                        count: number;
+                        loadavg: [number, number, number];
+                        utilisation: number | null;
+                      };
+                      memory: {
+                        totalBytes: number;
+                        freeBytes: number;
+                        usedBytes: number;
+                        usagePct: number;
+                      };
+                      interfaces: {
+                        name: string;
+                        mac: string;
+                        up: boolean;
+                        internal: boolean;
+                        addresses: {
+                          family: "IPv4" | "IPv6";
+                          address: string;
+                          cidr: string | null;
+                        }[];
+                      }[];
+                      capturedAt: string;
+                    }
+                  | null;
+                systemStatsError: string | null;
+              };
+            };
+          }
+        | { ok: false; error: string }
+      >,
   },
 
   system: {

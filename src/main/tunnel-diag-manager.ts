@@ -20,6 +20,11 @@
 
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { createHash } from "crypto";
+import { promises as fsp } from "fs";
+import * as os from "os";
+import * as path from "path";
+import { app } from "electron";
 import { ping, portCheck, validateHost } from "./net-diag-manager";
 import { getStats as getSystemStats, type SystemStats } from "./system-manager";
 
@@ -866,5 +871,98 @@ export async function fullDiagnosis(
     systemStats: systemStatsSettled.status === "fulfilled" ? systemStatsSettled.value : null,
     systemStatsError:
       systemStatsSettled.status === "rejected" ? errMsg(systemStatsSettled.reason) : null,
+  };
+}
+
+// ─── exportReport ────────────────────────────────────────────────────────────
+
+/**
+ * Serialize a `fullDiagnosis` run to a timestamped JSON file under
+ * `~/.rud1/diag/` and return the final path plus integrity metadata so the
+ * renderer can display it (and, if it wants, verify it).
+ *
+ * The payload wraps the raw diagnosis with app/runtime metadata that is useful
+ * when the report is shared via support email. We write atomically (write to
+ * `*.tmp` then rename) so a crash mid-write never leaves a half-written file
+ * behind.
+ *
+ * Filename format: `rud1-diag-<YYYYMMDD-HHmmss>.json` in local timezone, all
+ * components zero-padded. The second-level resolution is intentional — a user
+ * running multiple reports in the same second will see an overwrite, which we
+ * consider preferable to polluting the directory with millisecond-precision
+ * names that are hard to scan.
+ *
+ * Sub-call failures inside `fullDiagnosis` are NOT thrown — they're already
+ * isolated into `*Error` fields inside the diagnosis result, so the exported
+ * report always represents whatever state the probes reached. Only
+ * mkdir/write failures surface as thrown errors; the IPC caller wraps those
+ * in the `{ok:false, error}` envelope.
+ */
+export interface ExportReportResult {
+  path: string;
+  bytes: number;
+  sha256: string;
+  diagnosis: FullDiagnosisResult;
+}
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+function formatLocalTimestamp(d: Date): string {
+  const y = d.getFullYear();
+  const mo = pad2(d.getMonth() + 1);
+  const da = pad2(d.getDate());
+  const h = pad2(d.getHours());
+  const mi = pad2(d.getMinutes());
+  const s = pad2(d.getSeconds());
+  return `${y}${mo}${da}-${h}${mi}${s}`;
+}
+
+export async function exportReport(
+  opts: FullDiagnosisOptions,
+): Promise<ExportReportResult> {
+  // Step 1 — run the diagnosis. fullDiagnosis isolates sub-call failures into
+  // its own `*Error` fields, so we never throw here on probe failure.
+  const diagnosis = await fullDiagnosis(opts);
+
+  // Step 2 — build the wrapping payload with runtime metadata.
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    nodeVersion: process.versions.node,
+    electronVersion: process.versions.electron,
+    diagnosis,
+  };
+  const content = JSON.stringify(payload, null, 2);
+
+  // Step 3 — resolve the target directory. os.homedir() is typed as `string`
+  // but can return an empty string on very unusual systems; guard anyway.
+  const home = os.homedir();
+  if (!home || typeof home !== "string" || home.length === 0) {
+    throw new Error("Cannot determine user home directory (os.homedir() empty)");
+  }
+  const dir = path.join(home, ".rud1", "diag");
+  await fsp.mkdir(dir, { recursive: true });
+
+  // Step 4 — atomic write: file.tmp then rename to final. This avoids readers
+  // seeing a partial JSON if the process dies mid-write.
+  const filename = `rud1-diag-${formatLocalTimestamp(new Date())}.json`;
+  const finalPath = path.join(dir, filename);
+  const tmpPath = `${finalPath}.tmp`;
+  await fsp.writeFile(tmpPath, content);
+  await fsp.rename(tmpPath, finalPath);
+
+  // Step 5 — integrity hash over the exact bytes we just wrote. Hex-encoded
+  // SHA-256 so the UI can show it verbatim and support can verify locally.
+  const sha256 = createHash("sha256").update(content).digest("hex");
+
+  return {
+    path: finalPath,
+    bytes: Buffer.byteLength(content),
+    sha256,
+    diagnosis,
   };
 }

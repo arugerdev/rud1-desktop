@@ -20,6 +20,7 @@
  *   diag:tunnelHealth — combined WG/public ping + TCP probe + verdict
  *   diag:mtuProbe     — DF-flag bisect ping to discover path MTU
  *   diag:fullDiagnosis — consolidated wgStatus + tunnelHealth + systemStats (parallel)
+ *   diag:exportReport — serialize fullDiagnosis to ~/.rud1/diag/ with sha256 integrity
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
@@ -37,7 +38,13 @@ import {
   publicIp,
   portCheck,
 } from "./net-diag-manager";
-import { wgStatus, tunnelHealth, mtuProbe, fullDiagnosis } from "./tunnel-diag-manager";
+import {
+  wgStatus,
+  tunnelHealth,
+  mtuProbe,
+  fullDiagnosis,
+  exportReport,
+} from "./tunnel-diag-manager";
 import { getStats as getSystemStats } from "./system-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
@@ -266,6 +273,32 @@ export function registerIpcHandlers(): void {
       } catch (err) {
         // fullDiagnosis is designed to never throw, but keep the envelope
         // symmetrical with the other diag:* channels just in case.
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "diag:exportReport",
+    async (
+      event,
+      opts?: {
+        wgInterface?: string;
+        wgHost?: string;
+        publicHost?: string;
+        publicPort?: number;
+        autoMtuProbe?: boolean;
+        mtuProbeTimeoutMs?: number;
+      },
+    ) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const result = await exportReport(opts ?? {});
+        return { ok: true, result };
+      } catch (err) {
         return {
           ok: false,
           error: err instanceof Error ? err.message : String(err),
