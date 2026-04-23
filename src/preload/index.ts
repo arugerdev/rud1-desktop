@@ -409,6 +409,49 @@ contextBridge.exposeInMainWorld("electronAPI", {
           }
         | { ok: false; error: string }
       >,
+
+    // Enumerate JSON reports previously written by exportReport under
+    // `~/.rud1/diag/`. Returns an array sorted newest-first. Metadata only —
+    // sha256 is NOT computed here (use readReport to get bytes + hash). If
+    // the directory doesn't exist yet the list is empty, never an error.
+    listReports: () =>
+      ipcRenderer.invoke("diag:listReports") as Promise<
+        | {
+            ok: true;
+            result: {
+              path: string;
+              filename: string;
+              bytes: number;
+              createdAt: string;
+            }[];
+          }
+        | { ok: false; error: string }
+      >,
+
+    // Read + sha256-hash + JSON.parse a report by absolute path. The path
+    // must resolve under `~/.rud1/diag/` AND match `rud1-diag-*.json`;
+    // anything else yields `{ok:false, error:"path outside allowed directory"}`.
+    readReport: (reportPath: string) =>
+      ipcRenderer.invoke("diag:readReport", reportPath) as Promise<
+        | {
+            ok: true;
+            result: {
+              path: string;
+              bytes: number;
+              sha256: string;
+              content: unknown;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    // Unlink a report file. Same path-traversal + filename-shape guards as
+    // readReport. Missing files surface as `{ok:false, error:"report not found"}`.
+    deleteReport: (reportPath: string) =>
+      ipcRenderer.invoke("diag:deleteReport", reportPath) as Promise<
+        | { ok: true; result: { path: string; deleted: true } }
+        | { ok: false; error: string }
+      >,
   },
 
   system: {

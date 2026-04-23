@@ -21,6 +21,9 @@
  *   diag:mtuProbe     — DF-flag bisect ping to discover path MTU
  *   diag:fullDiagnosis — consolidated wgStatus + tunnelHealth + systemStats (parallel)
  *   diag:exportReport — serialize fullDiagnosis to ~/.rud1/diag/ with sha256 integrity
+ *   diag:listReports  — enumerate previously-written reports under ~/.rud1/diag/
+ *   diag:readReport   — read + sha256 + JSON.parse a report (path-traversal guarded)
+ *   diag:deleteReport — unlink a report file (path-traversal guarded)
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
@@ -44,6 +47,9 @@ import {
   mtuProbe,
   fullDiagnosis,
   exportReport,
+  listReports,
+  readReport,
+  deleteReport,
 } from "./tunnel-diag-manager";
 import { getStats as getSystemStats } from "./system-manager";
 
@@ -306,6 +312,45 @@ export function registerIpcHandlers(): void {
       }
     },
   );
+
+  ipcMain.handle("diag:listReports", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await listReports();
+      return { ok: true, result };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  ipcMain.handle("diag:readReport", async (event, reportPath: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await readReport(reportPath);
+      return { ok: true, result };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  ipcMain.handle("diag:deleteReport", async (event, reportPath: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const result = await deleteReport(reportPath);
+      return { ok: true, result };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 
   ipcMain.handle("system:stats", async (event) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };

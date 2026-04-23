@@ -919,6 +919,120 @@ function formatLocalTimestamp(d: Date): string {
   return `${y}${mo}${da}-${h}${mi}${s}`;
 }
 
+// ─── report inventory (list / read / delete) ────────────────────────────────
+
+/**
+ * Shared guard: resolves a renderer-supplied path and confirms it lives under
+ * `~/.rud1/diag/` AND matches the `rud1-diag-*.json` filename shape. The
+ * renderer is untrusted, so we treat the input strictly — any mismatch throws.
+ * Returns the resolved absolute path, the diag directory, and the filename.
+ */
+const REPORT_FILENAME_REGEX = /^rud1-diag-[0-9]{8}-[0-9]{6}\.json$/;
+
+function resolveDiagDir(): string {
+  const home = os.homedir();
+  if (!home || typeof home !== "string" || home.length === 0) {
+    throw new Error("Cannot determine user home directory (os.homedir() empty)");
+  }
+  return path.join(home, ".rud1", "diag");
+}
+
+function validateReportPath(reportPath: unknown): { abs: string; dir: string; filename: string } {
+  if (typeof reportPath !== "string" || reportPath.length === 0) {
+    throw new Error("invalid path");
+  }
+  const dir = resolveDiagDir();
+  const dirWithSep = dir.endsWith(path.sep) ? dir : dir + path.sep;
+  const abs = path.resolve(reportPath);
+  if (!abs.startsWith(dirWithSep)) {
+    throw new Error("path outside allowed directory");
+  }
+  const filename = path.basename(abs);
+  if (!REPORT_FILENAME_REGEX.test(filename)) {
+    throw new Error("invalid report filename");
+  }
+  return { abs, dir, filename };
+}
+
+export interface ReportSummary {
+  path: string;
+  filename: string;
+  bytes: number;
+  createdAt: string;
+}
+
+export async function listReports(): Promise<ReportSummary[]> {
+  const dir = resolveDiagDir();
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(dir);
+  } catch (err: unknown) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === "ENOENT") return [];
+    throw err;
+  }
+
+  const summaries: ReportSummary[] = [];
+  for (const name of entries) {
+    if (!REPORT_FILENAME_REGEX.test(name)) continue;
+    const abs = path.join(dir, name);
+    try {
+      const st = await fsp.stat(abs);
+      if (!st.isFile()) continue;
+      const createdMs = st.birthtimeMs && st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+      summaries.push({
+        path: abs,
+        filename: name,
+        bytes: st.size,
+        createdAt: new Date(createdMs).toISOString(),
+      });
+    } catch {
+      // Skip files that vanished between readdir and stat.
+    }
+  }
+  summaries.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+  return summaries;
+}
+
+export interface ReadReportResult {
+  path: string;
+  bytes: number;
+  sha256: string;
+  content: unknown;
+}
+
+export async function readReport(reportPath: string): Promise<ReadReportResult> {
+  const { abs } = validateReportPath(reportPath);
+  const buf = await fsp.readFile(abs);
+  const sha256 = createHash("sha256").update(buf).digest("hex");
+  let content: unknown;
+  try {
+    content = JSON.parse(buf.toString("utf8"));
+  } catch (err) {
+    throw new Error(`invalid JSON in report: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { path: abs, bytes: buf.byteLength, sha256, content };
+}
+
+export interface DeleteReportResult {
+  path: string;
+  deleted: true;
+}
+
+export async function deleteReport(reportPath: string): Promise<DeleteReportResult> {
+  const { abs } = validateReportPath(reportPath);
+  try {
+    await fsp.unlink(abs);
+  } catch (err: unknown) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === "ENOENT") {
+      throw new Error("report not found");
+    }
+    throw err;
+  }
+  return { path: abs, deleted: true };
+}
+
 export async function exportReport(
   opts: FullDiagnosisOptions,
 ): Promise<ExportReportResult> {
