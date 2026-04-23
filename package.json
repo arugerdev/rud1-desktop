@@ -14,7 +14,9 @@
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:mac": "npm run build && electron-builder --mac",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "electron-updater": "^6.6.2"
@@ -25,6 +27,7 @@
     "electron": "^36.9.5",
     "electron-builder": "^25.1.8",
     "typescript": "^5.7.0",
+    "vitest": "^3.2.4",
     "wait-on": "^8.0.3"
   },
   "build": {
