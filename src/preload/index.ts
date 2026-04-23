@@ -117,6 +117,64 @@ contextBridge.exposeInMainWorld("electronAPI", {
       }>,
   },
 
+  diag: {
+    // Parsed `wg show [tunnelName]` output. tunnelName must match
+    // /^[a-zA-Z0-9_-]{1,32}$/ — omit to list all tunnels. Never throws:
+    // missing binary / invalid input surface as {available:false, reason}.
+    wgStatus: (tunnelName?: string) =>
+      ipcRenderer.invoke("diag:wgStatus", tunnelName) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?:
+          | {
+              available: true;
+              tunnels: {
+                interface: string;
+                publicKey: string | null;
+                listenPort: number | null;
+                peers: {
+                  publicKey: string;
+                  endpoint: string | null;
+                  allowedIps: string[];
+                  latestHandshake: number;
+                  transferRx: number;
+                  transferTx: number;
+                  persistentKeepalive: number | null;
+                }[];
+              }[];
+            }
+          | { available: false; reason: string };
+      }>,
+
+    // Combined probe: ping(wgHost) + ping(publicHost) + TCP portCheck
+    // against publicHost:publicPort. Returns a verdict + actionable hints.
+    // WG uses UDP, so the TCP probe only verifies the host is up, not the
+    // actual WG listen port.
+    tunnelHealth: (opts: {
+      wgHost: string;
+      publicHost: string;
+      publicPort: number;
+      timeoutMs?: number;
+    }) =>
+      ipcRenderer.invoke("diag:tunnelHealth", opts) as Promise<{
+        ok: boolean;
+        error?: string;
+        result?: {
+          wgPing:
+            | { reachable: boolean; rttMs: number | null }
+            | { error: string };
+          publicPing:
+            | { reachable: boolean; rttMs: number | null }
+            | { error: string };
+          tcpProbe:
+            | { open: boolean; errorCode: string | null; latencyMs: number | null }
+            | { error: string };
+          verdict: "healthy" | "degraded" | "broken";
+          hints: string[];
+        };
+      }>,
+  },
+
   system: {
     // Snapshot of the operator's machine — dashboards pair this with the
     // Pi's reported stats so the user can diff "which side is sick" at a
