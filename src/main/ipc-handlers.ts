@@ -26,6 +26,7 @@
  *   diag:deleteReport — unlink a report file (path-traversal guarded)
  *   diag:openReportsFolder — reveal ~/.rud1/diag/ in the OS file explorer
  *   diag:saveReportCopy    — copy a report to a user-chosen location via Save As dialog
+ *   diag:compareReports    — read two reports and return a structured diff (deltas, swapped flag)
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
@@ -54,6 +55,7 @@ import {
   deleteReport,
   openReportsFolder,
   saveReportCopy,
+  compareReports,
 } from "./tunnel-diag-manager";
 import { getStats as getSystemStats } from "./system-manager";
 
@@ -384,6 +386,30 @@ export function registerIpcHandlers(): void {
           defaultFilename: opts?.defaultFilename,
           parentWindow,
         });
+        return { ok: true, result };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "diag:compareReports",
+    async (event, args: { pathA: string; pathB: string }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        if (
+          !args ||
+          typeof args !== "object" ||
+          typeof args.pathA !== "string" ||
+          typeof args.pathB !== "string"
+        ) {
+          return { ok: false, error: "invalid args" };
+        }
+        const result = await compareReports({ pathA: args.pathA, pathB: args.pathB });
         return { ok: true, result };
       } catch (err) {
         return {

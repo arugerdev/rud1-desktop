@@ -1033,6 +1033,214 @@ export async function deleteReport(reportPath: string): Promise<DeleteReportResu
   return { path: abs, deleted: true };
 }
 
+// ─── compareReports ─────────────────────────────────────────────────────────
+
+/**
+ * Read two exported reports and compute a structured diff. Both paths are
+ * validated with the same guard used by readReport/deleteReport/saveReportCopy
+ * so a renderer can't use this as an oracle to read arbitrary files.
+ *
+ * `a` is always the earlier `exportedAt`; if the caller passed them in reverse
+ * temporal order we swap them and flag `swapped: true` so the UI can still
+ * render in the order the operator asked for. All deltas are "newer minus
+ * older" regardless.
+ *
+ * Every field is pulled defensively via small helpers — the report JSON shape
+ * is known (it's exportReport's own output) but we never want a slightly
+ * malformed report to crash the compare; missing values surface as `null`
+ * (and non-numeric deltas follow the same rule).
+ */
+export interface ReportSnapshot {
+  path: string;
+  exportedAt: string | null;
+  verdict: "healthy" | "degraded" | "broken" | null;
+  wgPeerCount: number | null;
+  activePeers: number | null;
+  lastHandshake: number | null;
+  mtu: number | null;
+  cpuPct: number | null;
+  memPct: number | null;
+  tempCpu: number | null;
+}
+
+export interface CompareReportsResult {
+  a: ReportSnapshot;
+  b: ReportSnapshot;
+  deltas: {
+    timeBetweenMs: number | null;
+    verdictChanged: boolean;
+    wgPeerCountDelta: number | null;
+    activePeersDelta: number | null;
+    mtuDelta: number | null;
+    cpuPctDelta: number | null;
+    memPctDelta: number | null;
+    tempDelta: number | null;
+  };
+  swapped: boolean;
+}
+
+/** Safely walk a nested object by string keys; any break in the chain → undefined. */
+function pick(obj: unknown, ...keys: string[]): unknown {
+  let cur: unknown = obj;
+  for (const k of keys) {
+    if (cur === null || cur === undefined || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[k];
+  }
+  return cur;
+}
+
+function asNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+function asVerdict(v: unknown): "healthy" | "degraded" | "broken" | null {
+  return v === "healthy" || v === "degraded" || v === "broken" ? v : null;
+}
+
+function extractSnapshot(raw: unknown, reportPath: string): ReportSnapshot {
+  const exportedAt = asString(pick(raw, "exportedAt"));
+  const diagnosis = pick(raw, "diagnosis");
+
+  const verdict = asVerdict(pick(diagnosis, "tunnelHealth", "verdict"));
+
+  // wgPeerCount / activePeers: sum across all tunnels in wgStatus.tunnels.
+  // `activePeers` counts peers with a non-zero latestHandshake. `lastHandshake`
+  // is the max (most recent) across all peers.
+  let wgPeerCount: number | null = null;
+  let activePeers: number | null = null;
+  let lastHandshake: number | null = null;
+
+  const wgStatus = pick(diagnosis, "wgStatus");
+  const tunnels = pick(wgStatus, "tunnels");
+  if (Array.isArray(tunnels)) {
+    let peerSum = 0;
+    let activeSum = 0;
+    let maxHandshake = 0;
+    let anyPeer = false;
+    for (const t of tunnels) {
+      const peers = pick(t, "peers");
+      if (Array.isArray(peers)) {
+        peerSum += peers.length;
+        for (const p of peers) {
+          anyPeer = true;
+          const hs = asNumber(pick(p, "latestHandshake"));
+          if (hs !== null && hs > 0) {
+            activeSum += 1;
+            if (hs > maxHandshake) maxHandshake = hs;
+          }
+        }
+      }
+    }
+    wgPeerCount = peerSum;
+    activePeers = activeSum;
+    lastHandshake = anyPeer && maxHandshake > 0 ? maxHandshake : null;
+  }
+
+  const mtu = asNumber(pick(diagnosis, "tunnelHealth", "mtu", "discovered"));
+
+  // systemStats shape: cpu.utilisation (0..1 or 0..100 — exporter stores it
+  // as-is), memory.usagePct, and optionally a temperature field. Report JSON
+  // doesn't currently carry temperature in a fixed location, so we probe a
+  // couple of plausible paths and fall back to null.
+  const cpuPct = asNumber(pick(diagnosis, "systemStats", "cpu", "utilisation"));
+  const memPct = asNumber(pick(diagnosis, "systemStats", "memory", "usagePct"));
+  const tempCpu =
+    asNumber(pick(diagnosis, "systemStats", "cpu", "tempC")) ??
+    asNumber(pick(diagnosis, "systemStats", "temperature", "cpu")) ??
+    asNumber(pick(diagnosis, "systemStats", "tempCpu"));
+
+  return {
+    path: reportPath,
+    exportedAt,
+    verdict,
+    wgPeerCount,
+    activePeers,
+    lastHandshake,
+    mtu,
+    cpuPct,
+    memPct,
+    tempCpu,
+  };
+}
+
+function diffNumbers(a: number | null, b: number | null): number | null {
+  if (a === null || b === null) return null;
+  return b - a;
+}
+
+export async function compareReports(args: {
+  pathA: string;
+  pathB: string;
+}): Promise<CompareReportsResult> {
+  if (!args || typeof args !== "object") {
+    throw new Error("invalid args");
+  }
+  // Validate BOTH paths before any I/O — security guard must run first and
+  // must match iter 11 semantics verbatim (same helper, same regex, same
+  // allowed directory).
+  const { abs: absA } = validateReportPath(args.pathA);
+  const { abs: absB } = validateReportPath(args.pathB);
+
+  const [bufA, bufB] = await Promise.all([
+    fsp.readFile(absA),
+    fsp.readFile(absB),
+  ]);
+
+  let rawA: unknown;
+  let rawB: unknown;
+  try {
+    rawA = JSON.parse(bufA.toString("utf8"));
+  } catch {
+    throw new Error("report not parseable");
+  }
+  try {
+    rawB = JSON.parse(bufB.toString("utf8"));
+  } catch {
+    throw new Error("report not parseable");
+  }
+
+  let snapA = extractSnapshot(rawA, absA);
+  let snapB = extractSnapshot(rawB, absB);
+
+  // Deterministic ordering: `a` is always the earlier exportedAt. If either
+  // timestamp is missing or unparseable we fall back to input order.
+  const tA = snapA.exportedAt ? Date.parse(snapA.exportedAt) : NaN;
+  const tB = snapB.exportedAt ? Date.parse(snapB.exportedAt) : NaN;
+  let swapped = false;
+  if (Number.isFinite(tA) && Number.isFinite(tB) && tB < tA) {
+    [snapA, snapB] = [snapB, snapA];
+    swapped = true;
+  }
+
+  const tEarlier = snapA.exportedAt ? Date.parse(snapA.exportedAt) : NaN;
+  const tLater = snapB.exportedAt ? Date.parse(snapB.exportedAt) : NaN;
+  const timeBetweenMs =
+    Number.isFinite(tEarlier) && Number.isFinite(tLater) ? tLater - tEarlier : null;
+
+  const verdictChanged =
+    snapA.verdict !== null && snapB.verdict !== null && snapA.verdict !== snapB.verdict;
+
+  return {
+    a: snapA,
+    b: snapB,
+    deltas: {
+      timeBetweenMs,
+      verdictChanged,
+      wgPeerCountDelta: diffNumbers(snapA.wgPeerCount, snapB.wgPeerCount),
+      activePeersDelta: diffNumbers(snapA.activePeers, snapB.activePeers),
+      mtuDelta: diffNumbers(snapA.mtu, snapB.mtu),
+      cpuPctDelta: diffNumbers(snapA.cpuPct, snapB.cpuPct),
+      memPctDelta: diffNumbers(snapA.memPct, snapB.memPct),
+      tempDelta: diffNumbers(snapA.tempCpu, snapB.tempCpu),
+    },
+    swapped,
+  };
+}
+
 // ─── openReportsFolder / saveReportCopy ─────────────────────────────────────
 
 /**

@@ -477,6 +477,59 @@ contextBridge.exposeInMainWorld("electronAPI", {
           }
         | { ok: false; error: string }
       >,
+
+    // Read two previously-exported reports (same path-traversal + filename
+    // guard as readReport/deleteReport) and return a structured diff. The
+    // `a`/`b` fields in the result are always ordered by exportedAt
+    // (earlier → later); `swapped: true` means the input order was reversed
+    // so the UI can still render in the order the caller requested. Deltas
+    // are always "newer minus older" (i.e. `b - a`) and individual fields
+    // fall back to `null` when either side's value is missing. Throws
+    // `"report not parseable"` if either file isn't valid JSON.
+    compareReports: (args: { pathA: string; pathB: string }) =>
+      ipcRenderer.invoke("diag:compareReports", args) as Promise<
+        | {
+            ok: true;
+            result: {
+              a: {
+                path: string;
+                exportedAt: string | null;
+                verdict: "healthy" | "degraded" | "broken" | null;
+                wgPeerCount: number | null;
+                activePeers: number | null;
+                lastHandshake: number | null;
+                mtu: number | null;
+                cpuPct: number | null;
+                memPct: number | null;
+                tempCpu: number | null;
+              };
+              b: {
+                path: string;
+                exportedAt: string | null;
+                verdict: "healthy" | "degraded" | "broken" | null;
+                wgPeerCount: number | null;
+                activePeers: number | null;
+                lastHandshake: number | null;
+                mtu: number | null;
+                cpuPct: number | null;
+                memPct: number | null;
+                tempCpu: number | null;
+              };
+              deltas: {
+                timeBetweenMs: number | null;
+                verdictChanged: boolean;
+                wgPeerCountDelta: number | null;
+                activePeersDelta: number | null;
+                mtuDelta: number | null;
+                cpuPctDelta: number | null;
+                memPctDelta: number | null;
+                tempDelta: number | null;
+              };
+              swapped: boolean;
+            };
+          }
+        | { ok: false; error: string }
+      >,
   },
 
   system: {
