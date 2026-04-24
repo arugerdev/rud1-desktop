@@ -36,7 +36,7 @@
  *     want them to execute during a unit test of the origin check.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 // electron is a native module; importing it in a plain Node vitest run
 // without mocking produces `app is undefined` at ipc-handlers.ts line 38.
@@ -392,49 +392,26 @@ describe("checkSender — event.senderFrame integration", () => {
   });
 });
 
-// ─── 8. Per-handler dispatch coverage — documented it.todo ──────────────────
+// ─── 8. Per-handler dispatch coverage ───────────────────────────────────────
 
 describe("registerIpcHandlers — per-channel dispatch", () => {
   // Rationale (mirrors iter 21's auto-updater event-flow decision):
   //
   // Exercising each `ipcMain.handle` callback would require either
   //   (a) a full Electron main process (heavy, flakey in CI), or
-  //   (b) re-implementing `ipcMain.handle` as a dispatch table here,
-  //       which means we'd be testing our mock instead of the code.
+  //   (b) re-implementing `ipcMain.handle` as a dispatch table here.
   //
-  // Every handler funnels through `checkSender`, which is covered above
-  // by direct isOriginAllowed() tests on both accepted and adversarial
-  // shapes. The only per-handler logic beyond that is either:
-  //   • a typeof/arg-shape check that delegates to the manager (see the
-  //     diag:mtuProbe / diag:compareReports / diag:autoSnapshotConfigure
-  //     inline validators — todo'd below), or
-  //   • pure delegation to a manager that has its own *.test.ts file
-  //     exercising the real guards (vpn-manager, usb-manager, net-diag-
-  //     manager, tunnel-diag-manager — see validateReportPath there).
+  // For most channels (vpn:*, usb:*, net:*, diag:readReport, etc.) the only
+  // per-handler logic is `checkSender + delegate-to-manager`, both already
+  // exercised: checkSender by the suites above, the manager guards by their
+  // own *.test.ts files. Re-running each as a dispatch test would be O(n)
+  // duplication with no extra signal — left as `it.todo` placeholders.
   //
-  // So the integration shape is covered indirectly: origin check here,
-  // path-traversal in tunnel-diag-manager.test.ts, spawn-arg escaping in
-  // vpn-manager.test.ts, etc.
-
-  it.todo(
-    "diag:mtuProbe rejects args that are not {host: string} " +
-      "(skipped: requires an ipcMain.handle capture harness — the inline " +
-      "validator is a simple typeof check and a regression is more likely " +
-      "in tunnel-diag-manager.mtuProbe's own guards, which are covered by " +
-      "tunnel-diag-manager.test.ts).",
-  );
-
-  it.todo(
-    "diag:compareReports rejects args missing pathA / pathB " +
-      "(skipped: same rationale; path-traversal is guarded by " +
-      "tunnel-diag-manager.validateReportPath and tested there).",
-  );
-
-  it.todo(
-    "diag:autoSnapshotConfigure rejects a payload without .enabled:boolean " +
-      "(skipped: same rationale; auto-snapshot-manager.configureAutoSnapshot " +
-      "additionally clamps intervalMs, tested in auto-snapshot-manager.test.ts).",
-  );
+  // The exceptions are the three channels with INLINE arg-shape validators
+  // (diag:mtuProbe / diag:compareReports / diag:autoSnapshotConfigure). Those
+  // typeof checks live nowhere else, so they need direct coverage here. We
+  // re-implement option (b) for those three only, scoped to one capture
+  // harness shared across the iter-23 suites below.
 
   it.todo(
     "diag:readReport / diag:deleteReport with `../../../etc/passwd` " +
@@ -449,4 +426,227 @@ describe("registerIpcHandlers — per-channel dispatch", () => {
       "checkSender + isOriginAllowed suites above; registering each channel " +
       "as a dispatch test would be O(n) duplication with no extra signal).",
   );
+});
+
+// ─── 9. Inline arg-shape validators (iter 23) ───────────────────────────────
+//
+// These three channels carry a typeof-check the renderer payload must clear
+// BEFORE the call reaches the manager. The manager has its own guards but
+// they assume a typed shape — if the IPC validator regresses (e.g. someone
+// drops the `typeof args.host !== "string"` line), a raw `123` flows through
+// to the manager and produces a confusing crash instead of a clean envelope.
+//
+// Harness: re-use the existing `vi.mock("electron", ...)` ipcMain.handle
+// spy. Calling `registerIpcHandlers()` populates `mock.calls` with
+// `[channel, callback]` pairs — we reconstruct a `handlers` table from that
+// and invoke individual callbacks with a fake event whose `senderFrame.url`
+// is the allowlisted production origin (so checkSender passes and we
+// actually exercise the validator instead of bouncing on the origin check).
+
+import * as electronMock from "electron";
+import { registerIpcHandlers } from "./ipc-handlers";
+import { mtuProbe as mtuProbeMock } from "./tunnel-diag-manager";
+import { compareReports as compareReportsMock } from "./tunnel-diag-manager";
+import { configureAutoSnapshot as configureAutoSnapshotMock } from "./auto-snapshot-manager";
+
+type Handler = (event: unknown, ...args: unknown[]) => unknown;
+const handlers: Record<string, Handler> = {};
+
+beforeAll(() => {
+  // registerIpcHandlers() pushes 28 (channel, callback) pairs into our
+  // `ipcMain.handle` vi.fn(). Build the dispatch table once.
+  registerIpcHandlers();
+  const calls = (electronMock.ipcMain.handle as unknown as { mock: { calls: unknown[][] } })
+    .mock.calls;
+  for (const [channel, callback] of calls) {
+    handlers[channel as string] = callback as Handler;
+  }
+});
+
+// fakeEvent with an allowlisted senderFrame.url — checkSender returns true
+// for `https://rud1.es/` (matches ALLOWED_ORIGIN), so the validator runs.
+const allowedEvent = {
+  senderFrame: { url: "https://rud1.es/app" },
+  sender: {},
+} as unknown as Electron.IpcMainInvokeEvent;
+
+describe("diag:mtuProbe — inline validator", () => {
+  it("accepts a valid {host: string} payload and delegates to mtuProbe()", async () => {
+    vi.mocked(mtuProbeMock).mockClear();
+    const result = await handlers["diag:mtuProbe"](allowedEvent, {
+      host: "10.0.0.1",
+    });
+    expect(result).toEqual({ ok: true, result: { mtu: 1500 } });
+    expect(mtuProbeMock).toHaveBeenCalledWith("10.0.0.1", undefined);
+  });
+
+  it("forwards optional `opts` through to the manager", async () => {
+    vi.mocked(mtuProbeMock).mockClear();
+    await handlers["diag:mtuProbe"](allowedEvent, {
+      host: "10.0.0.1",
+      opts: { start: 1500, min: 1280, timeoutMs: 1000 },
+    });
+    expect(mtuProbeMock).toHaveBeenCalledWith("10.0.0.1", {
+      start: 1500,
+      min: 1280,
+      timeoutMs: 1000,
+    });
+  });
+
+  it("rejects when host is a number (typeof check)", async () => {
+    vi.mocked(mtuProbeMock).mockClear();
+    const result = await handlers["diag:mtuProbe"](allowedEvent, { host: 123 });
+    expect(result).toEqual({ ok: false, error: "invalid args" });
+    expect(mtuProbeMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when host is missing entirely", async () => {
+    vi.mocked(mtuProbeMock).mockClear();
+    const result = await handlers["diag:mtuProbe"](allowedEvent, {});
+    expect(result).toEqual({ ok: false, error: "invalid args" });
+    expect(mtuProbeMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when args is null / undefined / non-object", async () => {
+    vi.mocked(mtuProbeMock).mockClear();
+    for (const bad of [null, undefined, "10.0.0.1", 42, true]) {
+      const result = await handlers["diag:mtuProbe"](allowedEvent, bad);
+      expect(result).toEqual({ ok: false, error: "invalid args" });
+    }
+    expect(mtuProbeMock).not.toHaveBeenCalled();
+  });
+
+  it("returns Unauthorized envelope when checkSender fails", async () => {
+    // Smuggle a forged senderFrame.url — validator must NOT run.
+    vi.mocked(mtuProbeMock).mockClear();
+    const evilEvent = {
+      senderFrame: { url: "https://rud1.es.evil.com/" },
+      sender: {},
+    } as unknown as Electron.IpcMainInvokeEvent;
+    const result = await handlers["diag:mtuProbe"](evilEvent, {
+      host: "10.0.0.1",
+    });
+    expect(result).toEqual({ ok: false, error: "Unauthorized origin" });
+    expect(mtuProbeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("diag:compareReports — inline validator", () => {
+  it("accepts {pathA, pathB} both strings and delegates to compareReports()", async () => {
+    vi.mocked(compareReportsMock).mockClear();
+    const result = await handlers["diag:compareReports"](allowedEvent, {
+      pathA: "report-a.json",
+      pathB: "report-b.json",
+    });
+    expect(result).toEqual({ ok: true, result: {} });
+    expect(compareReportsMock).toHaveBeenCalledWith({
+      pathA: "report-a.json",
+      pathB: "report-b.json",
+    });
+  });
+
+  it("rejects when pathA is missing", async () => {
+    vi.mocked(compareReportsMock).mockClear();
+    const result = await handlers["diag:compareReports"](allowedEvent, {
+      pathB: "report-b.json",
+    });
+    expect(result).toEqual({ ok: false, error: "invalid args" });
+    expect(compareReportsMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when pathB is missing", async () => {
+    vi.mocked(compareReportsMock).mockClear();
+    const result = await handlers["diag:compareReports"](allowedEvent, {
+      pathA: "report-a.json",
+    });
+    expect(result).toEqual({ ok: false, error: "invalid args" });
+    expect(compareReportsMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when either path is a non-string", async () => {
+    vi.mocked(compareReportsMock).mockClear();
+    for (const bad of [
+      { pathA: 1, pathB: "ok.json" },
+      { pathA: "ok.json", pathB: null },
+      { pathA: ["a"], pathB: "ok.json" },
+      { pathA: "ok.json", pathB: { nested: "x" } },
+    ]) {
+      const result = await handlers["diag:compareReports"](allowedEvent, bad);
+      expect(result).toEqual({ ok: false, error: "invalid args" });
+    }
+    expect(compareReportsMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when args is null / undefined / non-object", async () => {
+    vi.mocked(compareReportsMock).mockClear();
+    for (const bad of [null, undefined, "report-a.json", 42]) {
+      const result = await handlers["diag:compareReports"](allowedEvent, bad);
+      expect(result).toEqual({ ok: false, error: "invalid args" });
+    }
+    expect(compareReportsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("diag:autoSnapshotConfigure — inline validator", () => {
+  it("accepts {enabled: true} and delegates to configureAutoSnapshot()", async () => {
+    vi.mocked(configureAutoSnapshotMock).mockClear();
+    const payload = { enabled: true, intervalMs: 600_000 };
+    const result = await handlers["diag:autoSnapshotConfigure"](
+      allowedEvent,
+      payload,
+    );
+    expect(result).toEqual({ ok: true, result: {} });
+    expect(configureAutoSnapshotMock).toHaveBeenCalledWith(payload);
+  });
+
+  it("accepts {enabled: false}", async () => {
+    vi.mocked(configureAutoSnapshotMock).mockClear();
+    const result = await handlers["diag:autoSnapshotConfigure"](allowedEvent, {
+      enabled: false,
+    });
+    expect(result).toEqual({ ok: true, result: {} });
+    expect(configureAutoSnapshotMock).toHaveBeenCalledWith({ enabled: false });
+  });
+
+  it("rejects when .enabled is a string (typeof check)", async () => {
+    vi.mocked(configureAutoSnapshotMock).mockClear();
+    const result = await handlers["diag:autoSnapshotConfigure"](allowedEvent, {
+      enabled: "yes",
+    });
+    expect(result).toEqual({ ok: false, error: "invalid args" });
+    expect(configureAutoSnapshotMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when .enabled is a number (1/0 are NOT booleans)", async () => {
+    vi.mocked(configureAutoSnapshotMock).mockClear();
+    for (const bad of [1, 0, NaN]) {
+      const result = await handlers["diag:autoSnapshotConfigure"](
+        allowedEvent,
+        { enabled: bad },
+      );
+      expect(result).toEqual({ ok: false, error: "invalid args" });
+    }
+    expect(configureAutoSnapshotMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when .enabled is missing", async () => {
+    vi.mocked(configureAutoSnapshotMock).mockClear();
+    const result = await handlers["diag:autoSnapshotConfigure"](allowedEvent, {
+      intervalMs: 600_000,
+    });
+    expect(result).toEqual({ ok: false, error: "invalid args" });
+    expect(configureAutoSnapshotMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects when payload is null / undefined / non-object", async () => {
+    vi.mocked(configureAutoSnapshotMock).mockClear();
+    for (const bad of [null, undefined, true, "enabled", 42]) {
+      const result = await handlers["diag:autoSnapshotConfigure"](
+        allowedEvent,
+        bad,
+      );
+      expect(result).toEqual({ ok: false, error: "invalid args" });
+    }
+    expect(configureAutoSnapshotMock).not.toHaveBeenCalled();
+  });
 });
