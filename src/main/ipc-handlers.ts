@@ -69,14 +69,99 @@ import { getStats as getSystemStats } from "./system-manager";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
 
-function checkSender(event: Electron.IpcMainInvokeEvent): boolean {
-  const url = event.senderFrame?.url ?? "";
-  // Allow localhost in dev mode
-  if (!app.isPackaged && (url.startsWith("http://localhost") || url.startsWith("http://127.0.0.1"))) {
-    return true;
+// Control-character + whitespace + quote rejection list, applied against the
+// RAW sender URL BEFORE any URL parsing. WHATWG URL happily canonicalises
+// \n / \r / tabs / nulls into their percent-encoded forms, so a naive
+// post-parse check would miss CRLF-injection shapes like
+// `https://rud1.es\r\nSet-Cookie:...`. We refuse them at the boundary.
+const UNSAFE_URL_CHARS = /[\x00-\x1f\x7f\s"<>\\^`{|}]/;
+
+// Hard cap so a megabyte sender URL from a compromised frame can't OOM the
+// URL parser or flood logs.
+const MAX_SENDER_URL_LENGTH = 2048;
+
+/**
+ * Pure predicate used by `checkSender`. Separated so it is unit-testable
+ * without an Electron main-process stub.
+ *
+ * Security invariants (see also the iter-22 test suite):
+ *   • the RAW input must be a non-empty string, length-capped, and free of
+ *     control/whitespace/quote characters — applied BEFORE `new URL()` so
+ *     WHATWG canonicalisation cannot mask a CRLF or null-byte injection.
+ *   • the URL must parse.
+ *   • for the production origin: scheme + host (+ optional port) must match
+ *     ALLOWED_ORIGIN exactly — NOT a `startsWith` compare, which would let
+ *     `https://rud1.es.evil.com/` through. We compare `u.origin` against the
+ *     parsed ALLOWED_ORIGIN's origin.
+ *   • for dev mode (only when `app.isPackaged === false`): hostname must be
+ *     exactly `localhost` or `127.0.0.1`, scheme `http:` or `https:`. Again,
+ *     exact hostname match — no `startsWith`.
+ */
+export function isOriginAllowed(
+  rawUrl: unknown,
+  opts: { isPackaged: boolean; allowedOrigin?: string } = { isPackaged: true },
+): boolean {
+  if (typeof rawUrl !== "string") return false;
+  if (rawUrl.length === 0 || rawUrl.length > MAX_SENDER_URL_LENGTH) return false;
+  if (UNSAFE_URL_CHARS.test(rawUrl)) return false;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
   }
-  return url.startsWith(ALLOWED_ORIGIN);
+
+  // Reject dangerous schemes outright. `new URL("javascript:alert(1)")`
+  // parses with protocol "javascript:" — explicit allowlist is safer than
+  // blocklist. We only accept http/https here.
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+
+  // Userinfo components can be used to smuggle credentials and to bypass
+  // naive hostname-allowlist checks in downstream consumers.
+  if (parsed.username !== "" || parsed.password !== "") return false;
+
+  if (!opts.isPackaged) {
+    // Dev-mode: localhost or 127.0.0.1 with http OR https, exact hostname.
+    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+      return true;
+    }
+    // Fall through to the production origin check so a dev build pointed at
+    // a real origin (via RUD1_APP_ORIGIN) still works.
+  }
+
+  const allowedOrigin = opts.allowedOrigin ?? ALLOWED_ORIGIN;
+  let allowed: URL;
+  try {
+    allowed = new URL(allowedOrigin);
+  } catch {
+    return false;
+  }
+  // `URL.origin` normalises scheme + host + port; it omits path/query/hash.
+  // Equality here forbids prefix smuggling like `https://rud1.es.evil.com/`
+  // AND subdomain smuggling like `https://evil.rud1.es/`.
+  return parsed.origin === allowed.origin;
 }
+
+function checkSender(event: Electron.IpcMainInvokeEvent): boolean {
+  // senderFrame may be null if the frame was disposed between the renderer
+  // dispatching the message and the main process picking it up. Treat as a
+  // failed sender check — handlers return the "Unauthorized origin" envelope.
+  const url = event.senderFrame?.url;
+  if (typeof url !== "string") return false;
+  return isOriginAllowed(url, { isPackaged: app.isPackaged });
+}
+
+// Test-only surface. Not re-exported from the package entry point; only
+// imported by ipc-handlers.test.ts. Matches the `__test` pattern used in
+// auto-updater.ts (iter 21).
+export const __test = {
+  isOriginAllowed,
+  checkSender,
+  UNSAFE_URL_CHARS,
+  MAX_SENDER_URL_LENGTH,
+  ALLOWED_ORIGIN,
+};
 
 export function registerIpcHandlers(): void {
   ipcMain.handle("vpn:connect", async (event, wgConfig: string) => {

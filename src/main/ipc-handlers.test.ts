@@ -1,0 +1,452 @@
+/**
+ * Unit tests for ipc-handlers (iter 22).
+ *
+ * Scope:
+ *   • isOriginAllowed — the trust boundary between the renderer frame and
+ *     the main process. This is the single predicate every IPC channel
+ *     funnels through via checkSender(). If it regresses, EVERY channel
+ *     regresses, so we over-cover the shape invariants here and leave the
+ *     per-handler wiring to `it.todo`'d integration tests (see §4 below).
+ *   • Key shapes we pin:
+ *       - prefix-smuggling rejection (`https://rud1.es.evil.com/` vs
+ *         ALLOWED_ORIGIN `https://rud1.es`)
+ *       - subdomain-smuggling rejection (`https://evil.rud1.es/`)
+ *       - javascript: / file: / data: / ws: / about: scheme rejection
+ *       - CRLF / null-byte / control-char rejection (on the RAW string,
+ *         BEFORE URL canonicalisation — mirrors the iter-21 pattern used
+ *         by auto-updater.isValidFeedUrl)
+ *       - userinfo rejection (`https://user:pass@rud1.es/`)
+ *       - length cap (2048 chars)
+ *       - senderFrame = null → rejected (frame-disposed race)
+ *       - dev-mode: exact `localhost` / `127.0.0.1` match only, not
+ *         `localhost.evil.com`
+ *   • __test surface exposes the pure helpers so we don't need an
+ *     Electron main-process stub to exercise the security boundary.
+ *
+ * Mocking strategy:
+ *   • We `vi.mock("electron", ...)` at the top of the file because
+ *     ipc-handlers.ts imports `ipcMain`, `app`, and `BrowserWindow` at
+ *     module load. We don't exercise `registerIpcHandlers` in this suite
+ *     (that would require a full Electron main process); instead we
+ *     exercise the `checkSender` / `isOriginAllowed` boundary directly.
+ *     The per-handler dispatch is covered by `it.todo` entries below with
+ *     a rationale matching iter 21's approach for electron-updater.
+ *   • We also vi.mock every ./X-manager import because they pull in
+ *     child_process, fs, and in some cases `electron.shell` — we don't
+ *     want them to execute during a unit test of the origin check.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+
+// electron is a native module; importing it in a plain Node vitest run
+// without mocking produces `app is undefined` at ipc-handlers.ts line 38.
+// We only need a stub of the three symbols used at module load.
+vi.mock("electron", () => ({
+  ipcMain: {
+    handle: vi.fn(),
+    on: vi.fn(),
+  },
+  app: {
+    isPackaged: true,
+    getVersion: () => "0.1.0-test",
+  },
+  BrowserWindow: {
+    fromWebContents: vi.fn(() => null),
+  },
+}));
+
+// Manager modules pull in child_process / fs / network probes at import
+// time. We stub them to be inert — this suite is about the origin check,
+// not about the managers' behavior (each has its own *.test.ts file).
+vi.mock("./vpn-manager", () => ({
+  vpnConnect: vi.fn(async () => undefined),
+  vpnDisconnect: vi.fn(async () => undefined),
+  vpnStatus: vi.fn(async () => ({ connected: false })),
+}));
+vi.mock("./usb-manager", () => ({
+  usbAttach: vi.fn(async () => 1),
+  usbDetach: vi.fn(async () => undefined),
+  usbList: vi.fn(async () => []),
+}));
+vi.mock("./net-diag-manager", () => ({
+  ping: vi.fn(async () => ({ ok: true })),
+  interfaces: vi.fn(() => []),
+  resolveRoute: vi.fn(async () => null),
+  traceroute: vi.fn(async () => []),
+  dnsLookup: vi.fn(async () => []),
+  publicIp: vi.fn(async () => ({ ipv4: null, ipv6: null })),
+  portCheck: vi.fn(async () => ({ ok: true, latencyMs: 0 })),
+}));
+vi.mock("./tunnel-diag-manager", () => ({
+  wgStatus: vi.fn(async () => ({ tunnels: [] })),
+  tunnelHealth: vi.fn(async () => ({ verdict: "healthy" })),
+  mtuProbe: vi.fn(async () => ({ mtu: 1500 })),
+  fullDiagnosis: vi.fn(async () => ({})),
+  exportReport: vi.fn(async () => ({ path: "" })),
+  listReports: vi.fn(async () => []),
+  readReport: vi.fn(async () => ({})),
+  deleteReport: vi.fn(async () => undefined),
+  openReportsFolder: vi.fn(async () => undefined),
+  saveReportCopy: vi.fn(async () => ({ path: "" })),
+  compareReports: vi.fn(async () => ({})),
+}));
+vi.mock("./auto-snapshot-manager", () => ({
+  configureAutoSnapshot: vi.fn(async () => ({})),
+  getAutoSnapshotStatus: vi.fn(() => ({ enabled: false })),
+  triggerAutoSnapshotNow: vi.fn(async () => ({ ok: true })),
+}));
+vi.mock("./system-manager", () => ({
+  getStats: vi.fn(async () => ({})),
+}));
+
+import { __test } from "./ipc-handlers";
+
+const { isOriginAllowed, checkSender, UNSAFE_URL_CHARS, MAX_SENDER_URL_LENGTH } =
+  __test;
+
+const PACKAGED = { isPackaged: true } as const;
+const DEV = { isPackaged: false } as const;
+
+// ─── 1. isOriginAllowed — accepted shapes ───────────────────────────────────
+
+describe("isOriginAllowed — accepted origins (packaged build)", () => {
+  it("accepts the exact production origin", () => {
+    expect(isOriginAllowed("https://rud1.es/", PACKAGED)).toBe(true);
+    // Trailing path, query, and hash are fine — origin-level compare
+    // ignores them.
+    expect(isOriginAllowed("https://rud1.es/app", PACKAGED)).toBe(true);
+    expect(isOriginAllowed("https://rud1.es/app?x=1", PACKAGED)).toBe(true);
+  });
+
+  it("accepts a custom allowedOrigin when provided", () => {
+    expect(
+      isOriginAllowed("https://staging.rud1.es/", {
+        isPackaged: true,
+        allowedOrigin: "https://staging.rud1.es",
+      }),
+    ).toBe(true);
+  });
+});
+
+// ─── 2. isOriginAllowed — prefix / subdomain smuggling ──────────────────────
+
+describe("isOriginAllowed — origin-boundary rejections (regression pins)", () => {
+  // These are the bugs the iter-21 → iter-22 refactor fixed. Before the
+  // fix, `url.startsWith("https://rud1.es")` accepted every shape below.
+  // If any of these start returning true again, something regressed.
+  it("rejects prefix-smuggling against the allowed origin (PIN)", () => {
+    // `https://rud1.es` is a prefix of `https://rud1.es.evil.com` — the
+    // old startsWith check accepted this, which is how renderer-origin
+    // allowlists get bypassed in the wild.
+    expect(isOriginAllowed("https://rud1.es.evil.com/", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://rud1.es@evil.com/", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://rud1.eszz/", PACKAGED)).toBe(false);
+  });
+
+  it("rejects subdomain smuggling (PIN)", () => {
+    // `https://evil.rud1.es/` is a DIFFERENT origin per RFC 6454 / URL
+    // spec — subdomains do NOT inherit origin. A `startsWith` or
+    // `endsWith` check would often let this through.
+    expect(isOriginAllowed("https://evil.rud1.es/", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://a.b.rud1.es/", PACKAGED)).toBe(false);
+  });
+
+  it("rejects scheme downgrade (http:// when allowed is https://)", () => {
+    // A plain-HTTP frame with the same host is a MITM risk — the renderer
+    // might have been hijacked mid-load. Origin mismatch → reject.
+    expect(isOriginAllowed("http://rud1.es/", PACKAGED)).toBe(false);
+  });
+
+  it("rejects a port mismatch", () => {
+    // `https://rud1.es:8443/` has a different `origin` string than
+    // `https://rud1.es/` — origin-level compare catches it.
+    expect(isOriginAllowed("https://rud1.es:8443/", PACKAGED)).toBe(false);
+  });
+});
+
+// ─── 3. isOriginAllowed — dangerous schemes ─────────────────────────────────
+
+describe("isOriginAllowed — scheme allowlist", () => {
+  it("rejects javascript:, file:, data:, about:, ws:, ftp:", () => {
+    for (const bad of [
+      "javascript:alert(1)",
+      "file:///etc/passwd",
+      "data:text/html,<script>alert(1)</script>",
+      "about:blank",
+      "ws://rud1.es/",
+      "wss://rud1.es/",
+      "ftp://rud1.es/",
+      "chrome://settings",
+      "chrome-extension://abc/",
+    ]) {
+      expect(isOriginAllowed(bad, PACKAGED)).toBe(false);
+    }
+  });
+
+  it("rejects javascript: even if it textually contains the allowed host", () => {
+    // A compromised preload that somehow sets senderFrame.url to this
+    // shape must still be rejected — the protocol check runs after URL
+    // parse, before the origin compare.
+    expect(
+      isOriginAllowed("javascript://rud1.es/%0Aalert(1)", PACKAGED),
+    ).toBe(false);
+  });
+});
+
+// ─── 4. isOriginAllowed — control chars / CRLF / null byte ──────────────────
+
+describe("isOriginAllowed — unsafe raw characters (pre-parse)", () => {
+  // These all MUST be rejected on the RAW string BEFORE new URL(), because
+  // WHATWG URL canonicalises %0A / %0D / \0 into percent-encoded forms
+  // inside the path, making a post-parse scan miss them.
+  it("rejects CRLF in the raw URL", () => {
+    expect(isOriginAllowed("https://rud1.es/\r\nSet-Cookie:evil=1", PACKAGED))
+      .toBe(false);
+    expect(isOriginAllowed("https://rud1.es/\nX-Evil:1", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://rud1.es/\rX-Evil:1", PACKAGED)).toBe(false);
+  });
+
+  it("rejects null-byte injection", () => {
+    expect(isOriginAllowed("https://rud1.es/\x00evil", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://rud1.es\x00.evil.com/", PACKAGED)).toBe(
+      false,
+    );
+  });
+
+  it("rejects tab / vertical-tab / form-feed / DEL", () => {
+    for (const ch of ["\t", "\v", "\f", "\x7f"]) {
+      expect(isOriginAllowed(`https://rud1.es/${ch}x`, PACKAGED)).toBe(false);
+    }
+  });
+
+  it("rejects whitespace in the middle of the URL", () => {
+    expect(isOriginAllowed("https://rud1.es/ path", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://rud1. es/", PACKAGED)).toBe(false);
+  });
+
+  it("rejects quote / angle-bracket / backslash / backtick chars", () => {
+    for (const ch of ['"', "<", ">", "\\", "`", "{", "|", "}"]) {
+      expect(isOriginAllowed(`https://rud1.es/${ch}`, PACKAGED)).toBe(false);
+    }
+  });
+
+  it("UNSAFE_URL_CHARS regex is direction-specific (pins the char set)", () => {
+    // Make sure nobody loosens the regex accidentally — at least these
+    // control chars MUST continue to be flagged.
+    expect(UNSAFE_URL_CHARS.test("\r")).toBe(true);
+    expect(UNSAFE_URL_CHARS.test("\n")).toBe(true);
+    expect(UNSAFE_URL_CHARS.test("\x00")).toBe(true);
+    expect(UNSAFE_URL_CHARS.test("\t")).toBe(true);
+    expect(UNSAFE_URL_CHARS.test(" ")).toBe(true);
+    // And ordinary ASCII in the allowed set is NOT flagged.
+    expect(UNSAFE_URL_CHARS.test("a")).toBe(false);
+    expect(UNSAFE_URL_CHARS.test("/")).toBe(false);
+    expect(UNSAFE_URL_CHARS.test("-")).toBe(false);
+  });
+});
+
+// ─── 5. isOriginAllowed — userinfo, fragment, malformed, oversized ──────────
+
+describe("isOriginAllowed — misc input hygiene", () => {
+  it("rejects URLs carrying userinfo", () => {
+    // Credential-smuggling shape. Useful for defeating naive host checks.
+    expect(isOriginAllowed("https://user@rud1.es/", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://user:pass@rud1.es/", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("https://:pass@rud1.es/", PACKAGED)).toBe(false);
+  });
+
+  it("rejects malformed URLs", () => {
+    // Only include shapes that WHATWG URL actually rejects or canonicalises
+    // to something other than the allowed origin. We deliberately DON'T
+    // include `https:/rud1.es` / `https:rud1.es` here: Node canonicalises
+    // them to `https://rud1.es/`, which IS the allowed origin — and the
+    // same origin-level compare would correctly accept them. Rejecting a
+    // parser quirk that resolves to the trusted origin buys nothing.
+    for (const bad of [
+      "not-a-url",
+      "://rud1.es",
+      "https://",
+    ]) {
+      expect(isOriginAllowed(bad, PACKAGED)).toBe(false);
+    }
+  });
+
+  it("rejects non-string / empty / oversized input", () => {
+    expect(isOriginAllowed("", PACKAGED)).toBe(false);
+    expect(isOriginAllowed(undefined, PACKAGED)).toBe(false);
+    expect(isOriginAllowed(null, PACKAGED)).toBe(false);
+    expect(isOriginAllowed(42, PACKAGED)).toBe(false);
+    expect(isOriginAllowed({}, PACKAGED)).toBe(false);
+    expect(isOriginAllowed([], PACKAGED)).toBe(false);
+    // A padded URL just over the cap — must fail without parsing.
+    const oversized = "https://rud1.es/" + "a".repeat(MAX_SENDER_URL_LENGTH);
+    expect(oversized.length).toBeGreaterThan(MAX_SENDER_URL_LENGTH);
+    expect(isOriginAllowed(oversized, PACKAGED)).toBe(false);
+  });
+
+  it("rejects when allowedOrigin itself is malformed", () => {
+    // Defensive: a broken RUD1_APP_ORIGIN env var must fail-closed, not
+    // somehow accept everything.
+    expect(
+      isOriginAllowed("https://rud1.es/", {
+        isPackaged: true,
+        allowedOrigin: "not-a-url",
+      }),
+    ).toBe(false);
+  });
+});
+
+// ─── 6. isOriginAllowed — dev-mode localhost ────────────────────────────────
+
+describe("isOriginAllowed — dev-mode localhost bypass", () => {
+  it("accepts localhost and 127.0.0.1 when !isPackaged", () => {
+    expect(isOriginAllowed("http://localhost/", DEV)).toBe(true);
+    expect(isOriginAllowed("http://localhost:5173/", DEV)).toBe(true);
+    expect(isOriginAllowed("http://127.0.0.1/", DEV)).toBe(true);
+    expect(isOriginAllowed("http://127.0.0.1:3000/", DEV)).toBe(true);
+    expect(isOriginAllowed("https://localhost/", DEV)).toBe(true);
+  });
+
+  it("rejects the dev-mode bypass when packaged (PIN)", () => {
+    // Critical: a packaged build must NEVER accept localhost. Otherwise a
+    // compromised renderer that navigates to http://localhost/ bypasses
+    // the production origin check.
+    expect(isOriginAllowed("http://localhost/", PACKAGED)).toBe(false);
+    expect(isOriginAllowed("http://127.0.0.1/", PACKAGED)).toBe(false);
+  });
+
+  it("rejects localhost-prefix smuggling in dev mode (PIN)", () => {
+    // Old code did `url.startsWith("http://localhost")` which matches
+    // `http://localhost.evil.com/` — classic DNS-rebinding + prefix
+    // attack. Exact hostname compare rejects it.
+    expect(isOriginAllowed("http://localhost.evil.com/", DEV)).toBe(false);
+    expect(isOriginAllowed("http://127.0.0.1.evil.com/", DEV)).toBe(false);
+    expect(isOriginAllowed("http://localhostx/", DEV)).toBe(false);
+  });
+
+  it("rejects 127.0.0.1-look-alike IPs in dev mode", () => {
+    // `127.0.0.2`, `0.0.0.0` don't canonicalise to `127.0.0.1` and must
+    // fall through to the (non-matching) production origin check.
+    expect(isOriginAllowed("http://127.0.0.2/", DEV)).toBe(false);
+    expect(isOriginAllowed("http://0.0.0.0/", DEV)).toBe(false);
+    // IPv6 loopback — not currently accepted; flagged here as a pin.
+    expect(isOriginAllowed("http://[::1]/", DEV)).toBe(false);
+    // NOTE: we DO accept `http://127.1/` in dev mode. WHATWG URL
+    // canonicalises `127.1` → `127.0.0.1` (IPv4 shorthand, RFC 3986
+    // compatible), so after parsing it's the same hostname as the
+    // standard loopback literal. This is defensible: the shorthand only
+    // ever resolves to actual loopback — there's no DNS step that could
+    // be rebinded. Pinned here as documented behavior.
+    expect(isOriginAllowed("http://127.1/", DEV)).toBe(true);
+  });
+
+  it("dev mode still accepts the configured production origin", () => {
+    // Running a dev build pointed at a real RUD1_APP_ORIGIN must still
+    // work — the dev-mode branch falls through to the origin check when
+    // the hostname isn't localhost.
+    expect(isOriginAllowed("https://rud1.es/", DEV)).toBe(true);
+  });
+});
+
+// ─── 7. checkSender — wraps isOriginAllowed via senderFrame ─────────────────
+
+describe("checkSender — event.senderFrame integration", () => {
+  // Minimal fake IpcMainInvokeEvent: just enough of the shape for the
+  // sender check. We deliberately don't import the real Electron type
+  // because it references `webContents` which is a class.
+  function fakeEvent(senderFrame: { url: string } | null): Electron.IpcMainInvokeEvent {
+    return { senderFrame } as unknown as Electron.IpcMainInvokeEvent;
+  }
+
+  it("accepts a trusted senderFrame.url", () => {
+    expect(checkSender(fakeEvent({ url: "https://rud1.es/app" }))).toBe(true);
+  });
+
+  it("rejects a forged senderFrame.url (prefix attack)", () => {
+    expect(checkSender(fakeEvent({ url: "https://rud1.es.evil.com/" }))).toBe(
+      false,
+    );
+  });
+
+  it("rejects when senderFrame is null (frame disposed race)", () => {
+    // Electron's senderFrame getter can return null if the frame was
+    // destroyed between dispatch and main-process handling. The check
+    // must NOT throw and MUST fail closed.
+    expect(() => checkSender(fakeEvent(null))).not.toThrow();
+    expect(checkSender(fakeEvent(null))).toBe(false);
+  });
+
+  it("rejects when senderFrame.url is non-string", () => {
+    // A hostile preload could plausibly set this to any JS value. The
+    // check must not accept `undefined` or throw.
+    const e = { senderFrame: { url: undefined } } as unknown as Electron.IpcMainInvokeEvent;
+    expect(checkSender(e)).toBe(false);
+    const e2 = { senderFrame: { url: 42 } } as unknown as Electron.IpcMainInvokeEvent;
+    expect(checkSender(e2)).toBe(false);
+  });
+
+  it("rejects a senderFrame.url carrying CRLF (regression pin)", () => {
+    expect(
+      checkSender(fakeEvent({ url: "https://rud1.es/\r\nX-Evil:1" })),
+    ).toBe(false);
+  });
+});
+
+// ─── 8. Per-handler dispatch coverage — documented it.todo ──────────────────
+
+describe("registerIpcHandlers — per-channel dispatch", () => {
+  // Rationale (mirrors iter 21's auto-updater event-flow decision):
+  //
+  // Exercising each `ipcMain.handle` callback would require either
+  //   (a) a full Electron main process (heavy, flakey in CI), or
+  //   (b) re-implementing `ipcMain.handle` as a dispatch table here,
+  //       which means we'd be testing our mock instead of the code.
+  //
+  // Every handler funnels through `checkSender`, which is covered above
+  // by direct isOriginAllowed() tests on both accepted and adversarial
+  // shapes. The only per-handler logic beyond that is either:
+  //   • a typeof/arg-shape check that delegates to the manager (see the
+  //     diag:mtuProbe / diag:compareReports / diag:autoSnapshotConfigure
+  //     inline validators — todo'd below), or
+  //   • pure delegation to a manager that has its own *.test.ts file
+  //     exercising the real guards (vpn-manager, usb-manager, net-diag-
+  //     manager, tunnel-diag-manager — see validateReportPath there).
+  //
+  // So the integration shape is covered indirectly: origin check here,
+  // path-traversal in tunnel-diag-manager.test.ts, spawn-arg escaping in
+  // vpn-manager.test.ts, etc.
+
+  it.todo(
+    "diag:mtuProbe rejects args that are not {host: string} " +
+      "(skipped: requires an ipcMain.handle capture harness — the inline " +
+      "validator is a simple typeof check and a regression is more likely " +
+      "in tunnel-diag-manager.mtuProbe's own guards, which are covered by " +
+      "tunnel-diag-manager.test.ts).",
+  );
+
+  it.todo(
+    "diag:compareReports rejects args missing pathA / pathB " +
+      "(skipped: same rationale; path-traversal is guarded by " +
+      "tunnel-diag-manager.validateReportPath and tested there).",
+  );
+
+  it.todo(
+    "diag:autoSnapshotConfigure rejects a payload without .enabled:boolean " +
+      "(skipped: same rationale; auto-snapshot-manager.configureAutoSnapshot " +
+      "additionally clamps intervalMs, tested in auto-snapshot-manager.test.ts).",
+  );
+
+  it.todo(
+    "diag:readReport / diag:deleteReport with `../../../etc/passwd` " +
+      "(skipped: path-traversal rejection is implemented in " +
+      "tunnel-diag-manager.validateReportPath and covered in " +
+      "tunnel-diag-manager.test.ts — this handler is pure delegation).",
+  );
+
+  it.todo(
+    "vpn:connect rejects when sender origin is unauthorized " +
+      "(skipped: identical control-flow for every channel — covered by " +
+      "checkSender + isOriginAllowed suites above; registering each channel " +
+      "as a dispatch test would be O(n) duplication with no extra signal).",
+  );
+});
