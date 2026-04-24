@@ -8,9 +8,16 @@
  *
  * The private key is generated on the client, never sent to the server.
  * The WireGuard config supplied here should have PrivateKey filled in.
+ *
+ * Security: the tunnel name forwarded to wg-quick/wireguard.exe/netsh is
+ * validated against a strict regex (alphanumeric+underscore+dash, 1..15
+ * chars — the Linux IFNAMSIZ limit minus NUL). The temp config file name
+ * is derived from the tunnel name only, so path-traversal via `../..` is
+ * impossible. `netsh` no longer runs through cmd.exe — we invoke it via
+ * execFile with argv, not exec with a string.
  */
 
-import { execFile, exec } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import os from "os";
@@ -18,14 +25,39 @@ import path from "path";
 import { wgPath, wgQuickPath } from "./binary-helper";
 
 const execFileAsync = promisify(execFile);
-const execAsync = promisify(exec);
+
+// Linux IFNAMSIZ is 16 (15 chars + NUL). WireGuard interface names must
+// match `^[a-zA-Z0-9_=+.-]{1,15}$` per the kernel module; we keep a
+// stricter subset (no `=`/`+`) for safety — none of those are needed for
+// the rud1-generated default `rud1` or any user-chosen name we'd ship.
+const TUNNEL_NAME_REGEX = /^[a-zA-Z0-9_.\-]{1,15}$/;
 
 const TUNNEL_NAME = "rud1";
 let configFilePath: string | null = null;
 
+export function validateTunnelName(name: unknown): name is string {
+  return typeof name === "string" && TUNNEL_NAME_REGEX.test(name);
+}
+
+function assertTunnelName(name: unknown): asserts name is string {
+  if (!validateTunnelName(name)) {
+    throw new Error("invalid tunnel name");
+  }
+}
+
+/**
+ * Resolve the on-disk path for a tunnel's temp WireGuard config. Uses
+ * only `os.tmpdir()` + the validated tunnel name — never accepts a
+ * caller-supplied path, so traversal (`../etc/passwd.conf`) cannot
+ * reach writeFile.
+ */
+export function resolveConfigPath(name: string): string {
+  assertTunnelName(name);
+  return path.join(os.tmpdir(), `${name}.conf`);
+}
+
 async function writeTempConfig(wgConfig: string): Promise<string> {
-  const dir = os.tmpdir();
-  const file = path.join(dir, `${TUNNEL_NAME}.conf`);
+  const file = resolveConfigPath(TUNNEL_NAME);
   await fs.writeFile(file, wgConfig, { mode: 0o600 });
   configFilePath = file;
   return file;
@@ -38,6 +70,31 @@ async function removeTempConfig(): Promise<void> {
   }
 }
 
+// ─── Parsers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Parse `wg show <iface>` stdout. Returns `{connected, ip?}`. A tunnel is
+ * considered connected only when a "latest handshake" line is present;
+ * the optional `address: X.X.X.X` line (wg-quick wrappers on some distros)
+ * is extracted when available.
+ */
+export function parseWgShow(stdout: string): { connected: boolean; ip?: string } {
+  const connected = stdout.includes("latest handshake");
+  const ipMatch = stdout.match(/address:\s+([\d.]+)/i);
+  return ipMatch?.[1]
+    ? { connected, ip: ipMatch[1] }
+    : { connected };
+}
+
+/**
+ * Parse `netsh interface show interface <name>` stdout. On Windows, a
+ * value of "Connected" in the Connect state column signals the tunnel
+ * is up; anything else counts as disconnected.
+ */
+export function parseNetshInterface(stdout: string): { connected: boolean } {
+  return { connected: stdout.includes("Connected") };
+}
+
 // ─── Platform implementations ─────────────────────────────────────────────────
 
 async function connectWindows(wgConfig: string): Promise<void> {
@@ -48,16 +105,24 @@ async function connectWindows(wgConfig: string): Promise<void> {
 }
 
 async function disconnectWindows(): Promise<void> {
+  assertTunnelName(TUNNEL_NAME);
   const wireguard = wgQuickPath();
   await execFileAsync(wireguard, ["/removetunnel", TUNNEL_NAME]);
   await removeTempConfig();
 }
 
 async function statusWindows(): Promise<{ connected: boolean; ip?: string }> {
+  assertTunnelName(TUNNEL_NAME);
   try {
-    const { stdout } = await execAsync(`netsh interface show interface "${TUNNEL_NAME}"`);
-    const connected = stdout.includes("Connected");
-    return { connected };
+    // execFile (no shell) — previously used `exec` with a quoted string,
+    // which is a shell-parsed form. TUNNEL_NAME is hardcoded today, but
+    // passing it as argv keeps us safe if it ever becomes dynamic.
+    const { stdout } = await execFileAsync(
+      "netsh",
+      ["interface", "show", "interface", TUNNEL_NAME],
+      { windowsHide: true },
+    );
+    return parseNetshInterface(stdout);
   } catch {
     return { connected: false };
   }
@@ -70,6 +135,7 @@ async function connectUnix(wgConfig: string): Promise<void> {
 }
 
 async function disconnectUnix(): Promise<void> {
+  assertTunnelName(TUNNEL_NAME);
   const wgQuick = wgQuickPath();
   if (configFilePath) {
     await execFileAsync(wgQuick, ["down", configFilePath]);
@@ -80,12 +146,11 @@ async function disconnectUnix(): Promise<void> {
 }
 
 async function statusUnix(): Promise<{ connected: boolean; ip?: string }> {
+  assertTunnelName(TUNNEL_NAME);
   try {
     const wg = wgPath();
     const { stdout } = await execFileAsync(wg, ["show", TUNNEL_NAME]);
-    const connected = stdout.includes("latest handshake");
-    const ipMatch = stdout.match(/address:\s+([\d.]+)/i);
-    return { connected, ip: ipMatch?.[1] };
+    return parseWgShow(stdout);
   } catch {
     return { connected: false };
   }
@@ -114,3 +179,19 @@ export function generateKeyPairInstructions(): string {
   }
   return 'wg genkey | tee priv.key | wg pubkey';
 }
+
+/**
+ * Test-only hatch — exposes the tunnel-name validator, the
+ * wg/netsh parsers, and the config-path resolver so the unit tests
+ * can exercise them directly without spawning a real WireGuard
+ * process. Keep this export narrow: only pure helpers belong here.
+ * Production callers must use the public API above.
+ */
+export const __test = {
+  assertTunnelName,
+  resolveConfigPath,
+  parseWgShow,
+  parseNetshInterface,
+  TUNNEL_NAME,
+  TUNNEL_NAME_REGEX,
+};
