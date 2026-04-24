@@ -129,6 +129,16 @@ function collectInterfaces(): SystemStatsInterface[] {
   return out;
 }
 
+// Test-only hatch: exposes the internal helpers so system-manager.test.ts
+// can pin their behaviour (CPU delta math, interface rollup, edge cases)
+// without exercising `getStats()` top-to-bottom. Matches the pattern used
+// by vpn-manager / net-diag-manager / tunnel-diag-manager.
+export const __test = {
+  totalCpuTimes,
+  collectInterfaces,
+  sampleCpuUtilisation,
+};
+
 export async function getStats(): Promise<SystemStats> {
   const startedAt = performance.now();
   const util = await sampleCpuUtilisation();
