@@ -122,6 +122,14 @@ export type VersionCheckState =
       // one or when every entry was filtered out by validation; this
       // keeps the iter-38 scalar-only path strictly backward-compatible.
       bridgeDownloadUrls?: Record<string, string>;
+      // Iter 40 — optional integrity claim for the bridge artifact. Same
+      // 64-char lowercase-hex shape as the top-level `sha256` field.
+      // `null` when the manifest didn't carry one (current default
+      // behaviour — bridge downloads are advertised without an integrity
+      // claim). Threaded through to the Settings/About panel so a future
+      // strict bridge mode can refuse to apply a bridge whose hash
+      // doesn't match.
+      bridgeSha256: string | null;
       checkedAt: number;
     }
   | { kind: "error"; message: string; checkedAt: number };
@@ -279,6 +287,25 @@ export interface VersionManifest {
    * remains the documented fallback for unkeyed manifests.
    */
   bridgeDownloadUrls?: Record<string, string>;
+  /**
+   * Iter 40 — optional integrity claim for the bridge download. Same
+   * shape gate as `sha256` (lowercase 64-char hex), validated through
+   * the same SHA256_HEX_REGEX. Ships next to `bridgeDownloadUrl` /
+   * `bridgeDownloadUrls` so a future strict-mode for the bridge path
+   * can refuse to apply a bridge artifact whose hash doesn't match.
+   *
+   * Wire-shape strictness mirrors `sha256`:
+   *   - Missing / null / undefined → `null`. Behaviour unchanged.
+   *   - Wrong type, wrong length, non-hex → reject the WHOLE manifest.
+   *     The bridge download is the load-bearing migration path between
+   *     two `minBootstrapVersion` cohorts, and a server-side typo here
+   *     is exactly the class of issue we want to surface loudly rather
+   *     than silently degrade.
+   *
+   * Optional in v1 AND v2 manifests; deferred to a future v3 if/when
+   * we want to enforce presence whenever any bridge URL is published.
+   */
+  bridgeSha256: string | null;
 }
 
 /**
@@ -463,6 +490,25 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     }
   }
 
+  // Iter 40 — optional bridgeSha256. Same SHA256_HEX_REGEX shape gate
+  // and same loud-fail policy as the top-level `sha256` field: missing
+  // / null → preserved as null (current behaviour, the bridge artifact
+  // is delivered without an integrity claim), wrong-type / wrong-length
+  // / non-hex → reject the whole manifest. We deliberately do NOT
+  // require `bridgeSha256` to be present whenever any bridge URL is
+  // also published — that escalation belongs to a future v3 schema bump
+  // (parallel with how iter-32 made the top-level sha256 mandatory in
+  // v2). Today's behaviour is "advertise the hash if you have one".
+  let bridgeSha256: string | null = null;
+  if (
+    Object.prototype.hasOwnProperty.call(obj, "bridgeSha256") &&
+    obj.bridgeSha256 != null
+  ) {
+    if (typeof obj.bridgeSha256 !== "string") return null;
+    if (!SHA256_HEX_REGEX.test(obj.bridgeSha256)) return null;
+    bridgeSha256 = obj.bridgeSha256.toLowerCase();
+  }
+
   return {
     version: obj.version,
     downloadUrl,
@@ -473,6 +519,7 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     minBootstrapVersion,
     bridgeDownloadUrl,
     bridgeDownloadUrls,
+    bridgeSha256,
   };
 }
 
@@ -564,6 +611,7 @@ export function classifyManifest(
           releaseNotesUrl: manifest.releaseNotesUrl,
           bridgeDownloadUrl: manifest.bridgeDownloadUrl,
           bridgeDownloadUrls: manifest.bridgeDownloadUrls,
+          bridgeSha256: manifest.bridgeSha256,
           checkedAt: now,
         };
       }

@@ -51,6 +51,7 @@ describe("parseManifest", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -68,6 +69,7 @@ describe("parseManifest", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -85,6 +87,7 @@ describe("parseManifest", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -125,6 +128,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -144,6 +148,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -228,6 +233,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -246,6 +252,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -382,6 +389,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       rolloutBucket: null,
       minBootstrapVersion: null,
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -1024,6 +1032,7 @@ describe("parseManifest — minBootstrapVersion (iter 36)", () => {
       rolloutBucket: null,
       minBootstrapVersion: "1.2.0",
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -1043,6 +1052,7 @@ describe("parseManifest — minBootstrapVersion (iter 36)", () => {
       rolloutBucket: null,
       minBootstrapVersion: "1.2.0",
       bridgeDownloadUrl: null,
+      bridgeSha256: null,
     });
   });
 
@@ -2189,5 +2199,148 @@ describe("Settings panel — Copy download URL precedence (iter 39)", () => {
     expect(pickDownloadUrl(state)).toBe(
       "https://rud1.es/desktop/bridge/scalar",
     );
+  });
+});
+
+// ─── Iter 40 — manifest bridgeSha256 integrity field ───────────────────────
+
+describe("parseManifest — bridgeSha256 (iter 40)", () => {
+  const VALID_SHA = "a".repeat(64);
+  const VALID_BRIDGE_SHA = "b".repeat(64);
+  const VALID_BRIDGE_SHA_MIXED =
+    "ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789";
+
+  it("v1 manifest with valid bridgeSha256 → preserved (lowercased)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge",
+      bridgeSha256: VALID_BRIDGE_SHA_MIXED,
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeSha256).toBe(VALID_BRIDGE_SHA_MIXED.toLowerCase());
+  });
+
+  it("v2 manifest with valid bridgeSha256 → preserved (lowercased)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge",
+      bridgeSha256: VALID_BRIDGE_SHA,
+    });
+    expect(m?.bridgeSha256).toBe(VALID_BRIDGE_SHA);
+  });
+
+  it("missing field → null (optional, default behaviour preserved)", () => {
+    const m = parseManifest({ version: "1.5.0" });
+    expect(m?.bridgeSha256).toBeNull();
+  });
+
+  it("explicit null → null (no integrity claim, current default)", () => {
+    const m = parseManifest({ version: "1.5.0", bridgeSha256: null });
+    expect(m?.bridgeSha256).toBeNull();
+  });
+
+  it("non-string bridgeSha256 → REJECT whole manifest (loud-fail)", () => {
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: 1234567890 }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: { hex: VALID_BRIDGE_SHA } }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: [VALID_BRIDGE_SHA] }),
+    ).toBeNull();
+  });
+
+  it("wrong-length bridgeSha256 → REJECT whole manifest", () => {
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: "deadbeef" }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: "a".repeat(63) }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: "a".repeat(65) }),
+    ).toBeNull();
+  });
+
+  it("non-hex bridgeSha256 → REJECT whole manifest", () => {
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: "z".repeat(64) }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeSha256: "g" + "a".repeat(63) }),
+    ).toBeNull();
+  });
+
+  it("bridgeSha256 + bridgeDownloadUrl + minBootstrapVersion all coexist", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+      bridgeSha256: VALID_BRIDGE_SHA,
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeDownloadUrl).toBe(
+      "https://rud1.es/desktop/bridge/v1.2.0",
+    );
+    expect(m?.bridgeSha256).toBe(VALID_BRIDGE_SHA);
+    expect(m?.minBootstrapVersion).toBe("1.2.0");
+  });
+
+  it("bridgeSha256 without bridgeDownloadUrl → still preserved (forward-compat)", () => {
+    // The hash is independent of the URL: a manifest may carry a hash
+    // even if the URL ships in a sibling map (bridgeDownloadUrls) or
+    // arrives via a different channel entirely. We don't try to
+    // cross-validate at parse time.
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeSha256: VALID_BRIDGE_SHA,
+    });
+    expect(m?.bridgeSha256).toBe(VALID_BRIDGE_SHA);
+    expect(m?.bridgeDownloadUrl).toBeNull();
+  });
+});
+
+// ─── Iter 40 — classifyManifest threads bridgeSha256 into blocked state ────
+
+describe("classifyManifest — bridgeSha256 in blocked state (iter 40)", () => {
+  const VALID_BRIDGE_SHA = "c".repeat(64);
+
+  it("update-blocked state surfaces bridgeSha256 from the manifest", () => {
+    const manifest = parseManifest({
+      version: "1.5.0",
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+      bridgeSha256: VALID_BRIDGE_SHA,
+    });
+    expect(manifest).not.toBeNull();
+    const state = classifyManifest("1.0.0", manifest!, 1700000000);
+    if (state.kind !== "update-blocked-by-min-bootstrap") {
+      throw new Error(`expected blocked state, got ${state.kind}`);
+    }
+    expect(state.bridgeSha256).toBe(VALID_BRIDGE_SHA);
+    expect(state.bridgeDownloadUrl).toBe(
+      "https://rud1.es/desktop/bridge/v1.2.0",
+    );
+  });
+
+  it("update-blocked state has bridgeSha256=null when manifest omits it", () => {
+    const manifest = parseManifest({
+      version: "1.5.0",
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+    });
+    expect(manifest).not.toBeNull();
+    const state = classifyManifest("1.0.0", manifest!, 1700000000);
+    if (state.kind !== "update-blocked-by-min-bootstrap") {
+      throw new Error(`expected blocked state, got ${state.kind}`);
+    }
+    expect(state.bridgeSha256).toBeNull();
   });
 });
