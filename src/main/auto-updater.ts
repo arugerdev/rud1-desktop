@@ -257,6 +257,16 @@ import {
 } from "electron";
 
 const AUTO_UPDATE_ENV = "RUD1_DESKTOP_AUTO_UPDATE";
+// Iter-31 strict mode. When `RUD1_DESKTOP_AUTO_UPDATE_STRICT=1` the
+// applyAndRestart path REJECTS any artifact whose manifest didn't
+// advertise a sha256, even when the user opted in via the regular
+// auto-update flag. The intent is "I trust the manifest's
+// integrity claim and will not run anything I can't verify" — useful
+// for pinned-config deployments where an MITM that strips sha256
+// from the manifest must not silently downgrade us to the iter-30
+// permissive mode. Off by default (manifest v1 still works); future
+// signed builds will set the flag at install time.
+const AUTO_UPDATE_STRICT_ENV = "RUD1_DESKTOP_AUTO_UPDATE_STRICT";
 const AUTO_UPDATE_CONFIG_FILE = "auto-update-config.json";
 const DOWNLOAD_FILE_DEFAULT = "rud1-update.bin";
 // Hard cap on the downloaded artifact. A real DMG / NSIS / AppImage is
@@ -361,6 +371,57 @@ export function isAutoUpdateEnabled(opts: {
   if (env[AUTO_UPDATE_ENV] === "1") return true;
   const cfg = readPersistedConfig(() => a.getPath("userData"), fileSystem);
   return cfg.autoUpdate === true;
+}
+
+/**
+ * True when the operator has opted into strict-verification mode
+ * (iter 31). In strict mode `applyAndRestart` REFUSES to launch any
+ * artifact whose manifest did not advertise a `sha256` — the iter-30
+ * permissive fallback ("warn but allow") is gated off. Independent
+ * of `isAutoUpdateEnabled`: a developer running `npm run dev` may
+ * want to flip the flag without flipping the dev-time auto-update
+ * disable, so we DO NOT require `app.isPackaged` here.
+ *
+ * Persisted-config support mirrors the regular flag: a userData-level
+ * `auto-update-config.json` may set `strict: true` so an MDM-style
+ * deployment can pin strict mode without exporting an env var.
+ */
+export function isStrictAutoUpdateEnabled(opts: {
+  env?: NodeJS.ProcessEnv;
+  appOverride?: { getPath: (n: string) => string };
+  fileSystem?: typeof fs;
+} = {}): boolean {
+  const env = opts.env ?? process.env;
+  const a = opts.appOverride ?? deps.app ?? electronApp;
+  const fileSystem = opts.fileSystem ?? deps.fileSystem ?? fs;
+  if (env[AUTO_UPDATE_STRICT_ENV] === "1") return true;
+  if (!a) return false;
+  const cfg = readPersistedConfigStrict(() => a.getPath("userData"), fileSystem);
+  return cfg.strict === true;
+}
+
+/**
+ * Read the `strict` flag from the persisted config file. Kept as a
+ * sibling of readPersistedConfig (instead of merging into a single
+ * loader) so a malformed `autoUpdate` field doesn't poison the
+ * `strict` read or vice versa — operators that hand-edit the file
+ * may leave one valid and the other typo'd.
+ */
+function readPersistedConfigStrict(
+  getUserData: () => string,
+  fileSystem: typeof fs,
+): { strict?: boolean } {
+  try {
+    const p = path.join(getUserData(), AUTO_UPDATE_CONFIG_FILE);
+    const raw = fileSystem.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.strict === "boolean") {
+      return { strict: parsed.strict };
+    }
+    return {};
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -473,9 +534,21 @@ export function startBackgroundDownload(
  * through their installer dialog and we quit so the new version takes
  * over on next launch. Full silent install would need `electron-updater`
  * + a signed feed; explicitly out of scope this iter.
+ *
+ * Strict mode (iter 31): when `RUD1_DESKTOP_AUTO_UPDATE_STRICT=1` is set
+ * (or the persisted-config equivalent), an artifact whose manifest did
+ * not advertise a sha256 is REFUSED — the operator opted out of the
+ * iter-30 permissive fallback. The downloaded file is unlinked so a
+ * subsequent retry can fetch a fresh manifest.
  */
 export async function applyAndRestart(
-  options: { shell?: AutoUpdaterDependencies["shell"]; quit?: () => void; fileSystem?: typeof fs } = {},
+  options: {
+    shell?: AutoUpdaterDependencies["shell"];
+    quit?: () => void;
+    fileSystem?: typeof fs;
+    strict?: boolean;
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<AutoUpdateState> {
   if (state.kind !== "ready-to-apply") {
     setState({ kind: "error", message: "no downloaded artifact ready" });
@@ -484,7 +557,26 @@ export async function applyAndRestart(
   const sh = options.shell ?? deps.shell ?? electronShell;
   const quit = options.quit ?? deps.quit ?? (() => electronApp.quit());
   const fileSystem = options.fileSystem ?? deps.fileSystem ?? fs;
+  const strict =
+    options.strict ??
+    isStrictAutoUpdateEnabled({
+      env: options.env,
+      fileSystem,
+    });
   const ready = state;
+  if (!ready.sha256 && strict) {
+    setState({
+      kind: "error",
+      message:
+        "strict mode rejected this update: manifest did not advertise a sha256 hash",
+    });
+    try {
+      fileSystem.unlinkSync(ready.filepath);
+    } catch {
+      /* ignore */
+    }
+    return state;
+  }
   if (ready.sha256) {
     try {
       const buf = await fsp.readFile(ready.filepath);
@@ -526,10 +618,13 @@ export const __test = {
   HOST_REGEX,
   UNSAFE_PATH_CHARS,
   AUTO_UPDATE_ENV,
+  AUTO_UPDATE_STRICT_ENV,
   AUTO_UPDATE_CONFIG_FILE,
   DOWNLOAD_FILE_DEFAULT,
   MAX_DOWNLOAD_BYTES,
   readPersistedConfig,
+  readPersistedConfigStrict,
+  isStrictAutoUpdateEnabled,
   setStateForTesting: (s: AutoUpdateState) => { state = s; },
   resetStateForTesting: () => { state = { kind: "idle" }; listeners = []; deps = {}; },
 };

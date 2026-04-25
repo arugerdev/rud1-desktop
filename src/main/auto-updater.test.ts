@@ -41,7 +41,11 @@ vi.mock("electron-updater", () => ({
   },
 }));
 
-import { configureAutoUpdater, __test } from "./auto-updater";
+import {
+  applyAndRestart,
+  configureAutoUpdater,
+  __test,
+} from "./auto-updater";
 
 const {
   isValidFeedUrl,
@@ -51,6 +55,11 @@ const {
   compareSemver,
   isNewerVersion,
   ALLOWED_CHANNELS,
+  AUTO_UPDATE_STRICT_ENV,
+  isStrictAutoUpdateEnabled,
+  readPersistedConfigStrict,
+  setStateForTesting,
+  resetStateForTesting,
 } = __test;
 
 // ─── 1. isValidFeedUrl ──────────────────────────────────────────────────────
@@ -434,4 +443,228 @@ describe("checkForUpdates event flow", () => {
       "via nock or undici mocks; the validator layer refuses non-HTTPS URLs " +
       "at configuration time, which is the only code path under our control.)",
   );
+});
+
+// ─── 8. Strict mode (iter 31) ───────────────────────────────────────────────
+
+describe("isStrictAutoUpdateEnabled", () => {
+  it("returns true when the env flag is set to 1", () => {
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: { [AUTO_UPDATE_STRICT_ENV]: "1" },
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: { readFileSync: () => { throw new Error("ENOENT"); } } as unknown as typeof import("fs"),
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when the env flag is unset and no config file exists", () => {
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: { readFileSync: () => { throw new Error("ENOENT"); } } as unknown as typeof import("fs"),
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true when the persisted config has strict=true", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: true }),
+    } as unknown as typeof import("fs");
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores malformed JSON in the persisted config", () => {
+    const fakeFs = {
+      readFileSync: () => "{ this is not json",
+    } as unknown as typeof import("fs");
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores wrongly-typed strict field (e.g. string instead of bool)", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: "yes" }),
+    } as unknown as typeof import("fs");
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+  });
+
+  it("env=1 wins even if persisted config has strict=false", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: false }),
+    } as unknown as typeof import("fs");
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: { [AUTO_UPDATE_STRICT_ENV]: "1" },
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("readPersistedConfigStrict", () => {
+  it("returns {} when the file does not exist", () => {
+    const fakeFs = {
+      readFileSync: () => { throw new Error("ENOENT"); },
+    } as unknown as typeof import("fs");
+    expect(readPersistedConfigStrict(() => "/tmp", fakeFs)).toEqual({});
+  });
+
+  it("returns {strict:true} for valid JSON with strict=true", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: true, autoUpdate: false }),
+    } as unknown as typeof import("fs");
+    expect(readPersistedConfigStrict(() => "/tmp", fakeFs)).toEqual({ strict: true });
+  });
+
+  it("returns {} when strict is not a boolean (e.g. number)", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: 1 }),
+    } as unknown as typeof import("fs");
+    expect(readPersistedConfigStrict(() => "/tmp", fakeFs)).toEqual({});
+  });
+});
+
+describe("applyAndRestart strict-mode rejection", () => {
+  it("rejects a ready artifact without sha256 when strict=true", async () => {
+    resetStateForTesting();
+    setStateForTesting({
+      kind: "ready-to-apply",
+      url: "https://example.com/app.dmg",
+      filepath: "/tmp/app.dmg",
+      sha256: null,
+    });
+    const unlinks: string[] = [];
+    const fakeFs = {
+      unlinkSync: (p: string) => { unlinks.push(p); },
+    } as unknown as typeof import("fs");
+    const result = await applyAndRestart({
+      strict: true,
+      shell: {
+        openPath: vi.fn(async () => ""),
+        openExternal: vi.fn(async () => undefined),
+      },
+      quit: vi.fn(),
+      fileSystem: fakeFs,
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).toMatch(/strict mode rejected/i);
+      expect(result.message).toMatch(/sha256/i);
+    }
+    // The artifact must be removed so a retry can fetch a fresh one.
+    expect(unlinks).toEqual(["/tmp/app.dmg"]);
+    resetStateForTesting();
+  });
+
+  it("permits a ready artifact without sha256 when strict=false (iter-30 behaviour)", async () => {
+    resetStateForTesting();
+    setStateForTesting({
+      kind: "ready-to-apply",
+      url: "https://example.com/app.dmg",
+      filepath: "/nonexistent/app.dmg",
+      sha256: null,
+    });
+    const openPath = vi.fn(async () => "");
+    const quit = vi.fn();
+    const result = await applyAndRestart({
+      strict: false,
+      shell: {
+        openPath,
+        openExternal: vi.fn(async () => undefined),
+      },
+      quit,
+      fileSystem: {
+        unlinkSync: () => undefined,
+      } as unknown as typeof import("fs"),
+    });
+    expect(openPath).toHaveBeenCalledWith("/nonexistent/app.dmg");
+    expect(quit).toHaveBeenCalled();
+    expect(result.kind).toBe("ready-to-apply");
+    resetStateForTesting();
+  });
+
+  it("strict=true with a sha256 still proceeds to verification (and fails because no real file)", async () => {
+    resetStateForTesting();
+    setStateForTesting({
+      kind: "ready-to-apply",
+      url: "https://example.com/app.dmg",
+      filepath: "/this-path-does-not-exist-rud1-test/app.dmg",
+      sha256: "deadbeef",
+    });
+    const result = await applyAndRestart({
+      strict: true,
+      shell: {
+        openPath: vi.fn(async () => ""),
+        openExternal: vi.fn(async () => undefined),
+      },
+      quit: vi.fn(),
+      fileSystem: {
+        unlinkSync: () => undefined,
+      } as unknown as typeof import("fs"),
+    });
+    // Either the file read fails OR the sha mismatch fires — both are
+    // legal "strict path proceeded past the gate" outcomes; the gate
+    // itself MUST NOT have produced the "strict mode rejected" message.
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      expect(result.message).not.toMatch(/strict mode rejected/i);
+    }
+    resetStateForTesting();
+  });
+
+  it("strict default is read from env when no override passed", async () => {
+    resetStateForTesting();
+    const prev = process.env[AUTO_UPDATE_STRICT_ENV];
+    process.env[AUTO_UPDATE_STRICT_ENV] = "1";
+    try {
+      setStateForTesting({
+        kind: "ready-to-apply",
+        url: "https://example.com/app.dmg",
+        filepath: "/tmp/app.dmg",
+        sha256: null,
+      });
+      const result = await applyAndRestart({
+        shell: {
+          openPath: vi.fn(async () => ""),
+          openExternal: vi.fn(async () => undefined),
+        },
+        quit: vi.fn(),
+        fileSystem: {
+          unlinkSync: () => undefined,
+          // readFileSync is consulted by isStrictAutoUpdateEnabled for
+          // the persisted-config fallback. ENOENT keeps it neutral so
+          // the env flag drives the decision.
+          readFileSync: () => { throw new Error("ENOENT"); },
+        } as unknown as typeof import("fs"),
+      });
+      expect(result.kind).toBe("error");
+      if (result.kind === "error") {
+        expect(result.message).toMatch(/strict mode rejected/i);
+      }
+    } finally {
+      if (prev === undefined) delete process.env[AUTO_UPDATE_STRICT_ENV];
+      else process.env[AUTO_UPDATE_STRICT_ENV] = prev;
+      resetStateForTesting();
+    }
+  });
 });
