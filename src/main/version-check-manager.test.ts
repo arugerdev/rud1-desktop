@@ -2470,3 +2470,172 @@ describe("parseManifest — iter 40 regression after iter 41 additions", () => {
     });
   });
 });
+
+// ─── Iter 42 — `buildBlockedDiagnosticsBlob` envelope contract ─────────────
+//
+// The blob is the only stable wire-out from the Settings/About blocked
+// panel — once an operator pastes it into a support ticket, support
+// readers parse it back as JSON. We pin the envelope shape, key
+// ordering, and the precedence-resolved downloadUrl so a future
+// refactor can't silently shuffle fields and invalidate past-ticket
+// scrapers. Mirrors the rud1-app iter-42 contract on
+// AuditForwardStatusCard's buildDiagnosticsBlob.
+
+describe("buildBlockedDiagnosticsBlob (iter 42)", () => {
+  const { buildBlockedDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0); // 2026-04-25T12:00:00.000Z
+  const VALID_BRIDGE_SHA = "c".repeat(64);
+
+  function baseState() {
+    return {
+      currentVersion: "1.4.0",
+      targetVersion: "2.1.0",
+      requiredMinVersion: "1.7.0",
+      manifestVersion: 2,
+    };
+  }
+
+  it("capturedAt is wall-clock at copy time, formatted as ISO-8601 UTC", () => {
+    const out = JSON.parse(buildBlockedDiagnosticsBlob(baseState(), FIXED_AT));
+    expect(out.capturedAt).toBe("2026-04-25T12:00:00.000Z");
+  });
+
+  it("kind is the iter-42 stable string literal", () => {
+    const out = JSON.parse(buildBlockedDiagnosticsBlob(baseState(), FIXED_AT));
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+  });
+
+  it("versions echo verbatim from the input state", () => {
+    const out = JSON.parse(buildBlockedDiagnosticsBlob(baseState(), FIXED_AT));
+    expect(out.currentVersion).toBe("1.4.0");
+    expect(out.targetVersion).toBe("2.1.0");
+    expect(out.requiredMinVersion).toBe("1.7.0");
+  });
+
+  it("downloadUrl reflects pickDownloadUrl precedence — keyed map wins", () => {
+    const out = JSON.parse(
+      buildBlockedDiagnosticsBlob(
+        {
+          ...baseState(),
+          bridgeDownloadUrls: {
+            "1.7.0": "https://rud1.es/desktop/bridge/v1.7.0",
+            "1.6.0": "https://rud1.es/desktop/bridge/v1.6.0",
+          },
+          bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+          releaseNotesUrl: "https://rud1.es/changelog/v1.7.0",
+        },
+        FIXED_AT,
+      ),
+    );
+    expect(out.downloadUrl).toBe("https://rud1.es/desktop/bridge/v1.7.0");
+  });
+
+  it("downloadUrl falls back to scalar bridgeDownloadUrl when keyed map is absent", () => {
+    const out = JSON.parse(
+      buildBlockedDiagnosticsBlob(
+        {
+          ...baseState(),
+          bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+        },
+        FIXED_AT,
+      ),
+    );
+    expect(out.downloadUrl).toBe("https://rud1.es/desktop/bridge/scalar");
+  });
+
+  it("downloadUrl falls back to releaseNotesUrl, then synthesized URL", () => {
+    const withNotes = JSON.parse(
+      buildBlockedDiagnosticsBlob(
+        { ...baseState(), releaseNotesUrl: "https://rud1.es/changelog/v1.7.0" },
+        FIXED_AT,
+      ),
+    );
+    expect(withNotes.downloadUrl).toBe("https://rud1.es/changelog/v1.7.0");
+
+    const synth = JSON.parse(buildBlockedDiagnosticsBlob(baseState(), FIXED_AT));
+    expect(synth.downloadUrl).toBe(
+      "https://rud1.es/desktop/download?version=1.7.0",
+    );
+  });
+
+  it("bridgeSha256 normalised to lowercase when shape gate passes", () => {
+    const out = JSON.parse(
+      buildBlockedDiagnosticsBlob(
+        { ...baseState(), bridgeSha256: VALID_BRIDGE_SHA.toUpperCase() },
+        FIXED_AT,
+      ),
+    );
+    expect(out.bridgeSha256).toBe(VALID_BRIDGE_SHA);
+  });
+
+  it("bridgeSha256 is null when missing OR malformed", () => {
+    const missing = JSON.parse(
+      buildBlockedDiagnosticsBlob(baseState(), FIXED_AT),
+    );
+    expect(missing.bridgeSha256).toBe(null);
+    const malformed = JSON.parse(
+      buildBlockedDiagnosticsBlob(
+        { ...baseState(), bridgeSha256: "not-a-hex" },
+        FIXED_AT,
+      ),
+    );
+    expect(malformed.bridgeSha256).toBe(null);
+  });
+
+  it("releaseNotesUrl + manifestVersion echo verbatim, default to null", () => {
+    const present = JSON.parse(
+      buildBlockedDiagnosticsBlob(
+        {
+          ...baseState(),
+          releaseNotesUrl: "https://rud1.es/changelog/v1.7.0",
+          manifestVersion: 2,
+        },
+        FIXED_AT,
+      ),
+    );
+    expect(present.releaseNotesUrl).toBe("https://rud1.es/changelog/v1.7.0");
+    expect(present.manifestVersion).toBe(2);
+
+    const minimal = JSON.parse(
+      buildBlockedDiagnosticsBlob(
+        {
+          currentVersion: "1.0.0",
+          targetVersion: "2.0.0",
+          requiredMinVersion: "1.5.0",
+        },
+        FIXED_AT,
+      ),
+    );
+    expect(minimal.releaseNotesUrl).toBe(null);
+    expect(minimal.manifestVersion).toBe(null);
+  });
+
+  it("output is human-readable JSON (2-space indent, multi-line)", () => {
+    const blob = buildBlockedDiagnosticsBlob(baseState(), FIXED_AT);
+    expect(blob.startsWith("{\n")).toBe(true);
+    expect(blob.includes("\n  ")).toBe(true);
+  });
+
+  it("key order is stable: capturedAt → kind → versions → url → sha → notes → manifestVersion", () => {
+    // Pinned so future contributors can't silently shuffle the layout —
+    // any external regex-based scraper run on past tickets would break.
+    const blob = buildBlockedDiagnosticsBlob(baseState(), FIXED_AT);
+    const order = [
+      '"capturedAt"',
+      '"kind"',
+      '"currentVersion"',
+      '"targetVersion"',
+      '"requiredMinVersion"',
+      '"downloadUrl"',
+      '"bridgeSha256"',
+      '"releaseNotesUrl"',
+      '"manifestVersion"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+});

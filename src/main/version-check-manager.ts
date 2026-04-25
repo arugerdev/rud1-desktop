@@ -1325,6 +1325,74 @@ export function buildBlockedPanelHashFragment(state: {
   return { row, help, button };
 }
 
+// ─── Iter 42 — blocked-state diagnostics blob ──────────────────────────────
+//
+// `buildBlockedDiagnosticsBlob` packages the blocked-state record into a
+// stable JSON envelope an operator can paste straight into a support
+// ticket. Mirrors the rud1-app iter-42 "Copy diagnostics" pattern on the
+// AuditForwardStatusCard so support readers see a consistent shape
+// across both surfaces.
+//
+// Envelope shape (stable; pinned by iter-42 tests):
+//   {
+//     "capturedAt": "2026-04-25T12:00:00.000Z",       // wall clock at copy time
+//     "kind": "update-blocked-by-min-bootstrap",
+//     "currentVersion": "1.4.0",
+//     "targetVersion":  "2.1.0",
+//     "requiredMinVersion": "1.7.0",
+//     "downloadUrl": "https://...",                    // resolved via pickDownloadUrl
+//     "bridgeSha256": "abcdef..." | null,
+//     "releaseNotesUrl": "https://..." | null,
+//     "manifestVersion": 2 | null
+//   }
+//
+// We deliberately COPY pickDownloadUrl's output rather than echoing the
+// raw map / scalar fields: the support reader cares about "what URL did
+// this operator's panel route them to?" — answering that requires
+// running the precedence chain at copy time. An operator-pasted blob
+// that included the raw map would force support to re-implement the
+// precedence on their side.
+//
+// `bridgeSha256` is normalised to lowercase (or null when missing /
+// malformed — same shape gate as `formatBlockedHashHint`).
+//
+// Output is JSON.stringify'd with 2-space indent so a ticket reader can
+// skim it without piping through `jq`. Key order is fixed by the
+// composition below; the iter-42 contract test pins it explicitly so a
+// future contributor refactoring the envelope can't silently shuffle
+// the layout (which would invalidate any external regex-based scrapers
+// run on past tickets).
+
+export interface BlockedDiagnosticsState {
+  currentVersion: string;
+  targetVersion: string;
+  requiredMinVersion: string;
+  bridgeDownloadUrl?: string | null;
+  bridgeDownloadUrls?: Record<string, string>;
+  releaseNotesUrl?: string | null;
+  bridgeSha256?: string | null;
+  manifestVersion?: number | null;
+}
+
+export function buildBlockedDiagnosticsBlob(
+  state: BlockedDiagnosticsState,
+  capturedAtMs: number,
+): string {
+  const hint = formatBlockedHashHint(state);
+  const envelope = {
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    kind: "update-blocked-by-min-bootstrap" as const,
+    currentVersion: state.currentVersion,
+    targetVersion: state.targetVersion,
+    requiredMinVersion: state.requiredMinVersion,
+    downloadUrl: pickDownloadUrl(state),
+    bridgeSha256: hint != null ? hint.hex : null,
+    releaseNotesUrl: state.releaseNotesUrl ?? null,
+    manifestVersion: state.manifestVersion ?? null,
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -1362,4 +1430,6 @@ export const __test = {
   // Iter 41 — bridgeSha256 panel hint formatter + HTML fragment builder.
   formatBlockedHashHint,
   buildBlockedPanelHashFragment,
+  // Iter 42 — diagnostics blob for the "Copy diagnostics" button.
+  buildBlockedDiagnosticsBlob,
 };

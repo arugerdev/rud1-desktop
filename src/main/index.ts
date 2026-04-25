@@ -731,6 +731,13 @@ function buildSettingsWindowHtml(): string {
       '<div class="actions">' +
         '<button id="copy-url" class="primary"' + (hashHex ? ' aria-describedby="bridge-hash-help"' : '') + '>Copy download URL</button>' +
         hashBtn +
+        // Iter 42 — copy a JSON diagnostics envelope (capturedAt + all
+        // blocked-state fields + resolved download URL via pickDownloadUrl
+        // precedence) for support tickets. Mirrors the rud1-app iter-42
+        // pattern on the AuditForwardStatusCard. Always rendered: the
+        // envelope is always meaningful (versions are guaranteed
+        // populated by parseManifest) regardless of optional fields.
+        '<button id="copy-diagnostics">Copy diagnostics</button>' +
         '<button id="recheck">Check for updates now</button>' +
       '</div>';
 
@@ -790,6 +797,52 @@ function buildSettingsWindowHtml(): string {
         });
       });
     }
+    // Iter 42 — copy diagnostics JSON envelope. Mirrors the
+    // buildBlockedDiagnosticsBlob contract pinned by the main-process
+    // suite (version-check-manager.test.ts). We rebuild the envelope
+    // inline rather than IPC-fetching it because the panel already has
+    // the full blocked-state object in scope and an extra IPC roundtrip
+    // would only add latency. Key order matches the helper byte-for-byte
+    // — a regression here surfaces as the iter-42 "key ordering" test
+    // failing in the main-process suite (the helper is what's tested).
+    document.getElementById('copy-diagnostics').addEventListener('click', function() {
+      function isAllowed2(u) {
+        if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
+        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+        try {
+          var p = new URL(u);
+          return p.protocol === 'https:' && p.username === '' && p.password === '';
+        } catch (e) { return false; }
+      }
+      var keyed2 = null;
+      var map2 = state.bridgeDownloadUrls;
+      var minV2 = state.requiredMinVersion;
+      if (map2 && typeof map2 === 'object' && typeof minV2 === 'string' && minV2.length > 0 &&
+          Object.prototype.hasOwnProperty.call(map2, minV2) && isAllowed2(map2[minV2])) {
+        keyed2 = map2[minV2];
+      }
+      var url2;
+      if (keyed2) url2 = keyed2;
+      else if (state.bridgeDownloadUrl && isAllowed2(state.bridgeDownloadUrl)) url2 = state.bridgeDownloadUrl;
+      else if (state.releaseNotesUrl) url2 = state.releaseNotesUrl;
+      else url2 = 'https://rud1.es/desktop/download?version=' + encodeURIComponent(minV2);
+      var envelope = {
+        capturedAt: new Date().toISOString(),
+        kind: 'update-blocked-by-min-bootstrap',
+        currentVersion: state.currentVersion,
+        targetVersion: state.targetVersion,
+        requiredMinVersion: state.requiredMinVersion,
+        downloadUrl: url2,
+        bridgeSha256: hashHex || null,
+        releaseNotesUrl: state.releaseNotesUrl || null,
+        manifestVersion: state.manifestVersion != null ? state.manifestVersion : null,
+      };
+      var blob = JSON.stringify(envelope, null, 2);
+      window.electronAPI.clipboard.writeText(blob).then(function(res) {
+        if (res && res.ok) toast('Copied diagnostics to clipboard');
+        else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+      });
+    });
     document.getElementById('recheck').addEventListener('click', function() {
       window.electronAPI.versionCheck.recheck();
       toast('Re-checking for updates…');
