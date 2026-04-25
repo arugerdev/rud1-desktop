@@ -1225,6 +1225,106 @@ export function pickDownloadUrl(state: {
   );
 }
 
+// ─── Iter 41 — bridgeSha256 surfacing helpers ──────────────────────────────
+//
+// `formatBlockedHashHint` packages the iter-40 `bridgeSha256` field into a
+// presentation-ready record consumed by the Settings/About panel. The
+// helper is the unit-tested contract; the renderer's inline JS mirrors
+// its shape (parallel to how `formatBlockedStateMessage` and `renderBlocked`
+// stay in sync).
+//
+// We expose the verification recipes alongside the hex string so the
+// panel can wire them into a tooltip / aria-describedby. The recipes are
+// shell-quoted around a placeholder `<file>` argument — the operator
+// substitutes the path of their actual download. We deliberately do NOT
+// pre-fill a path because iter-41's contract is "operator runs the
+// verification manually"; baking a file path in would imply we know
+// where the bootstrap installer landed, and we don't.
+//
+// Defensive shape gate: even though `parseManifest` already enforces the
+// 64-char lowercase-hex shape via `SHA256_HEX_REGEX`, this helper
+// re-runs the same regex. A future caller that hand-builds a state object
+// (test fixture, IPC round-trip from a misbehaving renderer, future
+// strict-mode bypass) cannot smuggle a malformed hex into the panel
+// markup. Mirrors the iter-38 / iter-39 defensive re-validation pattern
+// in `pickDownloadUrl`.
+
+export interface BlockedHashHint {
+  /** Lowercase 64-char hex SHA-256 of the bridge artifact. */
+  hex: string;
+  /** PowerShell `Get-FileHash` example. Operator substitutes `<file>`. */
+  getFileHashCmd: string;
+  /** POSIX `shasum -a 256` example. Operator substitutes `<file>`. */
+  shasumCmd: string;
+}
+
+export function formatBlockedHashHint(state: {
+  bridgeSha256?: string | null;
+}): BlockedHashHint | null {
+  const hex = state.bridgeSha256;
+  if (typeof hex !== "string") return null;
+  if (!SHA256_HEX_REGEX.test(hex)) return null;
+  const lower = hex.toLowerCase();
+  return {
+    hex: lower,
+    getFileHashCmd: `Get-FileHash -Algorithm SHA256 <file>`,
+    shasumCmd: `shasum -a 256 <file>`,
+  };
+}
+
+/**
+ * Iter 41 — Node-side HTML fragment builder for the blocked-state hash
+ * row + "Copy expected sha256" button + verification-recipe help line.
+ *
+ * Returns an empty string when the state carries no usable bridgeSha256
+ * (mirrors `formatBlockedHashHint` returning `null`). When present,
+ * returns the same markup the inline renderer in `index.ts` produces —
+ * pinning it here lets the unit suite catch markup regressions without
+ * spinning up the data-URL panel.
+ *
+ * Output shape (when sha256 present):
+ *   <div class="row"><span class="k">Expected SHA-256</span><span class="v"><code class="hash" id="bridge-hash">{hex}</code></span></div>
+ *   <p class="muted hash-help" id="bridge-hash-help">Verify hash before running installer — <code>Get-FileHash …</code> on Windows or <code>shasum -a 256 …</code> on macOS / Linux.</p>
+ *   <button id="copy-hash" aria-describedby="bridge-hash-help">Copy expected sha256</button>
+ *
+ * The renderer's inline JS in `buildSettingsWindowHtml` (index.ts)
+ * concatenates the same three pieces in the same order. Keeping the
+ * helper Node-callable means tests can pin the HTML without
+ * instantiating Electron / a renderer process.
+ */
+export interface BlockedPanelHashFragment {
+  /** The `<div class="row">` row with the hex inside `<code class="hash">`, or `""` when absent. */
+  row: string;
+  /** The `<p class="muted hash-help">` verification recipe line, or `""` when absent. */
+  help: string;
+  /** The `<button id="copy-hash">` element, or `""` when absent. */
+  button: string;
+}
+
+export function buildBlockedPanelHashFragment(state: {
+  bridgeSha256?: string | null;
+}): BlockedPanelHashFragment {
+  const hint = formatBlockedHashHint(state);
+  if (hint == null) {
+    return { row: "", help: "", button: "" };
+  }
+  // The hex passed `formatBlockedHashHint`'s shape gate, so no HTML
+  // escaping is needed for the value — the SHA256_HEX_REGEX rejects
+  // any character that could break out of the surrounding markup.
+  const row =
+    `<div class="row"><span class="k">Expected SHA-256</span>` +
+    `<span class="v"><code class="hash" id="bridge-hash">${hint.hex}</code></span>` +
+    `</div>`;
+  const help =
+    `<p class="muted hash-help" id="bridge-hash-help">` +
+    `Verify hash before running installer — ` +
+    `<code>Get-FileHash -Algorithm SHA256 &lt;file&gt;</code> on Windows or ` +
+    `<code>shasum -a 256 &lt;file&gt;</code> on macOS / Linux.` +
+    `</p>`;
+  const button = `<button id="copy-hash" aria-describedby="bridge-hash-help">Copy expected sha256</button>`;
+  return { row, help, button };
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -1259,4 +1359,7 @@ export const __test = {
   // Iter 38 — bridge download URL precedence helpers.
   pickDownloadUrl,
   isBridgeDownloadUrlAllowed,
+  // Iter 41 — bridgeSha256 panel hint formatter + HTML fragment builder.
+  formatBlockedHashHint,
+  buildBlockedPanelHashFragment,
 };

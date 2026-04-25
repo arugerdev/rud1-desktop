@@ -644,6 +644,8 @@ function buildSettingsWindowHtml(): string {
   .toast { position:fixed; bottom:14px; right:14px; background:#1d4ed8; color:#eff6ff; padding:8px 12px; border-radius:4px; font-size:12px; opacity:0; transition:opacity 0.2s; pointer-events:none; }
   .toast.show { opacity:1; }
   code { font-family: ui-monospace, "SF Mono", Consolas, monospace; background:#27272a; padding:2px 5px; border-radius:3px; font-size:12px; }
+  code.hash { word-break:break-all; font-size:11px; color:#fde68a; }
+  .hash-help { margin:6px 0 4px 0; }
 </style>
 </head>
 <body>
@@ -683,13 +685,38 @@ function buildSettingsWindowHtml(): string {
   }
 
   function renderBlocked(state) {
-    // Mirrors formatBlockedStateMessage in version-check-manager.ts.
-    // Kept inline so the renderer is self-contained inside the data URL
-    // — the formatter's contract is what's tested in the main-process
-    // suite; this script only handles the DOM mapping.
+    // Mirrors formatBlockedStateMessage + formatBlockedHashHint in
+    // version-check-manager.ts. Kept inline so the renderer is
+    // self-contained inside the data URL — the formatters' contracts
+    // are what's tested in the main-process suite; this script only
+    // handles the DOM mapping.
     var banner = 'Download v' + escape(state.requiredMinVersion) + ' manually first to continue receiving updates';
     var notes = state.releaseNotesUrl
       ? '<p><a id="rn-link">What\\'s new — view release notes</a></p>'
+      : '';
+    // Iter 41 — surface the optional bridgeSha256 hex inline so the
+    // operator can verify the artifact integrity after manual download.
+    // Defensive: re-run the SHA-256 shape gate (mirrors formatBlockedHashHint
+    // in version-check-manager.ts) so a state object that bypassed
+    // parse-time validation cannot leak a malformed hex into the panel.
+    var rawHash = state.bridgeSha256;
+    var hashHex = (typeof rawHash === 'string' && /^[0-9a-f]{64}$/i.test(rawHash))
+      ? rawHash.toLowerCase()
+      : null;
+    var hashRow = hashHex
+      ? '<div class="row"><span class="k">Expected SHA-256</span>' +
+          '<span class="v"><code class="hash" id="bridge-hash">' + escape(hashHex) + '</code></span>' +
+        '</div>'
+      : '';
+    var hashHelp = hashHex
+      ? '<p class="muted hash-help" id="bridge-hash-help">' +
+          'Verify hash before running installer — ' +
+          '<code>Get-FileHash -Algorithm SHA256 &lt;file&gt;</code> on Windows or ' +
+          '<code>shasum -a 256 &lt;file&gt;</code> on macOS / Linux.' +
+        '</p>'
+      : '';
+    var hashBtn = hashHex
+      ? '<button id="copy-hash" aria-describedby="bridge-hash-help">Copy expected sha256</button>'
       : '';
     updatesEl.innerHTML =
       '<div class="banner">' + banner + '</div>' +
@@ -697,10 +724,13 @@ function buildSettingsWindowHtml(): string {
         '<div class="row"><span class="k">Currently installed</span><span class="v">v' + escape(state.currentVersion) + '</span></div>' +
         '<div class="row"><span class="k">Target version</span><span class="v">v' + escape(state.targetVersion) + '</span></div>' +
         '<div class="row"><span class="k">Required intermediate</span><span class="v">v' + escape(state.requiredMinVersion) + '</span></div>' +
+        hashRow +
       '</div>' +
+      hashHelp +
       notes +
       '<div class="actions">' +
-        '<button id="copy-url" class="primary">Copy download URL</button>' +
+        '<button id="copy-url" class="primary"' + (hashHex ? ' aria-describedby="bridge-hash-help"' : '') + '>Copy download URL</button>' +
+        hashBtn +
         '<button id="recheck">Check for updates now</button>' +
       '</div>';
 
@@ -739,11 +769,27 @@ function buildSettingsWindowHtml(): string {
       } else {
         url = 'https://rud1.es/desktop/download?version=' + encodeURIComponent(minV);
       }
-      window.electronAPI.clipboard.writeText(url).then(function(res) {
+      // Iter 41 — when the manifest carries a bridgeSha256, append the
+      // hex as a verification hint after two spaces. The operator can
+      // copy-paste a single line that includes both the URL and the
+      // expected hash (formatted "URL  (sha256: <hex>)") and verify with
+      // Get-FileHash / shasum -a 256 after download. Pure additive: when
+      // no hash is present, the iter-39 plain-URL behaviour is preserved
+      // byte-for-byte.
+      var clip = hashHex ? (url + '  (sha256: ' + hashHex + ')') : url;
+      window.electronAPI.clipboard.writeText(clip).then(function(res) {
         if (res && res.ok) toast('Copied download URL to clipboard');
         else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
       });
     });
+    if (hashHex) {
+      document.getElementById('copy-hash').addEventListener('click', function() {
+        window.electronAPI.clipboard.writeText(hashHex).then(function(res) {
+          if (res && res.ok) toast('Copied expected sha256 to clipboard');
+          else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+        });
+      });
+    }
     document.getElementById('recheck').addEventListener('click', function() {
       window.electronAPI.versionCheck.recheck();
       toast('Re-checking for updates…');

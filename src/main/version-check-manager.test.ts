@@ -2344,3 +2344,129 @@ describe("classifyManifest — bridgeSha256 in blocked state (iter 40)", () => {
     expect(state.bridgeSha256).toBeNull();
   });
 });
+
+// ─── Iter 41 — bridgeSha256 surfacing in Settings panel ─────────────────────
+//
+// `formatBlockedHashHint` is the pure helper the iter-41 panel JS mirrors
+// when surfacing the optional integrity claim from `bridgeSha256`. We pin
+// three behaviours:
+//   1. valid hex preserved (lowercased), with the matching shell-recipe
+//      strings the panel renders into the verification tooltip;
+//   2. absent / null state.bridgeSha256 → null, no recipe suggested;
+//   3. wrong-shape state.bridgeSha256 (non-hex, wrong length, non-string)
+//      → null. Defensive: even though parseManifest already gates on
+//      SHA256_HEX_REGEX, a hand-built state object (test fixture, IPC
+//      round-trip) cannot smuggle a malformed hex into the panel.
+//
+// The HTML fragment builder `buildBlockedPanelHashFragment` is then pinned
+// against the markup the renderer concatenates inline; tests assert the
+// presence of `<code class="hash">` + "Copy expected sha256" when sha256
+// is set, and confirm all three pieces are empty strings when absent.
+
+const { formatBlockedHashHint, buildBlockedPanelHashFragment } = versionCheckInternals;
+
+describe("formatBlockedHashHint (iter 41)", () => {
+  const VALID_BRIDGE_SHA = "b".repeat(64);
+  const VALID_BRIDGE_SHA_MIXED =
+    "ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789";
+
+  it("present: preserves the hex (lowercased) and exposes the verification recipes", () => {
+    const hint = formatBlockedHashHint({ bridgeSha256: VALID_BRIDGE_SHA_MIXED });
+    expect(hint).not.toBeNull();
+    expect(hint?.hex).toBe(VALID_BRIDGE_SHA_MIXED.toLowerCase());
+    // The recipes use a `<file>` placeholder rather than hardcoding an
+    // installer path — operator substitutes their actual download path.
+    expect(hint?.getFileHashCmd).toBe("Get-FileHash -Algorithm SHA256 <file>");
+    expect(hint?.shasumCmd).toBe("shasum -a 256 <file>");
+  });
+
+  it("absent: returns null when bridgeSha256 is null / undefined / empty", () => {
+    expect(formatBlockedHashHint({ bridgeSha256: null })).toBeNull();
+    expect(formatBlockedHashHint({})).toBeNull();
+    expect(formatBlockedHashHint({ bridgeSha256: undefined })).toBeNull();
+  });
+
+  it("wrong-shape: rejects non-string / wrong-length / non-hex inputs (defensive even though parse gates)", () => {
+    // Defensive re-validation — a future caller that bypassed
+    // parseManifest (hand-built fixture, IPC round-trip from a
+    // misbehaving renderer) cannot leak a malformed hex into the panel.
+    expect(formatBlockedHashHint({ bridgeSha256: 1234 as unknown as string })).toBeNull();
+    expect(formatBlockedHashHint({ bridgeSha256: "deadbeef" })).toBeNull(); // too short
+    expect(formatBlockedHashHint({ bridgeSha256: "a".repeat(63) })).toBeNull();
+    expect(formatBlockedHashHint({ bridgeSha256: "a".repeat(65) })).toBeNull();
+    expect(formatBlockedHashHint({ bridgeSha256: "z".repeat(64) })).toBeNull();
+    expect(formatBlockedHashHint({ bridgeSha256: "g" + "a".repeat(63) })).toBeNull();
+  });
+});
+
+describe("buildBlockedPanelHashFragment HTML pin (iter 41)", () => {
+  const VALID_BRIDGE_SHA = "c".repeat(64);
+
+  it("with sha256 → row with <code class=\"hash\"> visible + 'Copy expected sha256' button", () => {
+    const frag = buildBlockedPanelHashFragment({ bridgeSha256: VALID_BRIDGE_SHA });
+    // Row contains the code.hash element with the lowercased hex.
+    expect(frag.row).toContain('<code class="hash" id="bridge-hash">');
+    expect(frag.row).toContain(VALID_BRIDGE_SHA);
+    expect(frag.row).toContain('Expected SHA-256');
+    // Button copy + aria-describedby anchor for the verification tooltip.
+    expect(frag.button).toContain('id="copy-hash"');
+    expect(frag.button).toContain('aria-describedby="bridge-hash-help"');
+    expect(frag.button).toContain('Copy expected sha256');
+    // Verification recipe help line — both PowerShell and POSIX recipes
+    // appear inline so the operator can copy whichever matches their OS.
+    expect(frag.help).toContain('Verify hash before running installer');
+    expect(frag.help).toContain('Get-FileHash -Algorithm SHA256');
+    expect(frag.help).toContain('shasum -a 256');
+  });
+
+  it("without sha256 → row, help, and button all absent (empty strings)", () => {
+    expect(buildBlockedPanelHashFragment({ bridgeSha256: null })).toEqual({
+      row: "",
+      help: "",
+      button: "",
+    });
+    expect(buildBlockedPanelHashFragment({})).toEqual({
+      row: "",
+      help: "",
+      button: "",
+    });
+    // Wrong-shape defensive case: the fragment is empty so the panel
+    // does not advertise an integrity claim it cannot trust.
+    expect(buildBlockedPanelHashFragment({ bridgeSha256: "not-a-real-hex" })).toEqual({
+      row: "",
+      help: "",
+      button: "",
+    });
+  });
+});
+
+// Iter 41 regression — adding the iter-41 panel helpers must NOT change the
+// iter-40 parse behaviour. We pin the canonical iter-40 fixture (a v2
+// manifest with bridgeSha256) and confirm every typed field round-trips
+// byte-for-byte through parseManifest after the iter-41 additions.
+describe("parseManifest — iter 40 regression after iter 41 additions", () => {
+  it("v2 manifest with bridgeSha256 parses to the same shape as before iter 41", () => {
+    const VALID_SHA = "a".repeat(64);
+    const VALID_BRIDGE_SHA = "b".repeat(64);
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+      bridgeSha256: VALID_BRIDGE_SHA,
+    });
+    expect(m).toEqual({
+      version: "1.5.0",
+      downloadUrl: null,
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      rolloutBucket: null,
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+      bridgeSha256: VALID_BRIDGE_SHA,
+    });
+  });
+});
