@@ -71,6 +71,12 @@ export type VersionCheckState =
       current: string;
       latest: string;
       downloadUrl: string | null;
+      // Iter 33 — optional changelog URL parsed from the manifest. The
+      // tray menu surfaces a "What's new — view release notes" row above
+      // the recheck entry when this is non-null. Validated through the
+      // same allowlist as `downloadUrl` at parse time so unsafe URLs
+      // never reach the state.
+      releaseNotesUrl: string | null;
       checkedAt: number;
     }
   | { kind: "error"; message: string; checkedAt: number };
@@ -120,6 +126,18 @@ export interface VersionManifest {
    * manifests still allow null for backward compatibility.
    */
   sha256: string | null;
+  /**
+   * Optional URL to the human-readable release notes / changelog for
+   * `version`. Iter 33 — surfaced in the tray menu as a "What's new"
+   * entry so an operator can see the changelog before clicking
+   * Download. Validated through the same `isValidFeedUrl` allowlist as
+   * `downloadUrl` (no `javascript:` / `file:` slipping through), and
+   * silently dropped on validation failure rather than rejecting the
+   * whole manifest — the changelog is a convenience, not an integrity
+   * claim. Optional in BOTH v1 and v2 manifests; future v3 may promote
+   * it to required.
+   */
+  releaseNotesUrl: string | null;
 }
 
 /**
@@ -200,7 +218,31 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     // else: silently drop — we'd rather show "update available" without
     // a clickable link than send the operator to an unsafe URL.
   }
-  return { version: obj.version, downloadUrl, manifestVersion, sha256 };
+
+  // Iter 33 — optional releaseNotesUrl. Same allowlist as downloadUrl;
+  // silent drop on validation failure (the changelog is a convenience,
+  // not an integrity claim). Wrong-type / non-string values reject the
+  // whole manifest, mirroring the strictness on every other typed field
+  // — a server-side bug here is louder than a missing convenience link.
+  let releaseNotesUrl: string | null = null;
+  if (
+    Object.prototype.hasOwnProperty.call(obj, "releaseNotesUrl") &&
+    obj.releaseNotesUrl != null
+  ) {
+    if (typeof obj.releaseNotesUrl !== "string") return null;
+    if (obj.releaseNotesUrl.length > 0 && isValidFeedUrl(obj.releaseNotesUrl)) {
+      releaseNotesUrl = obj.releaseNotesUrl;
+    }
+    // else: empty string OR allowlist rejection ⇒ silently drop.
+  }
+
+  return {
+    version: obj.version,
+    downloadUrl,
+    manifestVersion,
+    sha256,
+    releaseNotesUrl,
+  };
 }
 
 /**
@@ -226,6 +268,7 @@ export function classifyManifest(
       current,
       latest: manifest.version,
       downloadUrl: manifest.downloadUrl ?? null,
+      releaseNotesUrl: manifest.releaseNotesUrl,
       checkedAt: now,
     };
   }
@@ -533,7 +576,7 @@ export function buildVersionCheckMenuItems(
   if (state.kind === "update-available") {
     const url = state.downloadUrl;
     const isAuto = auto != null;
-    return [
+    const items: MenuItemShape[] = [
       {
         label: `▲ Update available — v${state.latest}`,
         click: () => {
@@ -550,11 +593,24 @@ export function buildVersionCheckMenuItems(
         label: `Currently installed: v${state.current}`,
         enabled: false,
       },
-      {
-        label: "Check for updates now",
-        click: () => { handlers.recheck?.(); },
-      },
     ];
+    // Iter 33 — surface the release notes URL above the recheck row when
+    // the manifest advertised one. Click always opens in the system
+    // browser (changelogs are read-only content; never an installer
+    // payload — keep them out of the auto-update download path).
+    if (state.releaseNotesUrl) {
+      items.push({
+        label: "What's new — view release notes",
+        click: () => {
+          handlers.openExternal?.(state.releaseNotesUrl as string);
+        },
+      });
+    }
+    items.push({
+      label: "Check for updates now",
+      click: () => { handlers.recheck?.(); },
+    });
+    return items;
   }
   if (state.kind === "up-to-date") {
     return [

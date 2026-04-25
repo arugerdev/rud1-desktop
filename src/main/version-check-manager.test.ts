@@ -4,7 +4,9 @@ import {
   VersionCheckManager,
   parseManifest,
   classifyManifest,
+  buildVersionCheckMenuItems,
   type VersionManifest,
+  type VersionCheckState,
 } from "./version-check-manager";
 
 // Pure-helper unit tests for the iter-29 desktop version check.
@@ -38,6 +40,7 @@ describe("parseManifest", () => {
       downloadUrl: null,
       manifestVersion: 1,
       sha256: null,
+      releaseNotesUrl: null,
     });
   });
 
@@ -51,6 +54,7 @@ describe("parseManifest", () => {
       downloadUrl: "https://rud1.es/desktop/download",
       manifestVersion: 1,
       sha256: null,
+      releaseNotesUrl: null,
     });
   });
 
@@ -64,6 +68,7 @@ describe("parseManifest", () => {
       downloadUrl: null,
       manifestVersion: 1,
       sha256: null,
+      releaseNotesUrl: null,
     });
   });
 
@@ -100,6 +105,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       downloadUrl: null,
       manifestVersion: 2,
       sha256: VALID_SHA_MIXED.toLowerCase(),
+      releaseNotesUrl: null,
     });
   });
 
@@ -115,6 +121,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       downloadUrl: "https://rud1.es/desktop/download",
       manifestVersion: 2,
       sha256: VALID_SHA,
+      releaseNotesUrl: null,
     });
   });
 
@@ -195,6 +202,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       downloadUrl: null,
       manifestVersion: 1,
       sha256: null,
+      releaseNotesUrl: null,
     });
   });
 
@@ -209,6 +217,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       downloadUrl: null,
       manifestVersion: 1,
       sha256: VALID_SHA_MIXED.toLowerCase(),
+      releaseNotesUrl: null,
     });
   });
 
@@ -279,6 +288,72 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
     ).toBeNull();
   });
 
+  it("releaseNotesUrl https → preserved (iter 33)", () => {
+    const m = parseManifest({
+      version: "1.2.3",
+      releaseNotesUrl: "https://rud1.es/changelog/v1.2.3",
+    });
+    expect(m?.releaseNotesUrl).toBe("https://rud1.es/changelog/v1.2.3");
+  });
+
+  it("releaseNotesUrl with javascript: scheme → silently dropped (iter 33)", () => {
+    // Same allowlist as downloadUrl; the changelog URL is a convenience
+    // so a malformed one shouldn't reject the whole manifest.
+    const m = parseManifest({
+      version: "1.2.3",
+      downloadUrl: "https://rud1.es/dl",
+      releaseNotesUrl: "javascript:alert(1)",
+    });
+    expect(m).not.toBeNull();
+    expect(m?.releaseNotesUrl).toBeNull();
+    expect(m?.downloadUrl).toBe("https://rud1.es/dl");
+  });
+
+  it("releaseNotesUrl missing or null → null (iter 33)", () => {
+    expect(parseManifest({ version: "1.2.3" })?.releaseNotesUrl).toBeNull();
+    expect(
+      parseManifest({ version: "1.2.3", releaseNotesUrl: null })?.releaseNotesUrl,
+    ).toBeNull();
+  });
+
+  it("releaseNotesUrl empty string → null (iter 33, silent drop)", () => {
+    // Empty string is treated like a missing field — server probably
+    // emitted "" as a placeholder; surfacing a "What's new" row that
+    // tries to open "" would be worse than hiding the row.
+    const m = parseManifest({ version: "1.2.3", releaseNotesUrl: "" });
+    expect(m).not.toBeNull();
+    expect(m?.releaseNotesUrl).toBeNull();
+  });
+
+  it("releaseNotesUrl with non-string type → rejects whole manifest (iter 33)", () => {
+    // Wrong-type rejects the whole manifest, mirroring the strictness
+    // applied to every other typed field — a server-side bug here is
+    // louder than a missing convenience link.
+    expect(
+      parseManifest({ version: "1.2.3", releaseNotesUrl: 42 }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.2.3", releaseNotesUrl: { url: "x" } }),
+    ).toBeNull();
+  });
+
+  it("v2 manifest with sha256 + releaseNotesUrl → both preserved (iter 33)", () => {
+    const m = parseManifest({
+      version: "1.2.3",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      downloadUrl: "https://rud1.es/dl",
+      releaseNotesUrl: "https://rud1.es/changelog",
+    });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: "https://rud1.es/dl",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      releaseNotesUrl: "https://rud1.es/changelog",
+    });
+  });
+
   it("manifestVersion as NaN / Infinity → rejected", () => {
     expect(
       parseManifest({
@@ -304,6 +379,7 @@ describe("classifyManifest", () => {
     downloadUrl,
     manifestVersion: 1,
     sha256: null,
+    releaseNotesUrl: null,
   });
 
   it("flags an update when remote > current", () => {
@@ -313,6 +389,7 @@ describe("classifyManifest", () => {
       current: "1.2.0",
       latest: "1.3.0",
       downloadUrl: null,
+      releaseNotesUrl: null,
       checkedAt: NOW,
     });
   });
@@ -460,5 +537,86 @@ describe("VersionCheckManager", () => {
     // If the throw weren't swallowed, this would reject and fail the test.
     const final = await mgr.checkOnce();
     expect(final.kind).toBe("up-to-date");
+  });
+});
+
+// ─── Iter 33 — release notes URL in tray menu ─────────────────────────────────
+
+describe("buildVersionCheckMenuItems — releaseNotesUrl (iter 33)", () => {
+  const updateAvailableState = (
+    releaseNotesUrl: string | null,
+  ): VersionCheckState => ({
+    kind: "update-available",
+    current: "1.2.3",
+    latest: "1.4.0",
+    downloadUrl: "https://rud1.es/dl",
+    releaseNotesUrl,
+    checkedAt: 1_700_000_000_000,
+  });
+
+  it("inserts a 'What's new' row above 'Check for updates now' when releaseNotesUrl is set", () => {
+    const opens: string[] = [];
+    const items = buildVersionCheckMenuItems(
+      updateAvailableState("https://rud1.es/changelog/v1.4.0"),
+      { openExternal: (u) => opens.push(u) },
+    );
+    // Expected order: Update available, Currently installed, What's new, Recheck.
+    expect(items.map((i) => i.label)).toEqual([
+      "▲ Update available — v1.4.0",
+      "Currently installed: v1.2.3",
+      "What's new — view release notes",
+      "Check for updates now",
+    ]);
+
+    items[2].click?.();
+    expect(opens).toEqual(["https://rud1.es/changelog/v1.4.0"]);
+  });
+
+  it("omits the 'What's new' row when releaseNotesUrl is null", () => {
+    const items = buildVersionCheckMenuItems(updateAvailableState(null));
+    // Same labels as iter-29 baseline — no extra row.
+    expect(items.map((i) => i.label)).toEqual([
+      "▲ Update available — v1.4.0",
+      "Currently installed: v1.2.3",
+      "Check for updates now",
+    ]);
+  });
+
+  it("release notes click opens in the system browser even when auto-update is engaged", () => {
+    // Whether or not the operator opted into auto-update, the changelog
+    // link is read-only content and must always go through openExternal.
+    // (Auto-update only swaps the *Download* row's behaviour.)
+    const opens: string[] = [];
+    const items = buildVersionCheckMenuItems(
+      updateAvailableState("https://rud1.es/changelog/v1.4.0"),
+      {
+        openExternal: (u) => opens.push(u),
+        startDownload: () => {
+          throw new Error("releaseNotes click must NOT trigger startDownload");
+        },
+      },
+      // auto-update state engaged but idle
+      { kind: "idle" },
+    );
+    const releaseNotesItem = items.find(
+      (i) => i.label === "What's new — view release notes",
+    );
+    expect(releaseNotesItem).toBeDefined();
+    releaseNotesItem?.click?.();
+    expect(opens).toEqual(["https://rud1.es/changelog/v1.4.0"]);
+  });
+
+  it("up-to-date state does not produce a 'What's new' row", () => {
+    // Defensive: changelog URLs are only relevant when an update IS
+    // available; the up-to-date state never carries one in our schema.
+    const items = buildVersionCheckMenuItems({
+      kind: "up-to-date",
+      current: "1.2.3",
+      latest: "1.2.3",
+      checkedAt: 1_700_000_000_000,
+    });
+    expect(
+      items.find((i) => i.label === "What's new — view release notes"),
+    ).toBeUndefined();
   });
 });
