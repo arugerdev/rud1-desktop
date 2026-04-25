@@ -632,6 +632,41 @@ describe("applyAndRestart strict-mode rejection", () => {
     resetStateForTesting();
   });
 
+  it("iter-32: v2 manifest sha256 propagated through ready-to-apply + strict mode passes the strict gate", async () => {
+    // Iter 32 composes with iter 31: a v2 manifest provides sha256 as a
+    // schema requirement (enforced in parseManifest), and applyAndRestart
+    // with strict=true accepts the artifact because sha256 is non-null.
+    // The actual hash verification then runs and fails (filepath doesn't
+    // exist), but the strict gate itself MUST NOT fire — that's the
+    // composition contract.
+    resetStateForTesting();
+    setStateForTesting({
+      kind: "ready-to-apply",
+      url: "https://example.com/app.dmg",
+      filepath: "/this-path-does-not-exist-rud1-iter32/app.dmg",
+      sha256: "a".repeat(64), // shape that survives parseManifest's v2 gate
+    });
+    const result = await applyAndRestart({
+      strict: true,
+      shell: {
+        openPath: vi.fn(async () => ""),
+        openExternal: vi.fn(async () => undefined),
+      },
+      quit: vi.fn(),
+      fileSystem: {
+        unlinkSync: () => undefined,
+      } as unknown as typeof import("fs"),
+    });
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") {
+      // Must fail past the strict gate — i.e. NOT with the "strict mode
+      // rejected" message. The downstream sha256 read or mismatch is
+      // the legal outcome.
+      expect(result.message).not.toMatch(/strict mode rejected/i);
+    }
+    resetStateForTesting();
+  });
+
   it("strict default is read from env when no override passed", async () => {
     resetStateForTesting();
     const prev = process.env[AUTO_UPDATE_STRICT_ENV];

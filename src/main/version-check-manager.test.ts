@@ -31,9 +31,14 @@ function jsonResponse(body: unknown, init: ResponseInit = { status: 200 }): Resp
 }
 
 describe("parseManifest", () => {
-  it("accepts a minimal valid manifest", () => {
+  it("accepts a minimal valid manifest (legacy v1, no manifestVersion field)", () => {
     const m = parseManifest({ version: "1.2.3" });
-    expect(m).toEqual({ version: "1.2.3", downloadUrl: null });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: null,
+      manifestVersion: 1,
+      sha256: null,
+    });
   });
 
   it("preserves a https downloadUrl", () => {
@@ -44,6 +49,8 @@ describe("parseManifest", () => {
     expect(m).toEqual({
       version: "1.2.3",
       downloadUrl: "https://rud1.es/desktop/download",
+      manifestVersion: 1,
+      sha256: null,
     });
   });
 
@@ -52,7 +59,12 @@ describe("parseManifest", () => {
       version: "1.2.3",
       downloadUrl: "javascript:alert(1)",
     });
-    expect(m).toEqual({ version: "1.2.3", downloadUrl: null });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: null,
+      manifestVersion: 1,
+      sha256: null,
+    });
   });
 
   it("rejects when version is missing", () => {
@@ -70,11 +82,228 @@ describe("parseManifest", () => {
   });
 });
 
+// ─── Iter 32 — manifest v2 schema gate ──────────────────────────────────────
+
+describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
+  const VALID_SHA = "a".repeat(64); // 64 lowercase-hex chars, valid shape
+  const VALID_SHA_MIXED =
+    "ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789";
+
+  it("v2 manifest with valid sha256 → parsed and sha256 lowercased", () => {
+    const m = parseManifest({
+      version: "1.2.3",
+      manifestVersion: 2,
+      sha256: VALID_SHA_MIXED,
+    });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: null,
+      manifestVersion: 2,
+      sha256: VALID_SHA_MIXED.toLowerCase(),
+    });
+  });
+
+  it("v2 manifest with downloadUrl + sha256 → both preserved", () => {
+    const m = parseManifest({
+      version: "1.2.3",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      downloadUrl: "https://rud1.es/desktop/download",
+    });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: "https://rud1.es/desktop/download",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+    });
+  });
+
+  it("v2 manifest missing sha256 → rejected (the whole point of the v2 bump)", () => {
+    expect(
+      parseManifest({ version: "1.2.3", manifestVersion: 2 }),
+    ).toBeNull();
+  });
+
+  it("v2 manifest with sha256:null → rejected", () => {
+    expect(
+      parseManifest({ version: "1.2.3", manifestVersion: 2, sha256: null }),
+    ).toBeNull();
+  });
+
+  it("v2 manifest with sha256 of wrong length → rejected", () => {
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2,
+        sha256: "deadbeef", // too short
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2,
+        sha256: "a".repeat(63), // off-by-one short
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2,
+        sha256: "a".repeat(65), // off-by-one long
+      }),
+    ).toBeNull();
+  });
+
+  it("v2 manifest with non-hex sha256 → rejected", () => {
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2,
+        sha256: "z".repeat(64), // 64 chars but z is non-hex
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2,
+        sha256: "g" + "a".repeat(63), // first char is non-hex
+      }),
+    ).toBeNull();
+  });
+
+  it("v2 manifest with non-string sha256 → rejected", () => {
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2,
+        sha256: 1234567890,
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2,
+        sha256: { hex: VALID_SHA },
+      }),
+    ).toBeNull();
+  });
+
+  it("v1 explicit manifest without sha256 → parsed (backward compat)", () => {
+    const m = parseManifest({ version: "1.2.3", manifestVersion: 1 });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: null,
+      manifestVersion: 1,
+      sha256: null,
+    });
+  });
+
+  it("v1 explicit manifest WITH sha256 → parsed and sha256 preserved (lowercased)", () => {
+    const m = parseManifest({
+      version: "1.2.3",
+      manifestVersion: 1,
+      sha256: VALID_SHA_MIXED,
+    });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: null,
+      manifestVersion: 1,
+      sha256: VALID_SHA_MIXED.toLowerCase(),
+    });
+  });
+
+  it("v1 manifest with malformed sha256 → rejected (we don't silently drop)", () => {
+    // Even in v1 a malformed sha256 is a server-side bug we'd rather
+    // surface than mask: the operator advertised an integrity claim and
+    // the shape is wrong, so refuse to promote to update-available.
+    expect(
+      parseManifest({ version: "1.2.3", manifestVersion: 1, sha256: "deadbeef" }),
+    ).toBeNull();
+  });
+
+  it("manifest without manifestVersion field → parsed as v1 (backward compat)", () => {
+    const m = parseManifest({ version: "1.2.3" });
+    expect(m?.manifestVersion).toBe(1);
+    expect(m?.sha256).toBeNull();
+  });
+
+  it("manifestVersion as string '2' → rejected (number-only, no coercion)", () => {
+    // Documented decision in the iter-32 commit: JSON.parse produces
+    // numbers from JSON numbers, so a string-typed manifestVersion is
+    // almost always a server-side typo we'd rather fail loudly on.
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: "2",
+        sha256: VALID_SHA,
+      }),
+    ).toBeNull();
+  });
+
+  it("manifestVersion as float (e.g. 2.5) → rejected (integer-only)", () => {
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 2.5,
+        sha256: VALID_SHA,
+      }),
+    ).toBeNull();
+  });
+
+  it("manifestVersion as 0 or negative → rejected", () => {
+    expect(
+      parseManifest({ version: "1.2.3", manifestVersion: 0 }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.2.3", manifestVersion: -1 }),
+    ).toBeNull();
+  });
+
+  it("manifestVersion as 999 (future) → rejected as unsupported (fail-closed)", () => {
+    // We pick "rejected as unsupported" over "treat as latest known"
+    // because v3+ may add NEW required fields whose absence from this
+    // code path would otherwise be silently ignored.
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 999,
+        sha256: VALID_SHA,
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: 3, // first unsupported value above the cap
+        sha256: VALID_SHA,
+      }),
+    ).toBeNull();
+  });
+
+  it("manifestVersion as NaN / Infinity → rejected", () => {
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: Number.NaN,
+        sha256: VALID_SHA,
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        manifestVersion: Number.POSITIVE_INFINITY,
+        sha256: VALID_SHA,
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("classifyManifest", () => {
   const NOW = 1_700_000_000_000;
   const m = (version: string, downloadUrl: string | null = null): VersionManifest => ({
     version,
     downloadUrl,
+    manifestVersion: 1,
+    sha256: null,
   });
 
   it("flags an update when remote > current", () => {

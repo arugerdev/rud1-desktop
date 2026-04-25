@@ -38,6 +38,21 @@ const { isValidFeedUrl, parseSemver, isNewerVersion } = autoUpdaterInternals;
 // certainly a misconfiguration (or an attempt to OOM the app).
 const MAX_MANIFEST_BYTES = 16 * 1024;
 
+// Iter 32 — manifest schema version cap. We accept legacy unversioned
+// manifests (treated as v1) and explicit v1; v2 layers in the requirement
+// that `sha256` be present and shaped like 64 lowercase-hex chars. Any
+// `manifestVersion` strictly greater than this constant is REFUSED as
+// "unsupported future schema" — failing closed beats silently treating an
+// unknown shape as if it were the latest known one. Bumping the cap is a
+// deliberate gate for future schema work.
+const MAX_SUPPORTED_MANIFEST_VERSION = 2;
+
+// Iter 32 — sha256 hex shape: exactly 64 chars of [0-9a-f] (case-insensitive
+// input is accepted; we lowercase before storing). Anything else is
+// rejected so a manifest with `sha256: "deadbeef"` (too short) or
+// `sha256: "...zzz..."` (non-hex) can't slip past the v2 gate.
+const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
+
 // Default poll cadence. Hourly is plenty — release announcements aren't
 // time-critical, and we want to be invisible on the network. Caller can
 // override.
@@ -88,18 +103,95 @@ export interface VersionManifest {
   version: string;
   /** Optional URL for the operator to follow. */
   downloadUrl?: string | null;
+  /**
+   * Schema version of the manifest. Always populated by `parseManifest`:
+   * legacy manifests (no field) and explicit v1 both resolve to `1`.
+   * Iter 32 introduced `2`, which adds the sha256 requirement enforced
+   * at parse time.
+   */
+  manifestVersion: number;
+  /**
+   * Lowercase 64-char hex SHA-256 of the artifact at `downloadUrl`.
+   *
+   * Iter 30 made this optional; iter 31 added an opt-in apply-time
+   * strict mode that rejected null. Iter 32 makes the schema enforce
+   * it: when `manifestVersion >= 2`, `parseManifest` REFUSES the
+   * whole manifest if `sha256` is missing or shape-invalid. v1
+   * manifests still allow null for backward compatibility.
+   */
+  sha256: string | null;
 }
 
 /**
  * Validates the parsed JSON body. Returns null when the shape is wrong;
  * we never throw because the caller treats a malformed manifest as a
  * recoverable error and keeps polling.
+ *
+ * Iter 32 — `manifestVersion` schema gate.
+ *   • Field is OPTIONAL for backward compatibility: a legacy manifest with
+ *     no `manifestVersion` field is treated as v1 (the iter 29/30 shape).
+ *   • Type-strict on purpose: only finite numbers are accepted. Strings
+ *     like `"2"` are REJECTED rather than coerced — JSON manifests should
+ *     produce numbers from `JSON.parse`, and a string-typed schema
+ *     version is almost always a server-side bug we'd rather surface
+ *     than paper over. (Documented in the iter-32 commit message.)
+ *   • Future versions (`manifestVersion > MAX_SUPPORTED_MANIFEST_VERSION`)
+ *     are REJECTED. Failing closed on an unknown schema is safer than
+ *     latest-shape-treatment, especially since v3+ may add NEW required
+ *     fields whose absence from this code path would otherwise be
+ *     silently ignored.
+ *   • When the resolved version is `>= 2`, `sha256` MUST be a string
+ *     matching SHA256_HEX_REGEX. Missing, null, wrong-type, wrong-length
+ *     or non-hex inputs all reject the manifest. This is the whole
+ *     point of the v2 bump — making the integrity claim part of the
+ *     schema rather than an opt-in operator flag.
+ *
+ * Strict mode (iter 31) and v2 (iter 32) are orthogonal: v2 enforces the
+ * presence of sha256 in the parser; strict enforces non-null at apply
+ * time. Both compose — a legacy v1 manifest with no sha256 still passes
+ * the parser but trips the strict gate, exactly as in iter 31.
  */
 export function parseManifest(raw: unknown): VersionManifest | null {
   if (raw == null || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
   if (typeof obj.version !== "string" || obj.version.length === 0) return null;
   if (parseSemver(obj.version) == null) return null;
+
+  // Resolve the schema version. Legacy manifests that omit the field —
+  // i.e. every iter-29/30/31 manifest in the wild — resolve to v1.
+  // Anything with the field present must be a finite integer; we
+  // refuse strings and floats so a typo on the server side is loud.
+  let manifestVersion = 1;
+  if (Object.prototype.hasOwnProperty.call(obj, "manifestVersion")) {
+    const mv = obj.manifestVersion;
+    if (typeof mv !== "number" || !Number.isFinite(mv) || !Number.isInteger(mv) || mv < 1) {
+      return null;
+    }
+    if (mv > MAX_SUPPORTED_MANIFEST_VERSION) {
+      // Future schema we don't understand. Fail closed.
+      return null;
+    }
+    manifestVersion = mv;
+  }
+
+  // Sha256 extraction + shape validation. The field is optional for v1
+  // but mandatory for v2+ — we run the same shape check in both branches
+  // (so a v1 manifest with a malformed sha256 also rejects, rather than
+  // silently dropping it and pretending nothing was advertised).
+  let sha256: string | null = null;
+  if (Object.prototype.hasOwnProperty.call(obj, "sha256") && obj.sha256 != null) {
+    if (typeof obj.sha256 !== "string") return null;
+    if (!SHA256_HEX_REGEX.test(obj.sha256)) return null;
+    sha256 = obj.sha256.toLowerCase();
+  }
+  if (manifestVersion >= 2 && sha256 == null) {
+    // The v2 schema's contract: sha256 is REQUIRED. Reject the whole
+    // manifest rather than promoting to update-available without an
+    // integrity claim — the operator who served us a v2 manifest
+    // promised one, and we'd rather surface the rejection than drift.
+    return null;
+  }
+
   let downloadUrl: string | null = null;
   if (typeof obj.downloadUrl === "string" && obj.downloadUrl.length > 0) {
     // Re-use the auto-updater allowlist so a malicious manifest can't
@@ -108,7 +200,7 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     // else: silently drop — we'd rather show "update available" without
     // a clickable link than send the operator to an unsafe URL.
   }
-  return { version: obj.version, downloadUrl };
+  return { version: obj.version, downloadUrl, manifestVersion, sha256 };
 }
 
 /**
@@ -507,6 +599,8 @@ export const __test = {
   classifyManifest,
   readBodyCapped,
   MAX_MANIFEST_BYTES,
+  MAX_SUPPORTED_MANIFEST_VERSION,
+  SHA256_HEX_REGEX,
   formatBytes,
   progressBar,
 };
