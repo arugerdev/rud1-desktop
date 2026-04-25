@@ -267,6 +267,19 @@ const AUTO_UPDATE_ENV = "RUD1_DESKTOP_AUTO_UPDATE";
 // permissive mode. Off by default (manifest v1 still works); future
 // signed builds will set the flag at install time.
 const AUTO_UPDATE_STRICT_ENV = "RUD1_DESKTOP_AUTO_UPDATE_STRICT";
+// Iter 35 — staged-rollout override. When set, the iter-34
+// `rolloutBucket` comparison in `classifyManifest` is bypassed and the
+// device is treated as if it were inside any rollout cohort, regardless
+// of its sha256-derived bucket number. Useful for testers who need a
+// pre-release artifact before their bucket is reached.
+//
+// Off by default. The flag is independent of strict mode (iter 31) and
+// of the regular auto-update opt-in (iter 30) — flipping it doesn't
+// change anything about download/verify/apply, only the eligibility
+// gate. Persisted-config equivalent lives in the same JSON file under
+// the key `rolloutForce` so MDM-style deployments can pin the override
+// without exporting an env var.
+const AUTO_UPDATE_ROLLOUT_FORCE_ENV = "RUD1_DESKTOP_ROLLOUT_FORCE";
 const AUTO_UPDATE_CONFIG_FILE = "auto-update-config.json";
 const DOWNLOAD_FILE_DEFAULT = "rud1-update.bin";
 // Hard cap on the downloaded artifact. A real DMG / NSIS / AppImage is
@@ -417,6 +430,58 @@ function readPersistedConfigStrict(
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && typeof parsed.strict === "boolean") {
       return { strict: parsed.strict };
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * True when the operator (or test harness) wants the iter-34 staged
+ * rollout `rolloutBucket` check bypassed (iter 35). Mirrors the strict-
+ * mode + auto-update-flag pattern: env var wins, then persisted config,
+ * then off-by-default. Independent of strict mode AND auto-update — a
+ * tester might want to force eligibility while leaving the rest of the
+ * pipeline untouched.
+ *
+ * Does NOT require `app.isPackaged` — testing rollout overrides during
+ * `npm run dev` is exactly the use case the flag was designed for.
+ */
+export function isRolloutForceEnabled(opts: {
+  env?: NodeJS.ProcessEnv;
+  appOverride?: { getPath: (n: string) => string };
+  fileSystem?: typeof fs;
+} = {}): boolean {
+  const env = opts.env ?? process.env;
+  const a = opts.appOverride ?? deps.app ?? electronApp;
+  const fileSystem = opts.fileSystem ?? deps.fileSystem ?? fs;
+  if (env[AUTO_UPDATE_ROLLOUT_FORCE_ENV] === "1") return true;
+  if (!a) return false;
+  const cfg = readPersistedConfigRolloutForce(() => a.getPath("userData"), fileSystem);
+  return cfg.rolloutForce === true;
+}
+
+/**
+ * Read the `rolloutForce` flag from the persisted config file.
+ * Sibling of `readPersistedConfigStrict` for the same reason: a
+ * hand-edited file with one valid and one typo'd field stays half-
+ * functional rather than collapsing the whole loader.
+ */
+function readPersistedConfigRolloutForce(
+  getUserData: () => string,
+  fileSystem: typeof fs,
+): { rolloutForce?: boolean } {
+  try {
+    const p = path.join(getUserData(), AUTO_UPDATE_CONFIG_FILE);
+    const raw = fileSystem.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.rolloutForce === "boolean"
+    ) {
+      return { rolloutForce: parsed.rolloutForce };
     }
     return {};
   } catch {
@@ -625,6 +690,10 @@ export const __test = {
   readPersistedConfig,
   readPersistedConfigStrict,
   isStrictAutoUpdateEnabled,
+  // Iter 35 — rollout-force gate + sibling persisted-config reader.
+  AUTO_UPDATE_ROLLOUT_FORCE_ENV,
+  isRolloutForceEnabled,
+  readPersistedConfigRolloutForce,
   setStateForTesting: (s: AutoUpdateState) => { state = s; },
   resetStateForTesting: () => { state = { kind: "idle" }; listeners = []; deps = {}; },
 };

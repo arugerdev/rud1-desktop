@@ -786,3 +786,176 @@ describe("classifyManifest — rolloutBucket suppression (iter 34)", () => {
     expect(out.kind).toBe("update-available");
   });
 });
+
+// ─── classifyManifest — forceRollout override (iter 35) ───────────────────
+//
+// `forceRollout=true` bypasses the iter-34 bucket comparison so a tester
+// running with `RUD1_DESKTOP_ROLLOUT_FORCE=1` (or persisted-config
+// `rolloutForce: true`) sees `update-available` regardless of bucket.
+// Default (false) preserves iter-34 behaviour exactly.
+
+describe("classifyManifest — forceRollout override (iter 35)", () => {
+  const NOW = 1_700_000_000_000;
+  const m = (version: string, rolloutBucket: number | null = null): VersionManifest => ({
+    version,
+    downloadUrl: "https://rud1.es/dl",
+    manifestVersion: 2,
+    sha256: "a".repeat(64),
+    releaseNotesUrl: null,
+    rolloutBucket,
+  });
+
+  it("ineligible bucket BUT forceRollout=true → update-available", () => {
+    // Same fixture as the iter-34 "ineligible bucket → up-to-date" test
+    // but with the iter-35 force flag set. Without the flag this would
+    // be `up-to-date`; with it we see the update.
+    const out = classifyManifest("1.2.0", m("1.3.0", 50), NOW, 75, true);
+    expect(out.kind).toBe("update-available");
+    if (out.kind === "update-available") {
+      expect(out.latest).toBe("1.3.0");
+      expect(out.downloadUrl).toBe("https://rud1.es/dl");
+    }
+  });
+
+  it("forceRollout=true is a no-op when the bucket would have allowed the update", () => {
+    // No state change for in-bucket devices — the override is purely
+    // additive and never demotes an eligible device to up-to-date.
+    const out = classifyManifest("1.2.0", m("1.3.0", 50), NOW, 25, true);
+    expect(out.kind).toBe("update-available");
+  });
+
+  it("forceRollout=true does NOT promote an older/equal version", () => {
+    // The version-comparison gate runs before the bucket gate; the
+    // override only bypasses bucket suppression. A same-version
+    // manifest still resolves to up-to-date.
+    const sameVer = classifyManifest("1.3.0", m("1.3.0", 50), NOW, 75, true);
+    expect(sameVer.kind).toBe("up-to-date");
+    const olderVer = classifyManifest("1.4.0", m("1.3.0", 50), NOW, 75, true);
+    expect(olderVer.kind).toBe("up-to-date");
+  });
+
+  it("forceRollout=false (the default) preserves iter-34 suppression behaviour", () => {
+    // Explicit-default + omitted-default both suppress the update for
+    // an out-of-bucket device, so the iter-34 contract is unchanged.
+    const explicit = classifyManifest("1.2.0", m("1.3.0", 50), NOW, 75, false);
+    expect(explicit.kind).toBe("up-to-date");
+    const omitted = classifyManifest("1.2.0", m("1.3.0", 50), NOW, 75);
+    expect(omitted.kind).toBe("up-to-date");
+  });
+
+  it("forceRollout=true with a missing rolloutBucket is identical to no-bucket behaviour", () => {
+    // Manifest without a bucket already ships to everyone; the override
+    // shouldn't change the outcome.
+    const out = classifyManifest("1.2.0", m("1.3.0", null), NOW, 100, true);
+    expect(out.kind).toBe("update-available");
+  });
+
+  it("forceRollout=true with no deviceBucket → update-available (override still applies)", () => {
+    // Defensive: if installId was omitted (deviceBucket undefined), the
+    // bucket check was already disabled; the override should remain a
+    // no-op rather than introduce surprising new behaviour.
+    const out = classifyManifest("1.2.0", m("1.3.0", 50), NOW, undefined, true);
+    expect(out.kind).toBe("update-available");
+  });
+});
+
+// ─── VersionCheckManager — forceRollout predicate wiring (iter 35) ─────────
+
+describe("VersionCheckManager forceRollout predicate (iter 35)", () => {
+  function manifest(rolloutBucket: number | null): unknown {
+    return {
+      version: "9.9.9",
+      downloadUrl: "https://rud1.es/dl",
+      manifestVersion: 2,
+      sha256: "a".repeat(64),
+      releaseNotesUrl: null,
+      rolloutBucket,
+    };
+  }
+
+  it("re-evaluates the predicate on every checkOnce (no caching)", async () => {
+    const calls: boolean[] = [];
+    let force = false;
+    const fakeFetch: typeof globalThis.fetch = async () => jsonResponse(manifest(50));
+    const states: VersionCheckState[] = [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://example.com/m.json",
+      currentVersion: "1.0.0",
+      // installId chosen so deviceBucket is > 50 (suppressed without force).
+      installId: "rud1-fixture-out-of-bucket",
+      fetch: fakeFetch,
+      forceRollout: () => {
+        calls.push(force);
+        return force;
+      },
+      onStateChange: (s) => states.push(s),
+    });
+
+    // Find an installId whose bucket is > 50 so the suppression actually fires.
+    // (We hop to a fixture in the existing computeDeviceBucket-stable suite if
+    //  needed, but the default `rud1-fixture-out-of-bucket` is checked first.)
+    const bucket = computeDeviceBucket("rud1-fixture-out-of-bucket");
+    if (bucket <= 50) {
+      // Fall through: pick any other deterministic ID that maps high.
+      // We try a few until we find one >50. Test stays deterministic
+      // because computeDeviceBucket is sha256-based.
+      let id = "x-0";
+      for (let i = 0; i < 200; i++) {
+        if (computeDeviceBucket(`x-${i}`) > 50) { id = `x-${i}`; break; }
+      }
+      // Rebuild the manager with the high-bucket id.
+      const mgr2 = new VersionCheckManager({
+        manifestUrl: "https://example.com/m.json",
+        currentVersion: "1.0.0",
+        installId: id,
+        fetch: fakeFetch,
+        forceRollout: () => {
+          calls.push(force);
+          return force;
+        },
+        onStateChange: (s) => states.push(s),
+      });
+      await mgr2.checkOnce();
+      const last = states.at(-1);
+      expect(last?.kind).toBe("up-to-date"); // suppressed
+      // Now flip the override and re-check; the same fetch result should now
+      // resolve to update-available.
+      force = true;
+      await mgr2.checkOnce();
+      const after = states.at(-1);
+      expect(after?.kind).toBe("update-available");
+      // Predicate consulted on every fetch.
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+      return;
+    }
+
+    // The default ID happened to land out-of-bucket — use the original mgr.
+    await mgr.checkOnce();
+    expect(states.at(-1)?.kind).toBe("up-to-date");
+    force = true;
+    await mgr.checkOnce();
+    expect(states.at(-1)?.kind).toBe("update-available");
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a throwing predicate degrades to forceRollout=false (does not break the loop)", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () => jsonResponse(manifest(50));
+    // Pick a deterministic out-of-bucket id.
+    let id = "y-0";
+    for (let i = 0; i < 200; i++) {
+      if (computeDeviceBucket(`y-${i}`) > 50) { id = `y-${i}`; break; }
+    }
+    const states: VersionCheckState[] = [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://example.com/m.json",
+      currentVersion: "1.0.0",
+      installId: id,
+      fetch: fakeFetch,
+      forceRollout: () => { throw new Error("fs read failed"); },
+      onStateChange: (s) => states.push(s),
+    });
+    await mgr.checkOnce();
+    // Suppression still fires because the throw collapses to false.
+    expect(states.at(-1)?.kind).toBe("up-to-date");
+  });
+});

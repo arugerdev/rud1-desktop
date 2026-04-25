@@ -112,6 +112,19 @@ export interface VersionCheckOptions {
    * `app.getName() + machine identifier` once at startup.
    */
   installId?: string;
+  /**
+   * Iter 35 — predicate evaluated on every `checkOnce` to decide
+   * whether the iter-34 `rolloutBucket` gate should be bypassed. When
+   * truthy at the time of the fetch, the manager passes
+   * `forceRollout=true` into `classifyManifest` so a device outside
+   * its bucket is still classified as `update-available`.
+   *
+   * Function-typed (rather than a static boolean) so a runtime change
+   * to the env var or persisted config takes effect on the next tick
+   * without restarting the manager. Defaults to "always false" — the
+   * iter-34 bucket gate stays in force.
+   */
+  forceRollout?: () => boolean;
 }
 
 export interface VersionManifest {
@@ -323,12 +336,18 @@ export function computeDeviceBucket(installId: string): number {
  * "ship to everyone" (historical behaviour). When `deviceBucket` is
  * not provided, rollout suppression is disabled (used by tests that
  * don't care about bucketing).
+ *
+ * Iter 35 — `forceRollout=true` bypasses the bucket comparison entirely
+ * so a tester (env var `RUD1_DESKTOP_ROLLOUT_FORCE=1` or persisted
+ * config `rolloutForce: true`) can fetch the artifact regardless of
+ * bucket. Default false preserves the iter-34 behaviour.
  */
 export function classifyManifest(
   current: string,
   manifest: VersionManifest,
   now: number,
   deviceBucket?: number,
+  forceRollout: boolean = false,
 ): VersionCheckState {
   if (parseSemver(current) == null) {
     return {
@@ -339,6 +358,7 @@ export function classifyManifest(
   }
   if (isNewerVersion(manifest.version, current)) {
     if (
+      !forceRollout &&
       manifest.rolloutBucket != null &&
       deviceBucket != null &&
       deviceBucket > manifest.rolloutBucket
@@ -380,6 +400,7 @@ export class VersionCheckManager {
     fetch: typeof globalThis.fetch;
     onStateChange: (s: VersionCheckState) => void;
     installId: string | null;
+    forceRollout: () => boolean;
   };
   private readonly deviceBucket: number | null;
 
@@ -409,6 +430,7 @@ export class VersionCheckManager {
       fetch: options.fetch ?? (globalThis.fetch?.bind(globalThis) as typeof globalThis.fetch),
       onStateChange: options.onStateChange ?? (() => {}),
       installId: options.installId ?? null,
+      forceRollout: options.forceRollout ?? (() => false),
     };
     this.deviceBucket =
       this.opts.installId != null ? computeDeviceBucket(this.opts.installId) : null;
@@ -467,15 +489,29 @@ export class VersionCheckManager {
           checkedAt: Date.now(),
         });
       }
-      // Iter 34 — log the rollout decision once per fetch when the
-      // manifest carries a bucket. Eligibility is the same predicate
-      // `classifyManifest` consults, so the log accurately reflects the
-      // suppression call.
+      // Iter 34/35 — log the rollout decision once per fetch when the
+      // manifest carries a bucket. Eligibility now also reflects the
+      // iter-35 force-override (via `RUD1_DESKTOP_ROLLOUT_FORCE` or
+      // persisted config), so a tester reading the console sees the
+      // override as the cause when their bucket would otherwise have
+      // suppressed the update.
+      let forceRollout = false;
+      try {
+        forceRollout = this.opts.forceRollout();
+      } catch {
+        // A throwing predicate (e.g. fileSystem suddenly returning
+        // EPERM mid-poll) must not break the version-check loop.
+        // Default to "not forced" so we fall back to the iter-34 gate.
+        forceRollout = false;
+      }
       if (manifest.rolloutBucket != null && this.deviceBucket != null) {
-        const eligible = this.deviceBucket <= manifest.rolloutBucket;
+        const inBucket = this.deviceBucket <= manifest.rolloutBucket;
+        const eligible = inBucket || forceRollout;
         console.info(
-          `[version-check] rollout: device bucket=${this.deviceBucket}, manifest bucket=${manifest.rolloutBucket}, eligible=${eligible}`,
+          `[version-check] rollout: device bucket=${this.deviceBucket}, manifest bucket=${manifest.rolloutBucket}, inBucket=${inBucket}, forced=${forceRollout}, eligible=${eligible}`,
         );
+      } else if (forceRollout) {
+        console.info(`[version-check] rollout: force override active (no bucket in manifest)`);
       }
       return this.transition(
         classifyManifest(
@@ -483,6 +519,7 @@ export class VersionCheckManager {
           manifest,
           Date.now(),
           this.deviceBucket ?? undefined,
+          forceRollout,
         ),
       );
     } catch (e) {

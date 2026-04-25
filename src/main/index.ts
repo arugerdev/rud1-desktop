@@ -51,6 +51,7 @@ import {
 } from "./version-check-manager";
 import {
   isAutoUpdateEnabled,
+  isRolloutForceEnabled,
   startBackgroundDownload,
   applyAndRestart,
   configureAutoUpdaterRuntime,
@@ -605,6 +606,11 @@ app.whenReady().then(() => {
     manifestUrl: VERSION_MANIFEST_URL,
     currentVersion: app.getVersion(),
     installId,
+    // Iter 35 — function-typed so a runtime change to the env var or
+    // persisted-config flag takes effect on the next poll without
+    // restarting the app. `isRolloutForceEnabled` reads `process.env`
+    // and the userData JSON inside; safe to call once per fetch tick.
+    forceRollout: () => isRolloutForceEnabled(),
     onStateChange: (state) => {
       lastVersionCheckState = state;
       rebuildTrayMenu();

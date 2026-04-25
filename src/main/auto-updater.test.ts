@@ -58,6 +58,9 @@ const {
   AUTO_UPDATE_STRICT_ENV,
   isStrictAutoUpdateEnabled,
   readPersistedConfigStrict,
+  AUTO_UPDATE_ROLLOUT_FORCE_ENV,
+  isRolloutForceEnabled,
+  readPersistedConfigRolloutForce,
   setStateForTesting,
   resetStateForTesting,
 } = __test;
@@ -701,5 +704,186 @@ describe("applyAndRestart strict-mode rejection", () => {
       else process.env[AUTO_UPDATE_STRICT_ENV] = prev;
       resetStateForTesting();
     }
+  });
+});
+
+// ─── isRolloutForceEnabled (iter 35) ───────────────────────────────────────
+//
+// Mirrors the iter-31 strict-mode shape on purpose: env first, persisted
+// config second, off by default. Tests pin the same matrix so a future
+// refactor that consolidates the two readers can't silently lose
+// per-flag isolation (a malformed `strict` shouldn't poison
+// `rolloutForce` and vice versa).
+
+describe("isRolloutForceEnabled", () => {
+  it("returns true when the env flag is set to 1", () => {
+    expect(
+      isRolloutForceEnabled({
+        env: { [AUTO_UPDATE_ROLLOUT_FORCE_ENV]: "1" },
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: {
+          readFileSync: () => { throw new Error("ENOENT"); },
+        } as unknown as typeof import("fs"),
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when the env flag is unset and no config file exists", () => {
+    expect(
+      isRolloutForceEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: {
+          readFileSync: () => { throw new Error("ENOENT"); },
+        } as unknown as typeof import("fs"),
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true when the persisted config has rolloutForce=true", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ rolloutForce: true }),
+    } as unknown as typeof import("fs");
+    expect(
+      isRolloutForceEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+
+  it("env=1 wins even when the persisted config has rolloutForce=false", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ rolloutForce: false }),
+    } as unknown as typeof import("fs");
+    expect(
+      isRolloutForceEnabled({
+        env: { [AUTO_UPDATE_ROLLOUT_FORCE_ENV]: "1" },
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+
+  it("env values other than '1' do NOT enable the flag (no truthy coercion)", () => {
+    // Mirrors the strict-mode pattern: only the literal "1" enables.
+    // `true`, `yes`, `on`, etc. all fall through to the persisted-config
+    // read so an operator's intent is unambiguous and audit-grep-able.
+    const fakeFs = {
+      readFileSync: () => { throw new Error("ENOENT"); },
+    } as unknown as typeof import("fs");
+    for (const v of ["true", "yes", "on", "0", "", "TRUE"]) {
+      expect(
+        isRolloutForceEnabled({
+          env: { [AUTO_UPDATE_ROLLOUT_FORCE_ENV]: v },
+          appOverride: { getPath: () => "/tmp" },
+          fileSystem: fakeFs,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("ignores wrongly-typed rolloutForce field (e.g. string 'true')", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ rolloutForce: "true" }),
+    } as unknown as typeof import("fs");
+    expect(
+      isRolloutForceEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores malformed JSON in the persisted config", () => {
+    const fakeFs = {
+      readFileSync: () => "{ not json",
+    } as unknown as typeof import("fs");
+    expect(
+      isRolloutForceEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when no app override is provided AND env is unset", () => {
+    // The function must defend against being called before
+    // configureAutoUpdaterRuntime — pre-app-ready plumbing should not
+    // spuriously enable the override.
+    expect(
+      isRolloutForceEnabled({
+        env: {},
+        // appOverride deliberately omitted; deps.app is also undefined
+        // because `auto-updater.ts` is mocked at the top of this file
+        // via the `electron` mock and `electronApp` resolves to a stub.
+      }),
+    ).toBe(false);
+  });
+
+  it("does not interact with the strict flag (independent toggles)", () => {
+    // A persisted config with strict=true must NOT enable rolloutForce
+    // (and vice versa). This pins the iter-31 isolation contract.
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: true, rolloutForce: false }),
+    } as unknown as typeof import("fs");
+    expect(
+      isRolloutForceEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("readPersistedConfigRolloutForce", () => {
+  it("returns {} when the file does not exist", () => {
+    const fakeFs = {
+      readFileSync: () => { throw new Error("ENOENT"); },
+    } as unknown as typeof import("fs");
+    expect(readPersistedConfigRolloutForce(() => "/tmp", fakeFs)).toEqual({});
+  });
+
+  it("returns {rolloutForce:true} for a valid JSON object with rolloutForce=true", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ rolloutForce: true, autoUpdate: false }),
+    } as unknown as typeof import("fs");
+    expect(readPersistedConfigRolloutForce(() => "/tmp", fakeFs)).toEqual({
+      rolloutForce: true,
+    });
+  });
+
+  it("returns {} when rolloutForce is not a boolean (e.g. number)", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ rolloutForce: 1 }),
+    } as unknown as typeof import("fs");
+    expect(readPersistedConfigRolloutForce(() => "/tmp", fakeFs)).toEqual({});
+  });
+
+  it("returns {} when the JSON is well-formed but rolloutForce is missing", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: true }),
+    } as unknown as typeof import("fs");
+    expect(readPersistedConfigRolloutForce(() => "/tmp", fakeFs)).toEqual({});
+  });
+
+  it("returns {} when the parsed JSON is not an object (defensive)", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify(["arrays", "are", "not", "configs"]),
+    } as unknown as typeof import("fs");
+    // The reader only accepts records; arrays slip through `typeof === "object"`
+    // but lack the `rolloutForce` key, so the loader yields {}.
+    expect(readPersistedConfigRolloutForce(() => "/tmp", fakeFs)).toEqual({});
   });
 });
