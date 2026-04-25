@@ -43,9 +43,20 @@ import {
   type NotifiedHost,
 } from "./first-boot-dedupe";
 import { computeTrayState } from "./tray-attention";
+import {
+  VersionCheckManager,
+  type VersionCheckState,
+} from "./version-check-manager";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
+// Iter 29 — manifest URL for the lightweight desktop version check.
+// Defaults to a stable path under the same domain as the app; can be
+// overridden in dev/staging via env. An empty string disables the
+// check entirely (the manager validates this and parks in the "error"
+// state, which the tray reads as "do not surface").
+const VERSION_MANIFEST_URL =
+  process.env.RUD1_VERSION_MANIFEST_URL ?? "https://rud1.es/desktop/manifest.json";
 // Recheck cadence for the LAN firmware probe. 60s is short enough that an
 // operator who plugs a device in during a session sees the tray entry
 // within a minute, but long enough that the probe is invisible on the
@@ -69,6 +80,12 @@ let dedupeFilepath: string | null = null;
 // `computeTrayState`. Resets to 0 at startup; the first probe transitions
 // 0 → N if any first-boot host is on the LAN.
 let trayAttentionCount = 0;
+// Iter 29 — desktop version-check manager. Started from app.whenReady()
+// so app.getVersion() returns the packaged value; the cached state is
+// read from the tray menu rebuild path so the operator sees the
+// "Update available" affordance without a manual trigger.
+let versionCheckManager: VersionCheckManager | null = null;
+let lastVersionCheckState: VersionCheckState = { kind: "idle" };
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -162,9 +179,81 @@ function rebuildTrayMenu(): void {
       },
     ],
   });
+  // Iter 29 — desktop version check entry. The manager only runs after
+  // app.whenReady(), so the very first menu rebuild hits "idle" and we
+  // intentionally hide the row to avoid flashing a meaningless state.
+  // Every later rebuild (post-fetch) renders one of:
+  //   • "Update available (vX.Y.Z)" — bold, click opens download URL or
+  //     the manifest path so the operator can act
+  //   • "Up to date (vX.Y.Z)" — disabled informational row
+  //   • "Couldn't check for updates: …" — disabled with reason
+  items.push({ type: "separator" });
+  for (const item of buildVersionCheckMenuItems(lastVersionCheckState)) {
+    items.push(item);
+  }
   items.push({ type: "separator" });
   items.push({ label: "Quit", click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
+/**
+ * Iter 29 — render the version-check state as one or two MenuItem rows.
+ *
+ * Pure function (no Electron imports beyond the type) so the unit
+ * suite can pin the labels + click semantics without spawning a tray.
+ * Returns an empty array for `idle` and `checking` so the menu doesn't
+ * flicker between states; the user sees either the verdict or nothing.
+ */
+function buildVersionCheckMenuItems(
+  state: VersionCheckState,
+): Electron.MenuItemConstructorOptions[] {
+  if (state.kind === "idle" || state.kind === "checking") return [];
+  if (state.kind === "update-available") {
+    const url = state.downloadUrl;
+    return [
+      {
+        // We add a leading marker so the row visually pops in a busy
+        // tray — Electron menus on Windows/Linux don't support bold,
+        // and macOS only honours `accelerator` for keyboard shortcuts.
+        label: `▲ Update available — v${state.latest}`,
+        click: () => {
+          if (url) void shell.openExternal(url);
+        },
+        enabled: url != null,
+      },
+      {
+        label: `Currently installed: v${state.current}`,
+        enabled: false,
+      },
+      {
+        label: "Check for updates now",
+        click: () => { void versionCheckManager?.checkOnce(); },
+      },
+    ];
+  }
+  if (state.kind === "up-to-date") {
+    return [
+      {
+        label: `Up to date (v${state.current})`,
+        enabled: false,
+      },
+      {
+        label: "Check for updates now",
+        click: () => { void versionCheckManager?.checkOnce(); },
+      },
+    ];
+  }
+  // error
+  return [
+    {
+      label: `Couldn't check for updates: ${state.message}`,
+      enabled: false,
+    },
+    {
+      label: "Retry update check",
+      click: () => { void versionCheckManager?.checkOnce(); },
+    },
+  ];
 }
 
 /**
@@ -527,6 +616,22 @@ app.whenReady().then(() => {
   });
   startFirmwareProbeLoop();
 
+  // Iter 29 — desktop version check. Started here (not at module load)
+  // because `app.getVersion()` requires `app.whenReady()` to resolve,
+  // and the tray must already exist for the rebuild callback to wire
+  // up. We never block startup on the first fetch — `start()` schedules
+  // an immediate `checkOnce` async + an interval; failures park in the
+  // "error" state and the tray surfaces a Retry entry.
+  versionCheckManager = new VersionCheckManager({
+    manifestUrl: VERSION_MANIFEST_URL,
+    currentVersion: app.getVersion(),
+    onStateChange: (state) => {
+      lastVersionCheckState = state;
+      rebuildTrayMenu();
+    },
+  });
+  versionCheckManager.start();
+
   // Resume opt-in periodic diagnosis snapshots if the operator had them
   // enabled. Fire-and-forget: startup must not block on disk I/O, and
   // resume failures are recoverable — the next configure() call overwrites
@@ -553,6 +658,7 @@ app.on("before-quit", () => {
     clearInterval(firmwareProbeTimer);
     firmwareProbeTimer = null;
   }
+  versionCheckManager?.stop();
   tray?.destroy();
 });
 
