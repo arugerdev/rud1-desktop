@@ -877,10 +877,99 @@ function buildSettingsWindowHtml(): string {
     }
     else if (state.kind === 'error') summary = "Couldn't check for updates: " + escape(state.message);
     var banner = bannerCls ? '<div class="banner ' + bannerCls + '">' + summary + '</div>' : '<p>' + summary + '</p>';
+    // Iter 43 — extend iter-42 "Copy diagnostics" coverage to the three
+    // non-blocked verdicts (up-to-date, update-available, error) so a
+    // support reader gets the same envelope shape regardless of verdict.
+    // The idle and checking transient states have no meaningful envelope
+    // to dump (no version comparison happened yet), so the button is
+    // omitted there. Each verdict envelope is built inline below in the
+    // click handler — key order matches the buildVersionDiagnosticsBlob
+    // helpers byte-for-byte; the iter-43 "key ordering" tests in the
+    // main-process suite are the ground truth.
+    var diagBtn = (state.kind === 'up-to-date' ||
+                   state.kind === 'update-available' ||
+                   state.kind === 'error')
+      ? '<button id="copy-diagnostics">Copy diagnostics</button>'
+      : '';
     updatesEl.innerHTML = banner +
       '<div class="actions">' +
+        diagBtn +
         '<button id="recheck">Check for updates now</button>' +
       '</div>';
+    if (diagBtn) {
+      document.getElementById('copy-diagnostics').addEventListener('click', function() {
+        // Mirrors the buildVersionDiagnosticsBlob contract in
+        // version-check-manager.ts. We rebuild inline rather than IPC-
+        // fetching the blob because the renderer already has the full
+        // state in scope. Key order MUST match the helper byte-for-byte
+        // — a regression here surfaces as the iter-43 key ordering
+        // tests failing in the main-process suite.
+        var envelope;
+        if (state.kind === 'up-to-date') {
+          envelope = {
+            capturedAt: new Date().toISOString(),
+            kind: 'up-to-date',
+            currentVersion: state.current,
+            releaseNotesUrl: state.releaseNotesUrl != null ? state.releaseNotesUrl : null,
+            manifestVersion: state.manifestVersion != null ? state.manifestVersion : null,
+          };
+        } else if (state.kind === 'update-available') {
+          // Re-run the iter-39 precedence chain (keyed map → scalar →
+          // releaseNotes → synthesized) for parity with the operator's
+          // mental model. The update-available state today only carries
+          // the iter-30 scalar downloadUrl; the keyed-map branch is
+          // wired through for future-proofing.
+          function isAllowed3(u) {
+            if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
+            if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+            try {
+              var p = new URL(u);
+              return p.protocol === 'https:' && p.username === '' && p.password === '';
+            } catch (e) { return false; }
+          }
+          var keyed3 = null;
+          var map3 = state.bridgeDownloadUrls;
+          var minV3 = state.latest;
+          if (map3 && typeof map3 === 'object' && typeof minV3 === 'string' && minV3.length > 0 &&
+              Object.prototype.hasOwnProperty.call(map3, minV3) && isAllowed3(map3[minV3])) {
+            keyed3 = map3[minV3];
+          }
+          var url3;
+          if (keyed3) url3 = keyed3;
+          else if (state.downloadUrl && isAllowed3(state.downloadUrl)) url3 = state.downloadUrl;
+          else if (state.releaseNotesUrl) url3 = state.releaseNotesUrl;
+          else url3 = 'https://rud1.es/desktop/download?version=' + encodeURIComponent(minV3 || '');
+          var rawHash3 = state.bridgeSha256;
+          var hashHex3 = (typeof rawHash3 === 'string' && /^[0-9a-f]{64}$/i.test(rawHash3))
+            ? rawHash3.toLowerCase()
+            : null;
+          envelope = {
+            capturedAt: new Date().toISOString(),
+            kind: 'update-available',
+            currentVersion: state.current,
+            targetVersion: state.latest,
+            downloadUrl: url3,
+            bridgeSha256: hashHex3,
+            releaseNotesUrl: state.releaseNotesUrl != null ? state.releaseNotesUrl : null,
+            manifestVersion: state.manifestVersion != null ? state.manifestVersion : null,
+          };
+        } else {
+          // error
+          envelope = {
+            capturedAt: new Date().toISOString(),
+            kind: 'error',
+            currentVersion: state.current != null ? state.current : null,
+            errorMessage: state.message,
+            manifestVersion: state.manifestVersion != null ? state.manifestVersion : null,
+          };
+        }
+        var blob = JSON.stringify(envelope, null, 2);
+        window.electronAPI.clipboard.writeText(blob).then(function(res) {
+          if (res && res.ok) toast('Copied diagnostics to clipboard');
+          else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+        });
+      });
+    }
     document.getElementById('recheck').addEventListener('click', function() {
       window.electronAPI.versionCheck.recheck();
       toast('Re-checking for updates…');

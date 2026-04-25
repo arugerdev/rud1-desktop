@@ -2639,3 +2639,285 @@ describe("buildBlockedDiagnosticsBlob (iter 42)", () => {
     }
   });
 });
+
+// ─── Iter 43 — non-blocked-verdict diagnostics blobs ───────────────────────
+//
+// Companion coverage to iter-42's blocked-state envelope. Each non-blocked
+// verdict (`up-to-date`, `update-available`, `error`) gets its own stable
+// envelope shape pinned here so a support reader investigating "why
+// didn't this auto-update?" sees a consistent layout regardless of
+// verdict. Pins the key SET, key ORDERING, capturedAt format, kind
+// literal, and the verdict-specific behaviour (pickDownloadUrl
+// precedence reuse on `update-available`; verbatim errorMessage on
+// `error`; field-omission on `up-to-date`).
+
+describe("buildUpToDateDiagnosticsBlob (iter 43)", () => {
+  const { buildUpToDateDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0); // 2026-04-25T12:00:00.000Z
+
+  it("envelope shape pins capturedAt + kind literal + currentVersion + key ordering", () => {
+    const blob = buildUpToDateDiagnosticsBlob(
+      {
+        current: "2.1.0",
+        releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+        manifestVersion: 2,
+      },
+      FIXED_AT,
+    );
+    const out = JSON.parse(blob);
+    expect(out).toEqual({
+      capturedAt: "2026-04-25T12:00:00.000Z",
+      kind: "up-to-date",
+      currentVersion: "2.1.0",
+      releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+      manifestVersion: 2,
+    });
+    // Pinned key order — any external scraper relies on this.
+    const order = [
+      '"capturedAt"',
+      '"kind"',
+      '"currentVersion"',
+      '"releaseNotesUrl"',
+      '"manifestVersion"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("capturedAt is wall-clock at copy time, kind is the iter-43 stable literal", () => {
+    const out = JSON.parse(
+      buildUpToDateDiagnosticsBlob({ current: "2.1.0" }, FIXED_AT),
+    );
+    expect(out.capturedAt).toBe("2026-04-25T12:00:00.000Z");
+    expect(out.kind).toBe("up-to-date");
+  });
+
+  it("omits update-available-only fields (no targetVersion / downloadUrl / bridgeSha256)", () => {
+    // The up-to-date envelope is intentionally narrower than the
+    // update-available one — there's no target version (we're already
+    // on it) and no download URL (nothing to download). A regression
+    // that smuggles those keys in would invalidate the verdict-vs-shape
+    // promise the support-side parser relies on.
+    const blob = buildUpToDateDiagnosticsBlob(
+      { current: "2.1.0", releaseNotesUrl: "https://rud1.es/changelog" },
+      FIXED_AT,
+    );
+    expect(blob).not.toContain('"targetVersion"');
+    expect(blob).not.toContain('"downloadUrl"');
+    expect(blob).not.toContain('"bridgeSha256"');
+    expect(blob).not.toContain('"requiredMinVersion"');
+    expect(blob).not.toContain('"errorMessage"');
+    // Optional fields default to null when absent.
+    const minimal = JSON.parse(
+      buildUpToDateDiagnosticsBlob({ current: "2.1.0" }, FIXED_AT),
+    );
+    expect(minimal.releaseNotesUrl).toBe(null);
+    expect(minimal.manifestVersion).toBe(null);
+  });
+});
+
+describe("buildUpdateAvailableDiagnosticsBlob (iter 43)", () => {
+  const { buildUpdateAvailableDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0); // 2026-04-25T12:00:00.000Z
+  const VALID_BRIDGE_SHA = "d".repeat(64);
+
+  it("envelope shape pins capturedAt + kind literal + targetVersion + key ordering", () => {
+    const blob = buildUpdateAvailableDiagnosticsBlob(
+      {
+        current: "1.4.0",
+        latest: "2.1.0",
+        downloadUrl: "https://rud1.es/desktop/v2.1.0",
+        releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+        bridgeSha256: VALID_BRIDGE_SHA,
+        manifestVersion: 2,
+      },
+      FIXED_AT,
+    );
+    const out = JSON.parse(blob);
+    expect(out).toEqual({
+      capturedAt: "2026-04-25T12:00:00.000Z",
+      kind: "update-available",
+      currentVersion: "1.4.0",
+      targetVersion: "2.1.0",
+      downloadUrl: "https://rud1.es/desktop/v2.1.0",
+      bridgeSha256: VALID_BRIDGE_SHA,
+      releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+      manifestVersion: 2,
+    });
+    const order = [
+      '"capturedAt"',
+      '"kind"',
+      '"currentVersion"',
+      '"targetVersion"',
+      '"downloadUrl"',
+      '"bridgeSha256"',
+      '"releaseNotesUrl"',
+      '"manifestVersion"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("capturedAt is wall-clock at copy time, kind is the iter-43 stable literal", () => {
+    const out = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(
+        { current: "1.4.0", latest: "2.1.0" },
+        FIXED_AT,
+      ),
+    );
+    expect(out.capturedAt).toBe("2026-04-25T12:00:00.000Z");
+    expect(out.kind).toBe("update-available");
+  });
+
+  it("downloadUrl re-runs pickDownloadUrl precedence (scalar → releaseNotes → synthesized)", () => {
+    // Scalar wins over releaseNotesUrl when present.
+    const scalar = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(
+        {
+          current: "1.4.0",
+          latest: "2.1.0",
+          downloadUrl: "https://rud1.es/desktop/v2.1.0",
+          releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+        },
+        FIXED_AT,
+      ),
+    );
+    expect(scalar.downloadUrl).toBe("https://rud1.es/desktop/v2.1.0");
+    // releaseNotesUrl is the next fallback.
+    const notes = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(
+        {
+          current: "1.4.0",
+          latest: "2.1.0",
+          releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+        },
+        FIXED_AT,
+      ),
+    );
+    expect(notes.downloadUrl).toBe("https://rud1.es/changelog/v2.1.0");
+    // Synthesized URL uses `latest` as the version qualifier (the
+    // `update-available` analogue of `requiredMinVersion`).
+    const synth = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(
+        { current: "1.4.0", latest: "2.1.0" },
+        FIXED_AT,
+      ),
+    );
+    expect(synth.downloadUrl).toBe(
+      "https://rud1.es/desktop/download?version=2.1.0",
+    );
+  });
+
+  it("bridgeSha256 normalised to lowercase / null mirrors iter-41 shape gate", () => {
+    const upper = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(
+        {
+          current: "1.4.0",
+          latest: "2.1.0",
+          bridgeSha256: VALID_BRIDGE_SHA.toUpperCase(),
+        },
+        FIXED_AT,
+      ),
+    );
+    expect(upper.bridgeSha256).toBe(VALID_BRIDGE_SHA);
+    const malformed = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(
+        { current: "1.4.0", latest: "2.1.0", bridgeSha256: "not-a-hex" },
+        FIXED_AT,
+      ),
+    );
+    expect(malformed.bridgeSha256).toBe(null);
+    const missing = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(
+        { current: "1.4.0", latest: "2.1.0" },
+        FIXED_AT,
+      ),
+    );
+    expect(missing.bridgeSha256).toBe(null);
+  });
+});
+
+describe("buildErrorDiagnosticsBlob (iter 43)", () => {
+  const { buildErrorDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0); // 2026-04-25T12:00:00.000Z
+
+  it("envelope shape pins capturedAt + kind literal + errorMessage + key ordering", () => {
+    const blob = buildErrorDiagnosticsBlob(
+      {
+        current: "1.4.0",
+        message: "fetch failed: ECONNREFUSED",
+        manifestVersion: 2,
+      },
+      FIXED_AT,
+    );
+    const out = JSON.parse(blob);
+    expect(out).toEqual({
+      capturedAt: "2026-04-25T12:00:00.000Z",
+      kind: "error",
+      currentVersion: "1.4.0",
+      errorMessage: "fetch failed: ECONNREFUSED",
+      manifestVersion: 2,
+    });
+    const order = [
+      '"capturedAt"',
+      '"kind"',
+      '"currentVersion"',
+      '"errorMessage"',
+      '"manifestVersion"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("capturedAt is wall-clock at copy time, kind is the iter-43 stable literal", () => {
+    const out = JSON.parse(
+      buildErrorDiagnosticsBlob(
+        { current: "1.4.0", message: "boom" },
+        FIXED_AT,
+      ),
+    );
+    expect(out.capturedAt).toBe("2026-04-25T12:00:00.000Z");
+    expect(out.kind).toBe("error");
+  });
+
+  it("errorMessage echoes verbatim from state (no truncation / normalisation)", () => {
+    // Verbatim because operator-pasted error text is the primary
+    // diagnostic signal. The blob should preserve exact whitespace,
+    // punctuation, and the full message body so support sees what the
+    // operator saw.
+    const verbose =
+      "HTTP 503: Service Unavailable\n  retry-after: 30\n  upstream: cdn-edge-7";
+    const out = JSON.parse(
+      buildErrorDiagnosticsBlob({ current: "1.4.0", message: verbose }, FIXED_AT),
+    );
+    expect(out.errorMessage).toBe(verbose);
+    // currentVersion defaults to null when the caller didn't thread the
+    // app version through (the error state shape doesn't carry it).
+    const noCurrent = JSON.parse(
+      buildErrorDiagnosticsBlob({ message: "boom" }, FIXED_AT),
+    );
+    expect(noCurrent.currentVersion).toBe(null);
+    // No update-available-only fields leak in.
+    const blob = buildErrorDiagnosticsBlob(
+      { current: "1.4.0", message: "boom" },
+      FIXED_AT,
+    );
+    expect(blob).not.toContain('"targetVersion"');
+    expect(blob).not.toContain('"downloadUrl"');
+    expect(blob).not.toContain('"bridgeSha256"');
+    expect(blob).not.toContain('"releaseNotesUrl"');
+    expect(blob).not.toContain('"requiredMinVersion"');
+  });
+});

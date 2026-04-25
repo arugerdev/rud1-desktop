@@ -1393,6 +1393,135 @@ export function buildBlockedDiagnosticsBlob(
   return JSON.stringify(envelope, null, 2);
 }
 
+// ─── Iter 43 — non-blocked-verdict diagnostics blob ────────────────────────
+//
+// `buildVersionDiagnosticsBlob` extends iter-42's "Copy diagnostics" coverage
+// to the three non-blocked verdicts (`up-to-date`, `update-available`,
+// `error`) so a support reader investigating "why didn't this auto-update?"
+// gets the same envelope shape regardless of verdict.
+//
+// We keep this helper SEPARATE from iter-42's `buildBlockedDiagnosticsBlob`
+// rather than overloading a single function: each verdict has its own
+// stable key set (and key ORDER), and a discriminated-union return is
+// clearer at the call site than a polymorphic blob whose fields silently
+// appear/disappear.
+//
+// Per-verdict envelope shapes (key order pinned by iter-43 tests):
+//
+//   up-to-date:
+//     { capturedAt, kind: "up-to-date", currentVersion,
+//       releaseNotesUrl, manifestVersion }
+//
+//   update-available:
+//     { capturedAt, kind: "update-available", currentVersion,
+//       targetVersion, downloadUrl,           // resolved via pickDownloadUrl
+//       bridgeSha256, releaseNotesUrl, manifestVersion }
+//
+//   error:
+//     { capturedAt, kind: "error", currentVersion,
+//       errorMessage, manifestVersion }
+//
+// Common to all three: `capturedAt` (wall clock at copy time, ISO-8601),
+// the stable `kind` literal, `currentVersion`, and `manifestVersion`
+// (echoed verbatim — null when absent).
+//
+// `update-available` reuses `pickDownloadUrl` so the support reader sees
+// the same precedence chain (iter-39 keyed → iter-38 scalar → iter-33
+// releaseNotesUrl → synthesized) the operator's panel routed them to.
+// We map the iter-30 `downloadUrl` field onto `bridgeDownloadUrl` (the
+// scalar precedence input) and `latest` onto `requiredMinVersion` (used
+// only for the synthesized fallback). NOTE: the "synthesized" URL for
+// `update-available` is the same `https://rud1.es/desktop/download?version=`
+// shape the blocked-verdict synthesizer produces — keeping the support
+// reader's mental model aligned across both verdicts.
+//
+// `error` echoes `state.message` verbatim into `errorMessage`. Verbatim
+// because operator-pasted error text is the primary diagnostic signal —
+// truncating or normalising it would lose the very content support is
+// trying to read.
+
+export interface UpToDateDiagnosticsState {
+  current: string;
+  releaseNotesUrl?: string | null;
+  manifestVersion?: number | null;
+}
+
+export interface UpdateAvailableDiagnosticsState {
+  current: string;
+  latest: string;
+  downloadUrl?: string | null;
+  releaseNotesUrl?: string | null;
+  bridgeSha256?: string | null;
+  manifestVersion?: number | null;
+}
+
+export interface ErrorDiagnosticsState {
+  // The error verdict's state shape doesn't carry `current` today (the
+  // discriminated union only has `message` + `checkedAt`); we accept it
+  // optionally so a caller threading the running app's version through
+  // can include it in the envelope. Renders as `null` when absent —
+  // support readers can still attribute the ticket via the shipped
+  // `manifestVersion` or fall back to other panels.
+  current?: string | null;
+  message: string;
+  manifestVersion?: number | null;
+}
+
+export function buildUpToDateDiagnosticsBlob(
+  state: UpToDateDiagnosticsState,
+  capturedAtMs: number,
+): string {
+  const envelope = {
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    kind: "up-to-date" as const,
+    currentVersion: state.current,
+    releaseNotesUrl: state.releaseNotesUrl ?? null,
+    manifestVersion: state.manifestVersion ?? null,
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
+export function buildUpdateAvailableDiagnosticsBlob(
+  state: UpdateAvailableDiagnosticsState,
+  capturedAtMs: number,
+): string {
+  const hint = formatBlockedHashHint({ bridgeSha256: state.bridgeSha256 });
+  const envelope = {
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    kind: "update-available" as const,
+    currentVersion: state.current,
+    targetVersion: state.latest,
+    // Re-route through pickDownloadUrl so the operator-side precedence
+    // chain stays the source of truth. The iter-30 `downloadUrl` field
+    // maps to `bridgeDownloadUrl` (the scalar precedence input);
+    // `latest` substitutes for `requiredMinVersion` when the chain
+    // falls through to the synthesized URL.
+    downloadUrl: pickDownloadUrl({
+      bridgeDownloadUrl: state.downloadUrl,
+      releaseNotesUrl: state.releaseNotesUrl,
+      requiredMinVersion: state.latest,
+    }),
+    bridgeSha256: hint != null ? hint.hex : null,
+    releaseNotesUrl: state.releaseNotesUrl ?? null,
+    manifestVersion: state.manifestVersion ?? null,
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
+export function buildErrorDiagnosticsBlob(
+  state: ErrorDiagnosticsState,
+  capturedAtMs: number,
+): string {
+  const envelope = {
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    kind: "error" as const,
+    currentVersion: state.current ?? null,
+    errorMessage: state.message,
+    manifestVersion: state.manifestVersion ?? null,
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -1432,4 +1561,8 @@ export const __test = {
   buildBlockedPanelHashFragment,
   // Iter 42 — diagnostics blob for the "Copy diagnostics" button.
   buildBlockedDiagnosticsBlob,
+  // Iter 43 — diagnostics blobs for the non-blocked verdicts.
+  buildUpToDateDiagnosticsBlob,
+  buildUpdateAvailableDiagnosticsBlob,
+  buildErrorDiagnosticsBlob,
 };
