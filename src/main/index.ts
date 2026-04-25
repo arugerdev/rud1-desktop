@@ -29,6 +29,15 @@ import {
   shouldNotifyFirstBoot,
   type FirmwareProbeResult,
 } from "./firmware-discovery";
+import {
+  DEDUPE_FILENAME,
+  addHost as dedupeAddHost,
+  isHostNotified,
+  loadNotifiedHosts,
+  removeHost as dedupeRemoveHost,
+  saveNotifiedHosts,
+  type NotifiedHost,
+} from "./first-boot-dedupe";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
@@ -42,6 +51,13 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let lastFirmwareProbe: FirmwareProbeResult | null = null;
 let firmwareProbeTimer: NodeJS.Timeout | null = null;
+// Persisted rising-edge dedupe for the first-boot notification (iter 27).
+// Populated from `<userData>/first-boot-notifications.json` after
+// app.whenReady() — `getPath("userData")` is unavailable before then. The
+// probe loop reads this in-memory mirror; disk writes happen on rising/
+// falling edges only.
+let notifiedHosts: NotifiedHost[] = [];
+let dedupeFilepath: string | null = null;
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -149,8 +165,29 @@ async function runFirmwareProbe(): Promise<void> {
   }
   lastFirmwareProbe = next;
   rebuildTrayMenu();
-  if (next != null && shouldNotifyFirstBoot(prev, next)) {
-    notifyFirstBootDevice(next);
+  if (next == null) return;
+
+  // Falling edge: a host that was first-boot but is now reachable+complete
+  // (or unreachable) is dropped from the persisted dedupe set so it can
+  // re-notify if the same host re-enters first-boot mode later.
+  if (prev && isFirstBoot(prev) && !isFirstBoot(next)) {
+    const before = notifiedHosts.length;
+    notifiedHosts = dedupeRemoveHost(notifiedHosts, prev.host);
+    if (notifiedHosts.length !== before && dedupeFilepath) {
+      void saveNotifiedHosts(dedupeFilepath, notifiedHosts);
+    }
+  }
+
+  if (!shouldNotifyFirstBoot(prev, next)) return;
+  // Persisted gate: even if the in-memory rising-edge predicate says yes
+  // (e.g. cold-start with `prev=null`), suppress when the host was already
+  // notified within the 30-day TTL.
+  if (isHostNotified(notifiedHosts, next.host, new Date())) return;
+
+  notifyFirstBootDevice(next);
+  notifiedHosts = dedupeAddHost(notifiedHosts, next.host, new Date());
+  if (dedupeFilepath) {
+    void saveNotifiedHosts(dedupeFilepath, notifiedHosts);
   }
 }
 
@@ -187,6 +224,16 @@ app.whenReady().then(() => {
   registerIpcHandlers();
   mainWindow = createWindow();
   createTray();
+
+  // Resolve userData and prime the persisted first-boot dedupe set BEFORE
+  // the probe loop fires. If the load is slow (cold disk, network drive)
+  // the loop still starts on time — a cache miss just means the very first
+  // tick after launch may re-notify a host we already knew about, which is
+  // strictly better than blocking startup on disk I/O.
+  dedupeFilepath = path.join(app.getPath("userData"), DEDUPE_FILENAME);
+  void loadNotifiedHosts(dedupeFilepath, new Date()).then((loaded) => {
+    notifiedHosts = loaded;
+  });
   startFirmwareProbeLoop();
 
   // Resume opt-in periodic diagnosis snapshots if the operator had them
