@@ -601,18 +601,31 @@ function showSettingsWindow(): void {
   // process opened this window and controls its HTML byte-for-byte.
   const trustedId = settingsWindow.webContents.id;
   markWebContentsTrusted(trustedId);
-  settingsWindow.loadURL(buildSettingsWindowHtml());
+  // Iter 44 — thread app.getVersion() into the panel HTML so the
+  // renderer-side "Copy diagnostics" inline rebuild can populate
+  // `currentVersion` on the `error` envelope (the error state shape
+  // doesn't carry it). Captured at HTML build time as a JSON-encoded
+  // constant — same idea as `installId` below; safe to call here
+  // because `app.whenReady()` has already resolved by the time the
+  // tray opens this window.
+  settingsWindow.loadURL(buildSettingsWindowHtml(app.getVersion()));
   settingsWindow.on("closed", () => {
     unmarkWebContentsTrusted(trustedId);
     settingsWindow = null;
   });
 }
 
-function buildSettingsWindowHtml(): string {
+function buildSettingsWindowHtml(currentVersion: string): string {
   // CSP mirrors the dedupe inspector — deny everything by default,
   // allow inline scripts/styles only (the bridge runs in the isolated
   // preload context unaffected by document CSP). No connect-src — the
   // renderer talks only via IPC.
+  // Iter 44 — `currentVersion` is JSON-encoded into the inline script
+  // as a constant so the `error`-verdict diagnostics envelope carries
+  // the running app's version (the error state shape doesn't carry it,
+  // so the renderer can't read it off `state`). Mirrors the iter-43
+  // helper contract in version-check-manager.ts byte-for-byte.
+  const currentVersionLiteral = JSON.stringify(currentVersion);
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -667,6 +680,13 @@ function buildSettingsWindowHtml(): string {
   // Settings/About panel renderer. Talks to main exclusively through
   // window.electronAPI.{versionCheck,clipboard,shell} which are wired up
   // in preload/index.ts (iter 37).
+  // Iter 44 — APP_VERSION is the value of app.getVersion() at the time
+  // the panel was opened, JSON-encoded by the main process at HTML build
+  // time. Used by the "Copy diagnostics" rebuild for the error verdict
+  // (the error state union does not carry current, so the renderer
+  // cannot read it off state). Mirrors buildErrorDiagnosticsBlob in
+  // version-check-manager.ts byte-for-byte.
+  var APP_VERSION = ${currentVersionLiteral};
   var updatesEl = document.getElementById('updates');
   var toastEl = document.getElementById('toast');
   var toastTimer = null;
@@ -955,10 +975,17 @@ function buildSettingsWindowHtml(): string {
           };
         } else {
           // error
+          // Iter 44 — currentVersion sourced from APP_VERSION (threaded
+          // through from app.getVersion() at HTML build time) rather
+          // than state.current. The error state shape does not carry
+          // current, so reading it off state always yielded null;
+          // APP_VERSION fixes that without changing the envelope key
+          // ordering. Mirrors buildErrorDiagnosticsBlob in
+          // version-check-manager.ts byte-for-byte.
           envelope = {
             capturedAt: new Date().toISOString(),
             kind: 'error',
-            currentVersion: state.current != null ? state.current : null,
+            currentVersion: APP_VERSION != null ? APP_VERSION : null,
             errorMessage: state.message,
             manifestVersion: state.manifestVersion != null ? state.manifestVersion : null,
           };

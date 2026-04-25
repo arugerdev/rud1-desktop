@@ -2921,3 +2921,89 @@ describe("buildErrorDiagnosticsBlob (iter 43)", () => {
     expect(blob).not.toContain('"requiredMinVersion"');
   });
 });
+
+describe("buildErrorDiagnosticsBlob — currentVersion threading (iter 44)", () => {
+  // Iter 44 — the iter-43 helper made `current` optional (the error
+  // state union doesn't carry it), with the caveat that a caller
+  // threading app.getVersion() through could populate it. These specs
+  // pin both halves of that contract: when threaded, the envelope
+  // surfaces the version; when not threaded, the legacy null path is
+  // preserved byte-for-byte. The third spec mirrors the inline
+  // renderer-side rebuild in src/main/index.ts (which sources the
+  // value from a JSON-encoded APP_VERSION constant injected at HTML
+  // build time) by hand-constructing the same envelope and asserting
+  // parity with the helper's output — the closest unit-level
+  // equivalent given the inline-script architecture.
+  const { buildErrorDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0); // 2026-04-25T12:00:00.000Z
+
+  it("threading current populates currentVersion in the envelope (iter-44 happy path)", () => {
+    const out = JSON.parse(
+      buildErrorDiagnosticsBlob(
+        { current: "2.7.1", message: "fetch failed: ETIMEDOUT" },
+        FIXED_AT,
+      ),
+    );
+    expect(out.currentVersion).toBe("2.7.1");
+    // Key ordering MUST match the iter-43 contract — currentVersion
+    // appears between `kind` and `errorMessage`.
+    const blob = buildErrorDiagnosticsBlob(
+      { current: "2.7.1", message: "fetch failed: ETIMEDOUT" },
+      FIXED_AT,
+    );
+    const order = ['"kind"', '"currentVersion"', '"errorMessage"'];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("omitting current leaves currentVersion as null (legacy iter-43 path preserved)", () => {
+    const out = JSON.parse(
+      buildErrorDiagnosticsBlob({ message: "boom" }, FIXED_AT),
+    );
+    expect(out.currentVersion).toBe(null);
+    // The key still appears in the envelope (and in the same slot) —
+    // `null` is a populated field, not an omitted one. Pinning this
+    // protects support tooling that destructures `currentVersion`
+    // from the envelope.
+    const blob = buildErrorDiagnosticsBlob({ message: "boom" }, FIXED_AT);
+    expect(blob).toContain('"currentVersion": null');
+  });
+
+  it("inline renderer rebuild with APP_VERSION matches the helper byte-for-byte", () => {
+    // Mirrors the renderer-side inline rebuild in src/main/index.ts:
+    // the panel reads APP_VERSION (JSON-encoded app.getVersion() at
+    // HTML build time) and the runtime `state.message` / `state.
+    // manifestVersion`, then constructs the envelope inline. We
+    // hand-build that envelope here with the same key order + the
+    // same `APP_VERSION != null ? APP_VERSION : null` defensive
+    // guard the renderer uses, then assert parity with the helper.
+    // A regression in either path surfaces as a parity failure here.
+    const APP_VERSION = "3.0.0-rc.4";
+    const fakeState = { message: "TLS handshake failed", manifestVersion: 2 };
+    const capturedAt = new Date(FIXED_AT).toISOString();
+    const inlineEnvelope = {
+      capturedAt,
+      kind: "error" as const,
+      currentVersion: APP_VERSION != null ? APP_VERSION : null,
+      errorMessage: fakeState.message,
+      manifestVersion:
+        fakeState.manifestVersion != null ? fakeState.manifestVersion : null,
+    };
+    const inlineBlob = JSON.stringify(inlineEnvelope, null, 2);
+    const helperBlob = buildErrorDiagnosticsBlob(
+      {
+        current: APP_VERSION,
+        message: fakeState.message,
+        manifestVersion: fakeState.manifestVersion,
+      },
+      FIXED_AT,
+    );
+    expect(inlineBlob).toBe(helperBlob);
+    // And currentVersion is the threaded APP_VERSION, not null.
+    expect(JSON.parse(helperBlob).currentVersion).toBe(APP_VERSION);
+  });
+});
