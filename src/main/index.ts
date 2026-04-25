@@ -21,7 +21,11 @@ import {
   nativeImage,
 } from "electron";
 import path from "path";
-import { registerIpcHandlers } from "./ipc-handlers";
+import {
+  markWebContentsTrusted,
+  registerIpcHandlers,
+  unmarkWebContentsTrusted,
+} from "./ipc-handlers";
 import { resumeAutoSnapshotFromDisk } from "./auto-snapshot-manager";
 import {
   probeFirmware,
@@ -38,6 +42,7 @@ import {
   saveNotifiedHosts,
   type NotifiedHost,
 } from "./first-boot-dedupe";
+import { computeTrayState } from "./tray-attention";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
@@ -48,6 +53,7 @@ const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 const FIRMWARE_PROBE_INTERVAL_MS = 60_000;
 
 let mainWindow: BrowserWindow | null = null;
+let dedupeWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let lastFirmwareProbe: FirmwareProbeResult | null = null;
 let firmwareProbeTimer: NodeJS.Timeout | null = null;
@@ -58,6 +64,11 @@ let firmwareProbeTimer: NodeJS.Timeout | null = null;
 // falling edges only.
 let notifiedHosts: NotifiedHost[] = [];
 let dedupeFilepath: string | null = null;
+// Iter 28 — the most-recently-applied tray attention count. Used by
+// `setTrayAttention` to compute a no-op-when-unchanged diff via
+// `computeTrayState`. Resets to 0 at startup; the first probe transitions
+// 0 → N if any first-boot host is on the LAN.
+let trayAttentionCount = 0;
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -105,8 +116,9 @@ function createTray(): void {
 // `lastFirmwareProbe`. Called both at tray-creation time AND whenever the
 // background probe finishes — `lastFirmwareProbe.reachable` deciding the
 // shape of the menu (a "Configure local rud1" entry appears only when a
-// first-boot device is on the LAN). Setting tooltip + context menu is
-// idempotent so we don't bother diffing.
+// first-boot device is on the LAN). Setting context menu is idempotent so
+// we don't bother diffing. Tooltip is owned by setTrayAttention (iter 28)
+// so the badge state machine is the sole writer.
 function rebuildTrayMenu(): void {
   if (!tray) return;
   const items: Electron.MenuItemConstructorOptions[] = [
@@ -131,14 +143,70 @@ function rebuildTrayMenu(): void {
       click: () => { void shell.openExternal(lastFirmwareProbe!.panelUrl); },
     });
   }
+  // Iter 28 — Settings UI for the persisted first-boot dedupe set. Always
+  // shown so an operator can audit / clear notified hosts on demand
+  // (a power user may want to flush after rotating Pis even when the LAN
+  // is currently quiet). Count is appended for at-a-glance visibility.
+  items.push({ type: "separator" });
+  items.push({
+    label: `First-boot notifications (${notifiedHosts.length})`,
+    submenu: [
+      {
+        label: `Show notified hosts (${notifiedHosts.length})`,
+        click: () => { showDedupeWindow(); },
+      },
+      {
+        label: "Clear all notified hosts",
+        enabled: notifiedHosts.length > 0,
+        click: () => { void clearAllNotifiedHosts(); },
+      },
+    ],
+  });
   items.push({ type: "separator" });
   items.push({ label: "Quit", click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));
-  const tip =
-    lastFirmwareProbe && isFirstBoot(lastFirmwareProbe)
-      ? "rud1 Desktop — first-boot device on LAN"
-      : "rud1 Desktop";
-  tray.setToolTip(tip);
+}
+
+/**
+ * setTrayAttention — apply the iter 28 visual badge for first-boot devices.
+ *
+ * macOS:    `tray.setTitle("N")` renders the count next to the icon in the
+ *           menu bar. This is the strongest at-a-glance signal Electron
+ *           offers without shipping a second tray-icon asset.
+ * Win/Lin:  `setTitle` is a macOS-only API and silently no-ops elsewhere.
+ *           We fall back to a tooltip update — visible only on hover, but
+ *           still better than nothing, and the tray menu CTA + iter 26 OS
+ *           notification already cover the loud-signal slot for those
+ *           platforms. This compromise avoids shipping (or generating at
+ *           runtime via `sharp`) a tinted overlay icon, which `resources/`
+ *           doesn't currently contain at all (createTray falls back to
+ *           `nativeImage.createEmpty()`).
+ *
+ * The state machine (`computeTrayState` in tray-attention.ts) decides
+ * whether the call is a no-op so we don't spam Electron on idle ticks.
+ */
+function setTrayAttention(count: number): void {
+  if (!tray) return;
+  const transition = computeTrayState(trayAttentionCount, count);
+  if (!transition.changed) return;
+  trayAttentionCount = transition.next.count;
+  // setTitle is macOS-only — the call is harmless on Windows/Linux but
+  // gating it keeps the hot-path readable in profiler traces.
+  if (process.platform === "darwin") {
+    tray.setTitle(transition.next.title);
+  }
+  tray.setToolTip(transition.next.tooltip);
+}
+
+/**
+ * Count distinct hosts currently in first-boot state. The probe loop only
+ * tracks one host at a time today (probeFirmware races N candidates and
+ * returns the first hit), so this is effectively 0-or-1 — but we keep the
+ * function name plural so a future multi-host probe can drop in without
+ * the badge plumbing changing shape.
+ */
+function countFirstBootHosts(): number {
+  return lastFirmwareProbe && isFirstBoot(lastFirmwareProbe) ? 1 : 0;
 }
 
 // startFirmwareProbeLoop schedules a recurring LAN probe. Intentionally
@@ -165,6 +233,7 @@ async function runFirmwareProbe(): Promise<void> {
   }
   lastFirmwareProbe = next;
   rebuildTrayMenu();
+  setTrayAttention(countFirstBootHosts());
   if (next == null) return;
 
   // Falling edge: a host that was first-boot but is now reachable+complete
@@ -189,6 +258,217 @@ async function runFirmwareProbe(): Promise<void> {
   if (dedupeFilepath) {
     void saveNotifiedHosts(dedupeFilepath, notifiedHosts);
   }
+}
+
+/**
+ * Iter 28 — clear a single host from the persisted first-boot dedupe set.
+ *
+ * Called from:
+ *   • the IPC handler `firstBootDedupe:clearHost` (Settings UI)
+ *   • the dedupe inspector window's per-row "Clear" button (which round-trips
+ *     through the IPC channel above)
+ *
+ * Always atomically writes the JSON file — we accept a brief disk write on
+ * every clear because the operator-driven path is rare (clicks per session
+ * measured in single digits) and consistency with the iter 27 falling-edge
+ * persistence is more valuable than a debounce.
+ */
+async function clearNotifiedHost(host: string): Promise<readonly NotifiedHost[]> {
+  const before = notifiedHosts.length;
+  notifiedHosts = dedupeRemoveHost(notifiedHosts, host);
+  if (notifiedHosts.length !== before && dedupeFilepath) {
+    await saveNotifiedHosts(dedupeFilepath, notifiedHosts);
+  }
+  rebuildTrayMenu();
+  broadcastDedupeUpdate();
+  return notifiedHosts;
+}
+
+/**
+ * Iter 28 — clear all hosts from the persisted dedupe set. Atomic write of
+ * the empty array (preserving the version-1 envelope) so a process kill
+ * mid-write doesn't leave a torn JSON file.
+ */
+async function clearAllNotifiedHosts(): Promise<void> {
+  notifiedHosts = [];
+  if (dedupeFilepath) {
+    await saveNotifiedHosts(dedupeFilepath, notifiedHosts);
+  }
+  rebuildTrayMenu();
+  broadcastDedupeUpdate();
+}
+
+/**
+ * Iter 28 — push a fresh notified-hosts list to the dedupe inspector
+ * window if it's open. The window's renderer subscribes via a preload
+ * `onUpdate` listener so it doesn't have to poll. Best-effort: a closed
+ * window is a no-op.
+ */
+function broadcastDedupeUpdate(): void {
+  if (!dedupeWindow || dedupeWindow.isDestroyed()) return;
+  dedupeWindow.webContents.send(
+    "firstBootDedupe:update",
+    notifiedHosts.map((h) => ({ ...h })),
+  );
+}
+
+/**
+ * Iter 28 — small modal window listing notified hosts. Built as a plain
+ * `data:` URL HTML page rather than a separate file under `resources/` to
+ * avoid a build-step change for one trivial UI surface; the document is
+ * sandboxed and the only IPC it does is via the same preload bridge as
+ * the main window.
+ *
+ * Reuses the existing preload script — `firstBootDedupe:list/clearHost/
+ * clearAll` channels are exposed there. The window is a singleton; calling
+ * showDedupeWindow when it already exists just brings it to the front.
+ */
+function showDedupeWindow(): void {
+  if (dedupeWindow && !dedupeWindow.isDestroyed()) {
+    dedupeWindow.focus();
+    return;
+  }
+  dedupeWindow = new BrowserWindow({
+    width: 540,
+    height: 480,
+    title: "rud1 — First-boot notifications",
+    backgroundColor: "#09090b",
+    minimizable: false,
+    maximizable: false,
+    parent: mainWindow ?? undefined,
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  dedupeWindow.setMenu(null);
+  // The inspector's `data:` origin would never pass isOriginAllowed, so
+  // we register its webContents id in the trusted set on ipc-handlers —
+  // the main process opened this window and controls its HTML exactly,
+  // so it's a legitimate trust bridge.
+  const trustedId = dedupeWindow.webContents.id;
+  markWebContentsTrusted(trustedId);
+  // Inline HTML page (data URL). CSP inside the document forbids remote
+  // resources; preload bridge runs in an isolated context unaffected by
+  // the document CSP.
+  dedupeWindow.loadURL(buildDedupeWindowHtml());
+  dedupeWindow.on("closed", () => {
+    unmarkWebContentsTrusted(trustedId);
+    dedupeWindow = null;
+  });
+}
+
+function buildDedupeWindowHtml(): string {
+  // CSP: deny everything by default; allow inline scripts/styles only —
+  // the page does not call out to any network. The preload bridge lives
+  // in a separate context (contextIsolation: true) so this CSP doesn't
+  // constrain it.
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
+<title>rud1 — First-boot notifications</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#09090b; color:#e4e4e7; margin:0; padding:16px; }
+  h1 { font-size:14px; font-weight:600; margin:0 0 8px 0; }
+  p.help { font-size:12px; color:#a1a1aa; margin:0 0 16px 0; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid #27272a; vertical-align:middle; }
+  th { color:#a1a1aa; font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:0.04em; }
+  td.host { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  td.when { color:#a1a1aa; }
+  button { background:#27272a; color:#e4e4e7; border:1px solid #3f3f46; border-radius:4px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  button:hover { background:#3f3f46; }
+  button.danger { color:#fca5a5; border-color:#7f1d1d; }
+  button.danger:hover { background:#450a0a; }
+  .footer { display:flex; justify-content:space-between; align-items:center; margin-top:16px; }
+  .empty { color:#71717a; font-style:italic; padding:24px 8px; text-align:center; }
+</style>
+</head>
+<body>
+  <h1>First-boot notifications</h1>
+  <p class="help">Hosts the desktop app has already notified you about. Entries expire automatically after 30 days; a host that was finished and re-flashed will re-notify on its next first-boot detection.</p>
+  <div id="list"></div>
+  <div class="footer">
+    <span id="status"></span>
+    <button id="clear-all" class="danger" disabled>Clear all</button>
+  </div>
+<script>
+  // Renderer for the dedupe inspector. Talks to main exclusively through
+  // window.electronAPI.firstBootDedupe.{list,clearHost,clearAll} which is
+  // wired up in preload/index.ts.
+  const listEl = document.getElementById('list');
+  const statusEl = document.getElementById('status');
+  const clearAllBtn = document.getElementById('clear-all');
+  function relativeTime(iso) {
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return iso;
+    const deltaMs = Date.now() - t;
+    const sec = Math.round(deltaMs / 1000);
+    if (sec < 60) return sec + 's ago';
+    const min = Math.round(sec / 60);
+    if (min < 60) return min + 'm ago';
+    const hr = Math.round(min / 60);
+    if (hr < 48) return hr + 'h ago';
+    const day = Math.round(hr / 24);
+    return day + 'd ago';
+  }
+  function escape(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+  function render(hosts) {
+    if (!hosts || hosts.length === 0) {
+      listEl.innerHTML = '<div class="empty">No notified hosts.</div>';
+      clearAllBtn.disabled = true;
+      statusEl.textContent = '';
+      return;
+    }
+    clearAllBtn.disabled = false;
+    statusEl.textContent = hosts.length + ' notified host' + (hosts.length === 1 ? '' : 's');
+    var rows = hosts.map(function(h) {
+      return '<tr>' +
+        '<td class="host">' + escape(h.host) + '</td>' +
+        '<td class="when" title="' + escape(h.notifiedAt) + '">' + escape(relativeTime(h.notifiedAt)) + '</td>' +
+        '<td style="text-align:right;"><button data-host="' + escape(h.host) + '" class="row-clear">Clear</button></td>' +
+      '</tr>';
+    }).join('');
+    listEl.innerHTML = '<table><thead><tr><th>Host</th><th>Notified</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+    Array.prototype.forEach.call(document.querySelectorAll('button.row-clear'), function(btn) {
+      btn.addEventListener('click', function() {
+        const host = btn.getAttribute('data-host');
+        if (!host) return;
+        btn.disabled = true;
+        window.electronAPI.firstBootDedupe.clearHost(host).then(function(res) {
+          if (res && res.ok && Array.isArray(res.result)) render(res.result);
+        });
+      });
+    });
+  }
+  clearAllBtn.addEventListener('click', function() {
+    if (!confirm('Clear all notified hosts? They will re-notify on the next first-boot detection.')) return;
+    clearAllBtn.disabled = true;
+    window.electronAPI.firstBootDedupe.clearAll().then(function() {
+      render([]);
+    });
+  });
+  // Initial fetch + subscribe to updates pushed from main.
+  window.electronAPI.firstBootDedupe.list().then(function(res) {
+    if (res && res.ok && Array.isArray(res.result)) render(res.result);
+    else render([]);
+  });
+  if (typeof window.electronAPI.firstBootDedupe.onUpdate === 'function') {
+    window.electronAPI.firstBootDedupe.onUpdate(function(hosts) { render(hosts); });
+  }
+</script>
+</body>
+</html>`;
+  return "data:text/html;charset=utf-8," + encodeURIComponent(html);
 }
 
 // notifyFirstBootDevice fires a single OS notification when a first-boot
@@ -221,7 +501,13 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  registerIpcHandlers();
+  registerIpcHandlers({
+    firstBootDedupe: {
+      list: () => notifiedHosts,
+      clearHost: (host) => clearNotifiedHost(host),
+      clearAll: () => clearAllNotifiedHosts(),
+    },
+  });
   mainWindow = createWindow();
   createTray();
 
@@ -233,6 +519,11 @@ app.whenReady().then(() => {
   dedupeFilepath = path.join(app.getPath("userData"), DEDUPE_FILENAME);
   void loadNotifiedHosts(dedupeFilepath, new Date()).then((loaded) => {
     notifiedHosts = loaded;
+    // Refresh the tray menu so the "First-boot notifications (N)" badge
+    // reflects the persisted count once the load completes (the menu is
+    // built before this resolves with `notifiedHosts.length === 0`).
+    rebuildTrayMenu();
+    broadcastDedupeUpdate();
   });
   startFirmwareProbeLoop();
 

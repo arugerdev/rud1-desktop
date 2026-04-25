@@ -30,6 +30,9 @@
  *   diag:autoSnapshotStatus    — return the persisted opt-in snapshot config + next-run timestamp
  *   diag:autoSnapshotConfigure — persist opt-in, interval, and diagnosis options; (re)start timer
  *   diag:autoSnapshotRunNow    — trigger a snapshot immediately (does not change the schedule)
+ *   firstBootDedupe:list       — list persisted notified-host records (iter 28 Settings UI)
+ *   firstBootDedupe:clearHost  — drop a single host from the persisted dedupe set
+ *   firstBootDedupe:clearAll   — drop ALL hosts from the persisted dedupe set
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
@@ -67,6 +70,30 @@ import {
 } from "./auto-snapshot-manager";
 import { getStats as getSystemStats } from "./system-manager";
 import { probeFirmware } from "./firmware-discovery";
+import type { NotifiedHost } from "./first-boot-dedupe";
+
+/**
+ * Iter 28 — accessor surface that bridges the persisted first-boot
+ * dedupe set in `index.ts` (which owns the in-memory mirror plus the
+ * `<userData>/first-boot-notifications.json` filepath) to the IPC layer.
+ *
+ * `registerIpcHandlers` is called BEFORE `app.whenReady()` resolves the
+ * userData path, so the accessors can't capture concrete values; they
+ * have to be late-bound via callbacks. The renderer-driven mutations
+ * (`clearHost` / `clearAll`) MUST round-trip through index.ts so the
+ * in-memory `notifiedHosts` and the persisted JSON stay in lockstep —
+ * otherwise the next probe tick would re-add a host the operator just
+ * cleared.
+ *
+ * Optional because the iter-22 ipc-handlers tests construct the registrar
+ * without this hook; the firstBootDedupe channels simply skip
+ * registration when the accessor is absent.
+ */
+export interface FirstBootDedupeAccessor {
+  list: () => readonly NotifiedHost[];
+  clearHost: (host: string) => Promise<readonly NotifiedHost[]>;
+  clearAll: () => Promise<void>;
+}
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
 
@@ -144,7 +171,37 @@ export function isOriginAllowed(
   return parsed.origin === allowed.origin;
 }
 
+/**
+ * Iter 28 — registry of webContents IDs the main process opened itself
+ * (e.g. the first-boot dedupe inspector). These are loaded from a `data:`
+ * URL with a strict CSP and the same preload bridge as the cloud panel;
+ * the URL would never pass `isOriginAllowed` (which requires http/https),
+ * so checkSender consults this set instead. The main process is the sole
+ * writer — markWebContentsTrusted is exported only for use within this
+ * package (and the test surface).
+ */
+const trustedWebContentsIds = new Set<number>();
+
+export function markWebContentsTrusted(id: number): void {
+  trustedWebContentsIds.add(id);
+}
+
+export function unmarkWebContentsTrusted(id: number): void {
+  trustedWebContentsIds.delete(id);
+}
+
 function checkSender(event: Electron.IpcMainInvokeEvent): boolean {
+  // Trusted main-process-opened windows (e.g. iter 28 dedupe inspector)
+  // bypass the origin URL check — they're loaded from `data:` URLs that
+  // wouldn't pass isOriginAllowed, but the main process opened them and
+  // controls their HTML byte-for-byte, so they're inherently trusted.
+  // `event.sender` may be missing in synthetic test events; the
+  // optional-chain keeps checkSender callable without a real
+  // webContents stub.
+  const senderId = event.sender?.id;
+  if (typeof senderId === "number" && trustedWebContentsIds.has(senderId)) {
+    return true;
+  }
   // senderFrame may be null if the frame was disposed between the renderer
   // dispatching the message and the main process picking it up. Treat as a
   // failed sender check — handlers return the "Unauthorized origin" envelope.
@@ -162,9 +219,12 @@ export const __test = {
   UNSAFE_URL_CHARS,
   MAX_SENDER_URL_LENGTH,
   ALLOWED_ORIGIN,
+  trustedWebContentsIds,
 };
 
-export function registerIpcHandlers(): void {
+export function registerIpcHandlers(opts: {
+  firstBootDedupe?: FirstBootDedupeAccessor;
+} = {}): void {
   ipcMain.handle("vpn:connect", async (event, wgConfig: string) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     try {
@@ -594,4 +654,49 @@ export function registerIpcHandlers(): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  // ─── iter 28: first-boot dedupe inspection / management ─────────────────
+  // The renderer-side Settings panel calls these to surface and mutate the
+  // persisted notified-hosts set. All three channels are gated on the
+  // origin check like every other IPC; they're additionally gated on
+  // `opts.firstBootDedupe` being supplied — the iter-22 unit-test harness
+  // constructs the registrar bare, and we don't want it to accidentally
+  // expose stub behaviour.
+  const dedupe = opts.firstBootDedupe;
+  if (dedupe) {
+    ipcMain.handle("firstBootDedupe:list", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        // Defensive copy: callers must not mutate the in-memory mirror.
+        return { ok: true, result: dedupe.list().map((h) => ({ ...h })) };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+
+    ipcMain.handle("firstBootDedupe:clearHost", async (event, host: unknown) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      // Mirror the SAFE_HOST_RE shape used by firmware-discovery so a
+      // compromised renderer can't push a 100KB string through here.
+      if (typeof host !== "string" || host.length === 0 || host.length > 253) {
+        return { ok: false, error: "invalid host" };
+      }
+      try {
+        const remaining = await dedupe.clearHost(host);
+        return { ok: true, result: remaining.map((h) => ({ ...h })) };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+
+    ipcMain.handle("firstBootDedupe:clearAll", async (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        await dedupe.clearAll();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+  }
 }

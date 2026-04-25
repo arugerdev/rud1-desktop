@@ -746,4 +746,42 @@ contextBridge.exposeInMainWorld("electronAPI", {
         | { ok: false; error: string }
       >,
   },
+
+  // Iter 28 — Settings UI for the persisted first-boot dedupe set.
+  // Surfaces the iter-27 `<userData>/first-boot-notifications.json` to a
+  // small inspector window opened from the tray submenu. Three operations:
+  //   list      — read the in-memory mirror (fast; never touches disk)
+  //   clearHost — drop one host + atomically rewrite the file
+  //   clearAll  — drop everything + atomically rewrite the file
+  // The main process ALSO pushes a `firstBootDedupe:update` event after
+  // any mutation so the inspector window can refresh without polling;
+  // `onUpdate` registers a listener and returns an unsubscribe handle.
+  firstBootDedupe: {
+    list: () =>
+      ipcRenderer.invoke("firstBootDedupe:list") as Promise<
+        | { ok: true; result: { host: string; notifiedAt: string }[] }
+        | { ok: false; error: string }
+      >,
+
+    clearHost: (host: string) =>
+      ipcRenderer.invoke("firstBootDedupe:clearHost", host) as Promise<
+        | { ok: true; result: { host: string; notifiedAt: string }[] }
+        | { ok: false; error: string }
+      >,
+
+    clearAll: () =>
+      ipcRenderer.invoke("firstBootDedupe:clearAll") as Promise<
+        | { ok: true }
+        | { ok: false; error: string }
+      >,
+
+    onUpdate: (cb: (hosts: { host: string; notifiedAt: string }[]) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        hosts: { host: string; notifiedAt: string }[],
+      ) => cb(hosts);
+      ipcRenderer.on("firstBootDedupe:update", listener);
+      return () => ipcRenderer.removeListener("firstBootDedupe:update", listener);
+    },
+  },
 });
