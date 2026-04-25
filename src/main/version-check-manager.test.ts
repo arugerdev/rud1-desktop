@@ -7,6 +7,8 @@ import {
   buildVersionCheckMenuItems,
   formatBlockedStateMessage,
   formatVersionCheckSummary,
+  pickDownloadUrl,
+  isBridgeDownloadUrlAllowed,
   __test as versionCheckInternals,
   type VersionManifest,
   type VersionCheckState,
@@ -48,6 +50,7 @@ describe("parseManifest", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -64,6 +67,7 @@ describe("parseManifest", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -80,6 +84,7 @@ describe("parseManifest", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -119,6 +124,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -137,6 +143,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -220,6 +227,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -237,6 +245,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -372,6 +381,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       releaseNotesUrl: "https://rud1.es/changelog",
       rolloutBucket: null,
       minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -403,6 +413,7 @@ describe("classifyManifest", () => {
     releaseNotesUrl: null,
     rolloutBucket: null,
     minBootstrapVersion: null,
+    bridgeDownloadUrl: null,
   });
 
   it("flags an update when remote > current", () => {
@@ -765,6 +776,7 @@ describe("classifyManifest — rolloutBucket suppression (iter 34)", () => {
     releaseNotesUrl: null,
     rolloutBucket,
     minBootstrapVersion: null,
+    bridgeDownloadUrl: null,
   });
 
   it("eligible bucket (deviceBucket <= rolloutBucket) → update-available", () => {
@@ -816,6 +828,7 @@ describe("classifyManifest — forceRollout override (iter 35)", () => {
     releaseNotesUrl: null,
     rolloutBucket,
     minBootstrapVersion: null,
+    bridgeDownloadUrl: null,
   });
 
   it("ineligible bucket BUT forceRollout=true → update-available", () => {
@@ -1010,6 +1023,7 @@ describe("parseManifest — minBootstrapVersion (iter 36)", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -1028,6 +1042,7 @@ describe("parseManifest — minBootstrapVersion (iter 36)", () => {
       releaseNotesUrl: null,
       rolloutBucket: null,
       minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: null,
     });
   });
 
@@ -1199,6 +1214,7 @@ describe("classifyManifest — minBootstrapVersion gate (iter 36)", () => {
     releaseNotesUrl: null,
     rolloutBucket: null,
     minBootstrapVersion: null,
+    bridgeDownloadUrl: null,
     ...overrides,
   });
 
@@ -1375,6 +1391,7 @@ describe("buildVersionCheckMenuItems — blocked-by-min-bootstrap (iter 36)", ()
     currentVersion: "1.0.0",
     targetVersion: "1.5.0",
     releaseNotesUrl,
+    bridgeDownloadUrl: null,
     checkedAt: 1_700_000_000_000,
   });
 
@@ -1473,6 +1490,7 @@ describe("formatBlockedStateMessage (iter 37)", () => {
     currentVersion: overrides.currentVersion ?? "1.0.0",
     targetVersion: overrides.targetVersion ?? "1.5.0",
     releaseNotesUrl: overrides.releaseNotesUrl ?? null,
+    bridgeDownloadUrl: null,
     checkedAt: 1_700_000_000_000,
   });
 
@@ -1565,6 +1583,7 @@ describe("formatVersionCheckSummary (iter 37)", () => {
         currentVersion: "1.0.0",
         targetVersion: "1.5.0",
         releaseNotesUrl: null,
+        bridgeDownloadUrl: null,
         checkedAt: 0,
       }),
     ).toBe("Update blocked: install v1.2.0 manually first.");
@@ -1648,5 +1667,276 @@ describe("VersionCheckManager.getState() — iter 37 snapshot contract", () => {
     await mgr.checkOnce();
     expect(observed).not.toBeNull();
     expect(mgr.getState()).toEqual(observed);
+  });
+});
+
+// ─── Iter 38 — bridgeDownloadUrl optional v2 extension ──────────────────────
+//
+// The Settings/About panel's "Copy download URL" button now prefers a
+// manifest-supplied bridge build URL over the iter-37 fallbacks. This
+// section pins:
+//   • parseManifest accepts and preserves bridgeDownloadUrl when present
+//     and valid; missing field still parses; allowlist failures silently
+//     drop the field; wrong-type values reject the whole manifest.
+//   • isBridgeDownloadUrlAllowed rejects javascript:/data:/file: schemes,
+//     URLs with userinfo, and CRLF-injected URLs.
+//   • pickDownloadUrl returns the bridge URL first, releaseNotesUrl
+//     second, synthesized fallback third — matching the documented
+//     precedence chain.
+
+describe("parseManifest — bridgeDownloadUrl (iter 38)", () => {
+  const VALID_SHA = "a".repeat(64);
+
+  it("v1 manifest with valid bridgeDownloadUrl → preserved", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+    });
+    expect(m?.bridgeDownloadUrl).toBe(
+      "https://rud1.es/desktop/bridge/v1.2.0",
+    );
+  });
+
+  it("v2 manifest with valid bridgeDownloadUrl → preserved", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      minBootstrapVersion: "1.2.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+    });
+    expect(m?.bridgeDownloadUrl).toBe(
+      "https://rud1.es/desktop/bridge/v1.2.0",
+    );
+  });
+
+  it("missing field → null (optional, behaviour unchanged)", () => {
+    const m = parseManifest({ version: "1.5.0" });
+    expect(m?.bridgeDownloadUrl).toBeNull();
+  });
+
+  it("explicit null → null", () => {
+    const m = parseManifest({ version: "1.5.0", bridgeDownloadUrl: null });
+    expect(m?.bridgeDownloadUrl).toBeNull();
+  });
+
+  it("javascript: URL → silently dropped (manifest still parses)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeDownloadUrl: "javascript:alert(1)",
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeDownloadUrl).toBeNull();
+  });
+
+  it("data: / file: URLs → silently dropped", () => {
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        bridgeDownloadUrl: "data:text/plain,hello",
+      })?.bridgeDownloadUrl,
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        bridgeDownloadUrl: "file:///etc/passwd",
+      })?.bridgeDownloadUrl,
+    ).toBeNull();
+  });
+
+  it("http:// URL → silently dropped (https-only allowlist)", () => {
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        bridgeDownloadUrl: "http://rud1.es/dl",
+      })?.bridgeDownloadUrl,
+    ).toBeNull();
+  });
+
+  it("URL with userinfo → silently dropped", () => {
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        bridgeDownloadUrl: "https://user:pass@rud1.es/dl",
+      })?.bridgeDownloadUrl,
+    ).toBeNull();
+  });
+
+  it("URL with CRLF / control chars → silently dropped", () => {
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        bridgeDownloadUrl: "https://rud1.es/dl\r\nSet-Cookie:evil",
+      })?.bridgeDownloadUrl,
+    ).toBeNull();
+  });
+
+  it("non-string types → rejects whole manifest", () => {
+    expect(
+      parseManifest({ version: "1.5.0", bridgeDownloadUrl: 42 }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeDownloadUrl: true }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeDownloadUrl: { url: "x" } }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", bridgeDownloadUrl: ["x"] }),
+    ).toBeNull();
+  });
+
+  it("classifyManifest threads bridgeDownloadUrl into the blocked state", () => {
+    const out = classifyManifest(
+      "1.0.0",
+      {
+        version: "1.5.0",
+        downloadUrl: "https://rud1.es/dl",
+        manifestVersion: 1,
+        sha256: null,
+        releaseNotesUrl: null,
+        rolloutBucket: null,
+        minBootstrapVersion: "1.2.0",
+        bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+      },
+      1_700_000_000_000,
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+    if (out.kind === "update-blocked-by-min-bootstrap") {
+      expect(out.bridgeDownloadUrl).toBe(
+        "https://rud1.es/desktop/bridge/v1.2.0",
+      );
+    }
+  });
+});
+
+describe("isBridgeDownloadUrlAllowed (iter 38)", () => {
+  it("accepts a plain https URL", () => {
+    expect(
+      isBridgeDownloadUrlAllowed("https://rud1.es/desktop/bridge/v1.2.0"),
+    ).toBe(true);
+  });
+
+  it("rejects http:// (https-only)", () => {
+    expect(isBridgeDownloadUrlAllowed("http://rud1.es/dl")).toBe(false);
+  });
+
+  it("rejects javascript: / data: / file:", () => {
+    expect(isBridgeDownloadUrlAllowed("javascript:alert(1)")).toBe(false);
+    expect(isBridgeDownloadUrlAllowed("data:text/plain,hello")).toBe(false);
+    expect(isBridgeDownloadUrlAllowed("file:///etc/passwd")).toBe(false);
+  });
+
+  it("rejects userinfo components", () => {
+    expect(
+      isBridgeDownloadUrlAllowed("https://user@rud1.es/dl"),
+    ).toBe(false);
+    expect(
+      isBridgeDownloadUrlAllowed("https://user:pw@rud1.es/dl"),
+    ).toBe(false);
+  });
+
+  it("rejects CRLF / control chars in the raw URL", () => {
+    expect(
+      isBridgeDownloadUrlAllowed("https://rud1.es/dl\r\nSet-Cookie:x"),
+    ).toBe(false);
+    expect(
+      isBridgeDownloadUrlAllowed("https://rud1.es/ dl"),
+    ).toBe(false);
+  });
+
+  it("rejects non-string / empty / over-cap inputs", () => {
+    expect(isBridgeDownloadUrlAllowed(undefined)).toBe(false);
+    expect(isBridgeDownloadUrlAllowed(null)).toBe(false);
+    expect(isBridgeDownloadUrlAllowed(42)).toBe(false);
+    expect(isBridgeDownloadUrlAllowed("")).toBe(false);
+    expect(
+      isBridgeDownloadUrlAllowed("https://rud1.es/" + "x".repeat(2050)),
+    ).toBe(false);
+  });
+});
+
+describe("pickDownloadUrl (iter 38)", () => {
+  it("returns bridgeDownloadUrl when valid (precedence #1)", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/bridge/v1.2.0");
+  });
+
+  it("falls back to releaseNotesUrl when bridge URL fails the allowlist", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: "javascript:alert(1)",
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/changelog/v1.5.0");
+  });
+
+  it("falls back to releaseNotesUrl when bridgeDownloadUrl is absent", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: null,
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/changelog/v1.5.0");
+  });
+
+  it("falls back to synthesized URL when both bridge and releaseNotes are absent", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: null,
+      releaseNotesUrl: null,
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/download?version=1.2.0");
+  });
+
+  it("synthesized URL percent-encodes the requiredMinVersion query value", () => {
+    // Defensive: a prerelease tag that includes `+` (build metadata) must
+    // round-trip through encodeURIComponent so the query is parseable.
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: null,
+      releaseNotesUrl: null,
+      requiredMinVersion: "2.0.0-rc.1+sha.abc",
+    });
+    expect(url).toBe(
+      "https://rud1.es/desktop/download?version=2.0.0-rc.1%2Bsha.abc",
+    );
+  });
+
+  it("rejects userinfo bridge URL → falls through (does NOT leak credentials to clipboard)", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: "https://attacker@rud1.es/dl",
+      releaseNotesUrl: null,
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/download?version=1.2.0");
+  });
+});
+
+// ─── Iter 38 — Settings panel pin: state.bridgeDownloadUrl is the copied URL ─
+//
+// The renderer in `index.ts` mirrors `pickDownloadUrl` inline (the panel
+// loads from a data: URL and can't import the helper). This pin tests the
+// shared contract via `pickDownloadUrl` itself, which is the source of
+// truth — a regression there flips the renderer's behaviour too.
+
+describe("Settings panel — Copy download URL precedence (iter 38)", () => {
+  it("when state has a valid bridgeDownloadUrl, that is what gets copied", () => {
+    const state: VersionCheckState = {
+      kind: "update-blocked-by-min-bootstrap",
+      requiredMinVersion: "1.2.0",
+      currentVersion: "1.0.0",
+      targetVersion: "1.5.0",
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+      checkedAt: 0,
+    };
+    expect(pickDownloadUrl(state)).toBe(
+      "https://rud1.es/desktop/bridge/v1.2.0",
+    );
   });
 });

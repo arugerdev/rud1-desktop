@@ -106,6 +106,10 @@ export type VersionCheckState =
       currentVersion: string;
       targetVersion: string;
       releaseNotesUrl: string | null;
+      // Iter 38 — manifest-supplied bridge build URL (allowlist-validated
+      // at parse time). Surfaced to the Settings/About panel's "Copy
+      // download URL" button as the preferred copy target.
+      bridgeDownloadUrl: string | null;
       checkedAt: number;
     }
   | { kind: "error"; message: string; checkedAt: number };
@@ -221,6 +225,25 @@ export interface VersionManifest {
    * as `null`, behaviour unchanged (no gate).
    */
   minBootstrapVersion: string | null;
+  /**
+   * Iter 38 — companion to `minBootstrapVersion`. When present, an
+   * absolute https URL pointing at the bridge build the operator must
+   * install manually before the auto-update path will accept the
+   * `version` upgrade. The Settings/About panel "Copy download URL"
+   * button copies this value when set, falling back to
+   * `releaseNotesUrl` and finally a synthesized
+   * `https://rud1.es/desktop/download?version={requiredMinVersion}`.
+   *
+   * Optional in v1 and v2 manifests. Validated through the same
+   * `isValidFeedUrl` allowlist as `downloadUrl` / `releaseNotesUrl`
+   * (https only, no userinfo, no CRLF / control chars). On allowlist
+   * rejection the field is silently dropped (mirrors the
+   * `releaseNotesUrl` lenient stance — a bad URL is a missing
+   * convenience, not an integrity failure). Wrong-type values (numbers,
+   * objects, arrays) reject the whole manifest like every other typed
+   * field.
+   */
+  bridgeDownloadUrl: string | null;
 }
 
 /**
@@ -355,6 +378,23 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     minBootstrapVersion = obj.minBootstrapVersion;
   }
 
+  // Iter 38 — optional bridgeDownloadUrl. Same allowlist as downloadUrl;
+  // silent drop on validation failure (the bridge link is a convenience —
+  // the operator can still synthesize the fallback download URL from
+  // `minBootstrapVersion`). Wrong-type / non-string values reject the
+  // whole manifest, mirroring the strictness on every other typed field.
+  let bridgeDownloadUrl: string | null = null;
+  if (
+    Object.prototype.hasOwnProperty.call(obj, "bridgeDownloadUrl") &&
+    obj.bridgeDownloadUrl != null
+  ) {
+    if (typeof obj.bridgeDownloadUrl !== "string") return null;
+    if (obj.bridgeDownloadUrl.length > 0 && isValidFeedUrl(obj.bridgeDownloadUrl)) {
+      bridgeDownloadUrl = obj.bridgeDownloadUrl;
+    }
+    // else: empty string OR allowlist rejection ⇒ silently drop.
+  }
+
   return {
     version: obj.version,
     downloadUrl,
@@ -363,6 +403,7 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     releaseNotesUrl,
     rolloutBucket,
     minBootstrapVersion,
+    bridgeDownloadUrl,
   };
 }
 
@@ -452,6 +493,7 @@ export function classifyManifest(
           currentVersion: current,
           targetVersion: manifest.version,
           releaseNotesUrl: manifest.releaseNotesUrl,
+          bridgeDownloadUrl: manifest.bridgeDownloadUrl,
           checkedAt: now,
         };
       }
@@ -989,6 +1031,58 @@ export function formatVersionCheckSummary(state: VersionCheckState): string {
   }
 }
 
+// ─── Iter 38 — Settings/About panel: download URL precedence ────────────────
+//
+// Pure helper picking the URL the "Copy download URL" button copies when
+// the verdict is `update-blocked-by-min-bootstrap`. Precedence:
+//   1. bridgeDownloadUrl (iter 38) — manifest-supplied direct link to the
+//      bridge installer; preferred so the operator lands on the right
+//      version with one paste.
+//   2. releaseNotesUrl (iter 33 fallback used by iter-37) — better than the
+//      synthesized URL because it's a real link the publisher wrote.
+//   3. Synthesized `https://rud1.es/desktop/download?version={X}` — last
+//      resort when no manifest fields are usable.
+//
+// `bridgeDownloadUrl` is re-validated through the same allowlist used at
+// parse time so a future caller that hands us an unverified state object
+// (e.g. a synthetic test fixture, an IPC round-trip from a misbehaving
+// renderer) cannot smuggle an unsafe URL through the precedence chain.
+
+const BRIDGE_DOWNLOAD_URL_UNSAFE_CHARS = /[\x00-\x1f\x7f\s"<>\\^`{|}]/;
+const BRIDGE_DOWNLOAD_URL_MAX_LENGTH = 2048;
+
+export function isBridgeDownloadUrlAllowed(rawUrl: unknown): boolean {
+  if (typeof rawUrl !== "string") return false;
+  if (rawUrl.length === 0 || rawUrl.length > BRIDGE_DOWNLOAD_URL_MAX_LENGTH) return false;
+  if (BRIDGE_DOWNLOAD_URL_UNSAFE_CHARS.test(rawUrl)) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:") return false;
+  if (parsed.username !== "" || parsed.password !== "") return false;
+  return true;
+}
+
+export function pickDownloadUrl(state: {
+  bridgeDownloadUrl?: string | null;
+  releaseNotesUrl?: string | null;
+  requiredMinVersion?: string;
+}): string {
+  if (state.bridgeDownloadUrl && isBridgeDownloadUrlAllowed(state.bridgeDownloadUrl)) {
+    return state.bridgeDownloadUrl;
+  }
+  if (state.releaseNotesUrl) {
+    return state.releaseNotesUrl;
+  }
+  return (
+    "https://rud1.es/desktop/download?version=" +
+    encodeURIComponent(state.requiredMinVersion ?? "")
+  );
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -1020,4 +1114,7 @@ export const __test = {
   // Iter 37 — Settings/About formatters.
   formatBlockedStateMessage,
   formatVersionCheckSummary,
+  // Iter 38 — bridge download URL precedence helpers.
+  pickDownloadUrl,
+  isBridgeDownloadUrlAllowed,
 };

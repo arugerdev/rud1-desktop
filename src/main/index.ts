@@ -705,13 +705,20 @@ function buildSettingsWindowHtml(): string {
       '</div>';
 
     document.getElementById('copy-url').addEventListener('click', function() {
-      // The download URL the operator needs is the published page for
-      // the bridge build — we don't have a precise per-version URL in
-      // the manifest schema yet (iter 36 only carries the version
-      // string), so we copy the version-anchored hint and the operator
-      // pastes into a browser. A future schema rev may add an explicit
-      // bridgeDownloadUrl per minBootstrapVersion.
-      var url = state.releaseNotesUrl || ('https://rud1.es/desktop/download?version=' + encodeURIComponent(state.requiredMinVersion));
+      // Precedence (iter 38): bridgeDownloadUrl → releaseNotesUrl → synthesized.
+      // Bridge URL is re-validated here so an upstream regression can't
+      // leak an unsafe scheme to clipboard via the panel.
+      var bridge = state.bridgeDownloadUrl;
+      var bridgeOk = false;
+      if (typeof bridge === 'string' && bridge.length > 0 && bridge.length <= 2048 && !/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(bridge)) {
+        try {
+          var parsed = new URL(bridge);
+          bridgeOk = parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '';
+        } catch (e) { bridgeOk = false; }
+      }
+      var url = bridgeOk
+        ? bridge
+        : (state.releaseNotesUrl || ('https://rud1.es/desktop/download?version=' + encodeURIComponent(state.requiredMinVersion)));
       window.electronAPI.clipboard.writeText(url).then(function(res) {
         if (res && res.ok) toast('Copied download URL to clipboard');
         else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
