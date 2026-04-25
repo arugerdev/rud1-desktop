@@ -223,6 +223,297 @@ export function configureAutoUpdater(
   updater.setFeedURL({ provider: "generic", url: opts.feedUrl, channel });
 }
 
+// ─── In-app download flow (iter 30) ─────────────────────────────────────────
+//
+// The iter-29 version-check manager surfaces "Update available" via the tray
+// and routes the operator to a download URL through `shell.openExternal`.
+// Iter 30 wires an opt-in alternative: when `RUD1_DESKTOP_AUTO_UPDATE=1` (or
+// the equivalent JSON config in userData) AND `app.isPackaged === true`, the
+// tray entry runs through `startBackgroundDownload` → `applyAndRestart`
+// instead of the external-browser handoff.
+//
+// Conservative scope on purpose:
+//   • we use `electron.net` + `app.getPath("userData")` rather than
+//     pulling `electron-updater` into the runtime path. electron-updater
+//     wants signed builds + a configured feed; this iter doesn't touch
+//     either, and we'd rather ship a working "open the installer" flow
+//     than half-finished silent-install plumbing.
+//   • `applyAndRestart` calls `shell.openPath(downloadedFile)` and then
+//     `app.quit()` — the user clicks through their OS installer prompt.
+//     Full silent install is out of scope; tracked for a future iter.
+//   • SHA-256 verification is opt-in via the manifest. If the manifest
+//     omits `sha256` we still allow apply, but log it; the user already
+//     opted into auto-update via the env flag and the URL itself ran
+//     through the iter-21 `isValidFeedUrl` allowlist.
+
+import * as fs from "fs";
+import { promises as fsp } from "fs";
+import * as path from "path";
+import { createHash } from "crypto";
+import {
+  app as electronApp,
+  net as electronNet,
+  shell as electronShell,
+} from "electron";
+
+const AUTO_UPDATE_ENV = "RUD1_DESKTOP_AUTO_UPDATE";
+const AUTO_UPDATE_CONFIG_FILE = "auto-update-config.json";
+const DOWNLOAD_FILE_DEFAULT = "rud1-update.bin";
+// Hard cap on the downloaded artifact. A real DMG / NSIS / AppImage is
+// a few hundred MB; 512 MB is a generous ceiling that still refuses
+// runaway responses.
+const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+
+export type AutoUpdateState =
+  | { kind: "idle" }
+  | { kind: "downloading"; url: string; bytesReceived: number; totalBytes: number | null }
+  | { kind: "ready-to-apply"; url: string; filepath: string; sha256: string | null }
+  | { kind: "error"; message: string };
+
+interface AutoUpdaterDependencies {
+  app?: { isPackaged: boolean; getPath: (n: string) => string };
+  net?: { request: (opts: unknown) => unknown };
+  shell?: { openPath: (p: string) => Promise<string>; openExternal: (u: string) => Promise<void> };
+  quit?: () => void;
+  fileSystem?: typeof fs;
+}
+
+let state: AutoUpdateState = { kind: "idle" };
+let listeners: Array<(s: AutoUpdateState) => void> = [];
+let deps: AutoUpdaterDependencies = {};
+
+/**
+ * Inject Electron-side handles. Called from `index.ts` after
+ * `app.whenReady()` so the module can be imported safely from a Node
+ * vitest run (which has no `electronApp.isPackaged` etc.). Tests pass
+ * stubs.
+ */
+export function configureAutoUpdaterRuntime(d: AutoUpdaterDependencies): void {
+  deps = { ...d };
+}
+
+export function getAutoUpdateState(): AutoUpdateState {
+  return state;
+}
+
+export function subscribeAutoUpdate(fn: (s: AutoUpdateState) => void): () => void {
+  listeners.push(fn);
+  return () => {
+    listeners = listeners.filter((l) => l !== fn);
+  };
+}
+
+function setState(next: AutoUpdateState): void {
+  state = next;
+  for (const l of listeners) {
+    try { l(next); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Reset the auto-update state machine back to "idle". Used by the tray
+ * "Retry" handler after a download error so a subsequent click on
+ * "Update available" can start a fresh download instead of re-rendering
+ * the stuck error row.
+ */
+export function resetAutoUpdateState(): void {
+  setState({ kind: "idle" });
+}
+
+/**
+ * Read the in-userData config file (if present) for the auto-update
+ * opt-in flag. Missing / malformed → `{}`. Synchronous on purpose: this
+ * is called once per tray menu rebuild and the file is tens of bytes.
+ */
+function readPersistedConfig(getUserData: () => string, fileSystem: typeof fs): { autoUpdate?: boolean } {
+  try {
+    const p = path.join(getUserData(), AUTO_UPDATE_CONFIG_FILE);
+    const raw = fileSystem.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.autoUpdate === "boolean") {
+      return { autoUpdate: parsed.autoUpdate };
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * True when the operator has opted into the in-app update flow AND the
+ * runtime is a packaged build. Both gates are required: the env flag
+ * alone isn't enough because a developer with `RUD1_DESKTOP_AUTO_UPDATE=1`
+ * in their shell shouldn't accidentally trigger downloader plumbing
+ * during `npm run dev`.
+ *
+ * Callers may pass overrides for tests; runtime callers omit them and
+ * the function falls back to the configured deps.
+ */
+export function isAutoUpdateEnabled(opts: {
+  env?: NodeJS.ProcessEnv;
+  appOverride?: { isPackaged: boolean; getPath: (n: string) => string };
+  fileSystem?: typeof fs;
+} = {}): boolean {
+  const env = opts.env ?? process.env;
+  const a = opts.appOverride ?? deps.app ?? electronApp;
+  const fileSystem = opts.fileSystem ?? deps.fileSystem ?? fs;
+  if (!a || a.isPackaged !== true) return false;
+  if (env[AUTO_UPDATE_ENV] === "1") return true;
+  const cfg = readPersistedConfig(() => a.getPath("userData"), fileSystem);
+  return cfg.autoUpdate === true;
+}
+
+/**
+ * Start a background download of the artifact at `url` to
+ * `<userData>/rud1-update.bin`. Atomic write via `<file>.partial` →
+ * `rename` so a process kill mid-download doesn't strand a half-file
+ * marked ready. Returns immediately; subscribers see the state machine
+ * transition via the registered listeners.
+ *
+ * The optional `sha256` argument is captured into the ready state so
+ * `applyAndRestart` can verify before launching the installer.
+ */
+export function startBackgroundDownload(
+  url: string,
+  options: { sha256?: string | null; userDataDir?: string; net?: AutoUpdaterDependencies["net"]; fileSystem?: typeof fs } = {},
+): Promise<AutoUpdateState> {
+  if (!isValidFeedUrl(url)) {
+    setState({ kind: "error", message: "invalid download URL" });
+    return Promise.resolve(state);
+  }
+  const sha256 = options.sha256 ?? null;
+  const userDataDir = options.userDataDir ?? deps.app?.getPath("userData") ?? electronApp.getPath("userData");
+  const net = options.net ?? deps.net ?? electronNet;
+  const fileSystem = options.fileSystem ?? deps.fileSystem ?? fs;
+  const filepath = path.join(userDataDir, DOWNLOAD_FILE_DEFAULT);
+  const tmp = `${filepath}.partial`;
+
+  setState({ kind: "downloading", url, bytesReceived: 0, totalBytes: null });
+
+  return new Promise<AutoUpdateState>((resolve) => {
+    let received = 0;
+    let total: number | null = null;
+    let writer: fs.WriteStream;
+    try {
+      fileSystem.mkdirSync(userDataDir, { recursive: true });
+      writer = fileSystem.createWriteStream(tmp);
+    } catch (e) {
+      setState({ kind: "error", message: `cannot open download file: ${(e as Error)?.message ?? e}` });
+      resolve(state);
+      return;
+    }
+
+    const req = (net as { request: (o: unknown) => any }).request({ method: "GET", url });
+    req.on("response", (res: any) => {
+      const status = res.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        try { writer.destroy(); } catch { /* ignore */ }
+        try { fileSystem.unlinkSync(tmp); } catch { /* ignore */ }
+        setState({ kind: "error", message: `download HTTP ${status}` });
+        resolve(state);
+        return;
+      }
+      const lenHeader = res.headers?.["content-length"];
+      const lenStr = Array.isArray(lenHeader) ? lenHeader[0] : lenHeader;
+      if (lenStr) {
+        const n = Number(lenStr);
+        if (Number.isFinite(n) && n > 0) total = n;
+      }
+      res.on("data", (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > MAX_DOWNLOAD_BYTES) {
+          try { res.destroy?.(); } catch { /* ignore */ }
+          try { writer.destroy(); } catch { /* ignore */ }
+          try { fileSystem.unlinkSync(tmp); } catch { /* ignore */ }
+          setState({ kind: "error", message: "download exceeded size cap" });
+          resolve(state);
+          return;
+        }
+        writer.write(chunk);
+        setState({ kind: "downloading", url, bytesReceived: received, totalBytes: total });
+      });
+      res.on("end", () => {
+        writer.end(() => {
+          try {
+            fileSystem.renameSync(tmp, filepath);
+          } catch (e) {
+            setState({ kind: "error", message: `rename failed: ${(e as Error)?.message ?? e}` });
+            resolve(state);
+            return;
+          }
+          setState({ kind: "ready-to-apply", url, filepath, sha256 });
+          resolve(state);
+        });
+      });
+      res.on("error", (err: Error) => {
+        try { writer.destroy(); } catch { /* ignore */ }
+        try { fileSystem.unlinkSync(tmp); } catch { /* ignore */ }
+        setState({ kind: "error", message: `download stream error: ${err?.message ?? err}` });
+        resolve(state);
+      });
+    });
+    req.on("error", (err: Error) => {
+      try { writer.destroy(); } catch { /* ignore */ }
+      try { fileSystem.unlinkSync(tmp); } catch { /* ignore */ }
+      setState({ kind: "error", message: `download request error: ${err?.message ?? err}` });
+      resolve(state);
+    });
+    try {
+      req.end();
+    } catch (e) {
+      setState({ kind: "error", message: `download request failed: ${(e as Error)?.message ?? e}` });
+      resolve(state);
+    }
+  });
+}
+
+/**
+ * Verify (when sha256 was advertised) and hand off to the OS installer.
+ * macOS / Windows / Linux all use `shell.openPath` — the user clicks
+ * through their installer dialog and we quit so the new version takes
+ * over on next launch. Full silent install would need `electron-updater`
+ * + a signed feed; explicitly out of scope this iter.
+ */
+export async function applyAndRestart(
+  options: { shell?: AutoUpdaterDependencies["shell"]; quit?: () => void; fileSystem?: typeof fs } = {},
+): Promise<AutoUpdateState> {
+  if (state.kind !== "ready-to-apply") {
+    setState({ kind: "error", message: "no downloaded artifact ready" });
+    return state;
+  }
+  const sh = options.shell ?? deps.shell ?? electronShell;
+  const quit = options.quit ?? deps.quit ?? (() => electronApp.quit());
+  const fileSystem = options.fileSystem ?? deps.fileSystem ?? fs;
+  const ready = state;
+  if (ready.sha256) {
+    try {
+      const buf = await fsp.readFile(ready.filepath);
+      const got = createHash("sha256").update(buf).digest("hex").toLowerCase();
+      const want = ready.sha256.toLowerCase();
+      if (got !== want) {
+        setState({ kind: "error", message: `sha256 mismatch: got ${got}, expected ${want}` });
+        try { fileSystem.unlinkSync(ready.filepath); } catch { /* ignore */ }
+        return state;
+      }
+    } catch (e) {
+      setState({ kind: "error", message: `sha256 read failed: ${(e as Error)?.message ?? e}` });
+      return state;
+    }
+  }
+  try {
+    const errMsg = await sh!.openPath(ready.filepath);
+    if (typeof errMsg === "string" && errMsg.length > 0) {
+      setState({ kind: "error", message: `openPath failed: ${errMsg}` });
+      return state;
+    }
+  } catch (e) {
+    setState({ kind: "error", message: `openPath threw: ${(e as Error)?.message ?? e}` });
+    return state;
+  }
+  quit();
+  return state;
+}
+
 // Test-only hatch — mirrors iter 17–20.
 export const __test = {
   isValidFeedUrl,
@@ -234,4 +525,11 @@ export const __test = {
   ALLOWED_CHANNELS,
   HOST_REGEX,
   UNSAFE_PATH_CHARS,
+  AUTO_UPDATE_ENV,
+  AUTO_UPDATE_CONFIG_FILE,
+  DOWNLOAD_FILE_DEFAULT,
+  MAX_DOWNLOAD_BYTES,
+  readPersistedConfig,
+  setStateForTesting: (s: AutoUpdateState) => { state = s; },
+  resetStateForTesting: () => { state = { kind: "idle" }; listeners = []; deps = {}; },
 };

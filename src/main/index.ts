@@ -18,7 +18,6 @@ import {
   Menu,
   Notification,
   Tray,
-  nativeImage,
 } from "electron";
 import path from "path";
 import {
@@ -43,10 +42,21 @@ import {
   type NotifiedHost,
 } from "./first-boot-dedupe";
 import { computeTrayState } from "./tray-attention";
+import { createTray as createTrayInstance, setTrayIcon } from "./tray";
 import {
   VersionCheckManager,
+  buildVersionCheckMenuItems,
   type VersionCheckState,
 } from "./version-check-manager";
+import {
+  isAutoUpdateEnabled,
+  startBackgroundDownload,
+  applyAndRestart,
+  configureAutoUpdaterRuntime,
+  getAutoUpdateState,
+  subscribeAutoUpdate,
+  resetAutoUpdateState,
+} from "./auto-updater";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
@@ -86,6 +96,12 @@ let trayAttentionCount = 0;
 // "Update available" affordance without a manual trigger.
 let versionCheckManager: VersionCheckManager | null = null;
 let lastVersionCheckState: VersionCheckState = { kind: "idle" };
+// Iter 30 — captured from the last successful manifest fetch (when present)
+// so `applyAndRestart` can verify the downloaded artifact's SHA-256. The
+// manifest schema doesn't currently advertise this; the field is kept
+// optional and threaded through the menu handlers so a future schema
+// rev can populate it without rewiring the tray.
+let lastManifestSha256: string | null = null;
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -119,13 +135,8 @@ function createWindow(): BrowserWindow {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromPath(
-    path.join(app.getAppPath(), "resources", "icon.png")
-  );
-  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16 }));
-
+  tray = createTrayInstance();
   rebuildTrayMenu();
-
   tray.on("click", () => { mainWindow?.show() ?? createWindow(); });
 }
 
@@ -188,72 +199,27 @@ function rebuildTrayMenu(): void {
   //   • "Up to date (vX.Y.Z)" — disabled informational row
   //   • "Couldn't check for updates: …" — disabled with reason
   items.push({ type: "separator" });
-  for (const item of buildVersionCheckMenuItems(lastVersionCheckState)) {
-    items.push(item);
+  // Iter 30 — when auto-update is opted in we hand the version-check
+  // builder our auto-update state + click handlers; the builder picks
+  // the right rows (download progress, restart-to-install, etc).
+  const autoForMenu = isAutoUpdateEnabled() ? getAutoUpdateState() : undefined;
+  for (const it of buildVersionCheckMenuItems(
+    lastVersionCheckState,
+    {
+      openExternal: (u) => { void shell.openExternal(u); },
+      recheck: () => { void versionCheckManager?.checkOnce(); },
+      startDownload: (u, sha) => { void startBackgroundDownload(u, { sha256: sha }); },
+      applyAndRestart: () => { void applyAndRestart(); },
+      resetAutoUpdate: () => { resetAutoUpdateState(); },
+    },
+    autoForMenu,
+    lastManifestSha256,
+  )) {
+    items.push(it);
   }
   items.push({ type: "separator" });
   items.push({ label: "Quit", click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));
-}
-
-/**
- * Iter 29 — render the version-check state as one or two MenuItem rows.
- *
- * Pure function (no Electron imports beyond the type) so the unit
- * suite can pin the labels + click semantics without spawning a tray.
- * Returns an empty array for `idle` and `checking` so the menu doesn't
- * flicker between states; the user sees either the verdict or nothing.
- */
-function buildVersionCheckMenuItems(
-  state: VersionCheckState,
-): Electron.MenuItemConstructorOptions[] {
-  if (state.kind === "idle" || state.kind === "checking") return [];
-  if (state.kind === "update-available") {
-    const url = state.downloadUrl;
-    return [
-      {
-        // We add a leading marker so the row visually pops in a busy
-        // tray — Electron menus on Windows/Linux don't support bold,
-        // and macOS only honours `accelerator` for keyboard shortcuts.
-        label: `▲ Update available — v${state.latest}`,
-        click: () => {
-          if (url) void shell.openExternal(url);
-        },
-        enabled: url != null,
-      },
-      {
-        label: `Currently installed: v${state.current}`,
-        enabled: false,
-      },
-      {
-        label: "Check for updates now",
-        click: () => { void versionCheckManager?.checkOnce(); },
-      },
-    ];
-  }
-  if (state.kind === "up-to-date") {
-    return [
-      {
-        label: `Up to date (v${state.current})`,
-        enabled: false,
-      },
-      {
-        label: "Check for updates now",
-        click: () => { void versionCheckManager?.checkOnce(); },
-      },
-    ];
-  }
-  // error
-  return [
-    {
-      label: `Couldn't check for updates: ${state.message}`,
-      enabled: false,
-    },
-    {
-      label: "Retry update check",
-      click: () => { void versionCheckManager?.checkOnce(); },
-    },
-  ];
 }
 
 /**
@@ -285,6 +251,10 @@ function setTrayAttention(count: number): void {
     tray.setTitle(transition.next.title);
   }
   tray.setToolTip(transition.next.tooltip);
+  // Iter 30 — swap the actual tray pixels on the rising/falling edge
+  // so Win/Linux operators get a visible signal (the macOS title is
+  // redundant here, but `setTrayIcon` no-ops when the state is unchanged).
+  setTrayIcon(transition.next.count > 0 ? "attention" : "idle");
 }
 
 /**
@@ -631,6 +601,13 @@ app.whenReady().then(() => {
     },
   });
   versionCheckManager.start();
+
+  // Iter 30 — wire the auto-updater module's Electron-side handles so
+  // its env-flag gate and download/apply path can run when the operator
+  // has opted in. Subscribing to its state machine triggers tray menu
+  // rebuilds on every "downloading… 42%" tick.
+  configureAutoUpdaterRuntime({});
+  subscribeAutoUpdate(() => { rebuildTrayMenu(); });
 
   // Resume opt-in periodic diagnosis snapshots if the operator had them
   // enabled. Fire-and-forget: startup must not block on disk I/O, and

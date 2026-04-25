@@ -29,7 +29,7 @@
  *     promotes the state out of "error".
  */
 
-import { __test as autoUpdaterInternals } from "./auto-updater";
+import { __test as autoUpdaterInternals, type AutoUpdateState } from "./auto-updater";
 
 const { isValidFeedUrl, parseSemver, isNewerVersion } = autoUpdaterInternals;
 
@@ -344,10 +344,169 @@ function concat(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+// ─── Tray menu builder (iter 29 + iter 30) ──────────────────────────────────
+//
+// `buildVersionCheckMenuItems` returns the rows the system-tray menu
+// renders for the update slot. Iter 29 covered the basic states
+// (idle/checking/up-to-date/update-available/error); iter 30 layers in
+// the optional auto-update flow on top:
+//
+//   • `auto.kind === "downloading"`     — a disabled "Downloading update… NN%"
+//                                         row with progress in the sublabel
+//   • `auto.kind === "ready-to-apply"`  — "Download ready — Restart to install"
+//                                         click → handlers.applyAndRestart
+//   • `auto.kind === "error"`           — "Update download failed: …" with
+//                                         retry that re-runs the version check
+//
+// When `auto` is null/undefined or `kind === "idle"` we render the iter-29
+// rows verbatim so the existing test suite keeps passing.
+//
+// `handlers` are click callbacks injected by the caller — the function
+// stays pure (no electron imports beyond the type) so the unit suite
+// can pin the labels and click semantics without spawning a tray.
+
+export interface VersionCheckMenuHandlers {
+  /** Open the published download URL in the system browser. */
+  openExternal?: (url: string) => void;
+  /** Trigger an immediate version-check refetch. */
+  recheck?: () => void;
+  /** Start an in-app background download (iter 30 auto-update). */
+  startDownload?: (url: string, sha256: string | null) => void;
+  /** Apply the staged download + restart (iter 30 auto-update). */
+  applyAndRestart?: () => void;
+  /** Reset auto-update state after an error (iter 30 auto-update). */
+  resetAutoUpdate?: () => void;
+}
+
+export interface MenuItemShape {
+  label: string;
+  enabled?: boolean;
+  click?: () => void;
+  sublabel?: string;
+}
+
+/**
+ * Build the version-check menu rows. Pure: no electron imports.
+ *
+ * `auto` is the iter-30 auto-update state. Pass `undefined` (or omit) to
+ * render the iter-29 rows unchanged — the original 5-state behaviour.
+ *
+ * `manifestSha256` is captured from the manifest (when present) and
+ * threaded to `startDownload` so `applyAndRestart` can verify the
+ * artifact before launching the installer.
+ */
+export function buildVersionCheckMenuItems(
+  state: VersionCheckState,
+  handlers: VersionCheckMenuHandlers = {},
+  auto?: AutoUpdateState,
+  manifestSha256?: string | null,
+): MenuItemShape[] {
+  // Iter 30 — when an auto-update flow is in progress, the rows for
+  // it take priority over the iter-29 verdict (the operator wants
+  // status on the running download, not "v1.4 is available" again).
+  if (auto && auto.kind === "downloading") {
+    const pct = auto.totalBytes && auto.totalBytes > 0
+      ? Math.min(100, Math.floor((auto.bytesReceived / auto.totalBytes) * 100))
+      : null;
+    const label = pct != null
+      ? `Downloading update… ${pct}%`
+      : `Downloading update… ${formatBytes(auto.bytesReceived)}`;
+    return [{ label, enabled: false, sublabel: progressBar(pct) }];
+  }
+  if (auto && auto.kind === "ready-to-apply") {
+    return [
+      {
+        label: "Download ready — Restart to install",
+        click: () => { handlers.applyAndRestart?.(); },
+      },
+    ];
+  }
+  if (auto && auto.kind === "error") {
+    return [
+      {
+        label: `Update download failed: ${auto.message}`,
+        enabled: false,
+      },
+      {
+        label: "Reset and retry update check",
+        click: () => {
+          handlers.resetAutoUpdate?.();
+          handlers.recheck?.();
+        },
+      },
+    ];
+  }
+  // Iter 29 baseline — `auto` is idle or absent.
+  if (state.kind === "idle" || state.kind === "checking") return [];
+  if (state.kind === "update-available") {
+    const url = state.downloadUrl;
+    const isAuto = auto != null;
+    return [
+      {
+        label: `▲ Update available — v${state.latest}`,
+        click: () => {
+          if (!url) return;
+          if (isAuto && handlers.startDownload) {
+            handlers.startDownload(url, manifestSha256 ?? null);
+          } else {
+            handlers.openExternal?.(url);
+          }
+        },
+        enabled: url != null,
+      },
+      {
+        label: `Currently installed: v${state.current}`,
+        enabled: false,
+      },
+      {
+        label: "Check for updates now",
+        click: () => { handlers.recheck?.(); },
+      },
+    ];
+  }
+  if (state.kind === "up-to-date") {
+    return [
+      {
+        label: `Up to date (v${state.current})`,
+        enabled: false,
+      },
+      {
+        label: "Check for updates now",
+        click: () => { handlers.recheck?.(); },
+      },
+    ];
+  }
+  // error
+  return [
+    {
+      label: `Couldn't check for updates: ${state.message}`,
+      enabled: false,
+    },
+    {
+      label: "Retry update check",
+      click: () => { handlers.recheck?.(); },
+    },
+  ];
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function progressBar(pct: number | null): string {
+  if (pct == null) return "";
+  const filled = Math.max(0, Math.min(20, Math.floor(pct / 5)));
+  return "[" + "#".repeat(filled) + "-".repeat(20 - filled) + `] ${pct}%`;
+}
+
 // Test-only hatch — mirrors the convention in auto-updater.ts.
 export const __test = {
   parseManifest,
   classifyManifest,
   readBodyCapped,
   MAX_MANIFEST_BYTES,
+  formatBytes,
+  progressBar,
 };

@@ -62,15 +62,41 @@ export interface TrayAttentionState {
 }
 
 /**
+ * Iter 30 — the tray icon also flips between two visual variants:
+ * "idle" (the baseline ring) and "attention" (ring + notification dot).
+ * The caller in `index.ts` consumes `nextIcon` directly; the
+ * `iconStateForCount` helper is exposed for tests + symmetry with the
+ * existing format helpers.
+ */
+export type TrayIconKind = "idle" | "attention";
+
+/**
  * The diff `applyTrayState` consumes to decide whether it has any work to
  * do. `changed=false` means the count is unchanged from the previous call
  * — the caller can no-op to avoid spamming `tray.setTitle` and
  * `tray.setToolTip` on every probe tick.
+ *
+ * Iter 30 — `prevIcon` / `nextIcon` mirror `prev.count` / `next.count`
+ * but in the icon-variant space. `iconChanged` is true iff the icon
+ * variant actually flipped on this transition (a count change inside
+ * the same variant — e.g. 1 → 2 — does NOT flip the icon).
  */
 export interface TrayStateTransition {
   prev: TrayAttentionState;
   next: TrayAttentionState;
   changed: boolean;
+  prevIcon: TrayIconKind;
+  nextIcon: TrayIconKind;
+  iconChanged: boolean;
+}
+
+/**
+ * Pure helper: which icon variant matches a given count. Any non-zero,
+ * non-NaN count maps to the attention variant; otherwise idle.
+ */
+export function iconStateForCount(count: number): TrayIconKind {
+  if (!Number.isFinite(count) || count <= 0) return "idle";
+  return Math.floor(count) > 0 ? "attention" : "idle";
 }
 
 /**
@@ -126,6 +152,8 @@ export function computeTrayState(
   // surface might once we add a renderer-driven count override.
   const prev = clampCount(prevCount);
   const next = clampCount(newCount);
+  const prevIcon = iconStateForCount(prev);
+  const nextIcon = iconStateForCount(next);
   return {
     prev: {
       count: prev,
@@ -138,6 +166,9 @@ export function computeTrayState(
       tooltip: formatTrayTooltip(next),
     },
     changed: prev !== next,
+    prevIcon,
+    nextIcon,
+    iconChanged: prevIcon !== nextIcon,
   };
 }
 
