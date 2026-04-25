@@ -5,9 +5,12 @@ import {
   parseManifest,
   classifyManifest,
   buildVersionCheckMenuItems,
+  __test as versionCheckInternals,
   type VersionManifest,
   type VersionCheckState,
 } from "./version-check-manager";
+
+const { computeDeviceBucket } = versionCheckInternals;
 
 // Pure-helper unit tests for the iter-29 desktop version check.
 // We exercise:
@@ -41,6 +44,7 @@ describe("parseManifest", () => {
       manifestVersion: 1,
       sha256: null,
       releaseNotesUrl: null,
+      rolloutBucket: null,
     });
   });
 
@@ -55,6 +59,7 @@ describe("parseManifest", () => {
       manifestVersion: 1,
       sha256: null,
       releaseNotesUrl: null,
+      rolloutBucket: null,
     });
   });
 
@@ -69,6 +74,7 @@ describe("parseManifest", () => {
       manifestVersion: 1,
       sha256: null,
       releaseNotesUrl: null,
+      rolloutBucket: null,
     });
   });
 
@@ -106,6 +112,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       manifestVersion: 2,
       sha256: VALID_SHA_MIXED.toLowerCase(),
       releaseNotesUrl: null,
+      rolloutBucket: null,
     });
   });
 
@@ -122,6 +129,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       manifestVersion: 2,
       sha256: VALID_SHA,
       releaseNotesUrl: null,
+      rolloutBucket: null,
     });
   });
 
@@ -203,6 +211,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       manifestVersion: 1,
       sha256: null,
       releaseNotesUrl: null,
+      rolloutBucket: null,
     });
   });
 
@@ -218,6 +227,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       manifestVersion: 1,
       sha256: VALID_SHA_MIXED.toLowerCase(),
       releaseNotesUrl: null,
+      rolloutBucket: null,
     });
   });
 
@@ -351,6 +361,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       manifestVersion: 2,
       sha256: VALID_SHA,
       releaseNotesUrl: "https://rud1.es/changelog",
+      rolloutBucket: null,
     });
   });
 
@@ -380,6 +391,7 @@ describe("classifyManifest", () => {
     manifestVersion: 1,
     sha256: null,
     releaseNotesUrl: null,
+    rolloutBucket: null,
   });
 
   it("flags an update when remote > current", () => {
@@ -618,5 +630,159 @@ describe("buildVersionCheckMenuItems — releaseNotesUrl (iter 33)", () => {
     expect(
       items.find((i) => i.label === "What's new — view release notes"),
     ).toBeUndefined();
+  });
+});
+
+// ─── Iter 34 — staged rollout via rolloutBucket ───────────────────────────────
+
+describe("parseManifest — rolloutBucket (iter 34)", () => {
+  it("rolloutBucket integer in [1, 100] → preserved", () => {
+    const m = parseManifest({ version: "1.2.3", rolloutBucket: 50 });
+    expect(m?.rolloutBucket).toBe(50);
+    const lo = parseManifest({ version: "1.2.3", rolloutBucket: 1 });
+    expect(lo?.rolloutBucket).toBe(1);
+    const hi = parseManifest({ version: "1.2.3", rolloutBucket: 100 });
+    expect(hi?.rolloutBucket).toBe(100);
+  });
+
+  it("rolloutBucket missing or null → null", () => {
+    expect(parseManifest({ version: "1.2.3" })?.rolloutBucket).toBeNull();
+    expect(
+      parseManifest({ version: "1.2.3", rolloutBucket: null })?.rolloutBucket,
+    ).toBeNull();
+  });
+
+  it("rolloutBucket of wrong type → rejects whole manifest", () => {
+    // String / boolean / object — server-side bug we'd rather surface
+    // than mask, mirroring the strictness on every other typed field.
+    expect(
+      parseManifest({ version: "1.2.3", rolloutBucket: "50" }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.2.3", rolloutBucket: true }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.2.3", rolloutBucket: { pct: 50 } }),
+    ).toBeNull();
+  });
+
+  it("rolloutBucket out of [1, 100] or non-integer → rejects whole manifest", () => {
+    // 0 would silence the entire fleet; 101+ is meaningless. Floats are
+    // ambiguous (50.5 → ?). All four reject.
+    expect(parseManifest({ version: "1.2.3", rolloutBucket: 0 })).toBeNull();
+    expect(parseManifest({ version: "1.2.3", rolloutBucket: 101 })).toBeNull();
+    expect(parseManifest({ version: "1.2.3", rolloutBucket: -5 })).toBeNull();
+    expect(parseManifest({ version: "1.2.3", rolloutBucket: 50.5 })).toBeNull();
+    expect(
+      parseManifest({ version: "1.2.3", rolloutBucket: Number.NaN }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.2.3",
+        rolloutBucket: Number.POSITIVE_INFINITY,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("computeDeviceBucket (iter 34)", () => {
+  it("is stable across calls for the same installation ID", () => {
+    const id = "rud1-desktop:host-fixture";
+    const a = computeDeviceBucket(id);
+    const b = computeDeviceBucket(id);
+    const c = computeDeviceBucket(id);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    expect(a).toBeGreaterThanOrEqual(1);
+    expect(a).toBeLessThanOrEqual(100);
+  });
+
+  it("distributes roughly uniformly across [1, 100] for varied IDs", () => {
+    // 1000 distinct installation IDs should cover most of the bucket
+    // space. We don't pin exact counts (sha256 mod 100 isn't perfectly
+    // uniform on a finite sample); we just confirm the spread covers
+    // the full range, sits inside [1, 100], and isn't clumped into a
+    // single bucket.
+    const buckets = new Set<number>();
+    let min = 101;
+    let max = 0;
+    for (let i = 0; i < 1000; i++) {
+      const b = computeDeviceBucket(`fixture-${i}`);
+      expect(b).toBeGreaterThanOrEqual(1);
+      expect(b).toBeLessThanOrEqual(100);
+      buckets.add(b);
+      if (b < min) min = b;
+      if (b > max) max = b;
+    }
+    // Reasonable diversity: at least 80 of the 100 buckets hit out of
+    // 1000 trials, and the range spans at least 1..100 within a few
+    // buckets at each end.
+    expect(buckets.size).toBeGreaterThanOrEqual(80);
+    expect(min).toBeLessThanOrEqual(5);
+    expect(max).toBeGreaterThanOrEqual(96);
+  });
+
+  it("wraps with mod 100 + 1 so output is always in [1, 100], never 0 or 101", () => {
+    // Probe a deterministic spread of inputs and confirm the +1 offset
+    // is applied (we never hit 0) and the modulo cap holds (we never
+    // hit 101). Edge inputs include the empty string, very long
+    // strings, and high-entropy hex strings.
+    const probes = [
+      "",
+      "a",
+      "abcdefghijklmnopqrstuvwxyz",
+      "0".repeat(1024),
+      "ff".repeat(64),
+      "rud1-desktop:" + "x".repeat(10_000),
+    ];
+    for (const p of probes) {
+      const b = computeDeviceBucket(p);
+      expect(b).toBeGreaterThanOrEqual(1);
+      expect(b).toBeLessThanOrEqual(100);
+      expect(Number.isInteger(b)).toBe(true);
+    }
+  });
+});
+
+describe("classifyManifest — rolloutBucket suppression (iter 34)", () => {
+  const NOW = 1_700_000_000_000;
+  const m = (version: string, rolloutBucket: number | null = null): VersionManifest => ({
+    version,
+    downloadUrl: "https://rud1.es/dl",
+    manifestVersion: 2,
+    sha256: "a".repeat(64),
+    releaseNotesUrl: null,
+    rolloutBucket,
+  });
+
+  it("eligible bucket (deviceBucket <= rolloutBucket) → update-available", () => {
+    const out = classifyManifest("1.2.0", m("1.3.0", 50), NOW, 25);
+    expect(out.kind).toBe("update-available");
+    if (out.kind === "update-available") {
+      expect(out.latest).toBe("1.3.0");
+    }
+  });
+
+  it("ineligible bucket (deviceBucket > rolloutBucket) → up-to-date despite newer version", () => {
+    // The whole point of staged rollouts: a newer manifest exists, but
+    // this device hasn't been picked yet, so we silently report up-to-date.
+    const out = classifyManifest("1.2.0", m("1.3.0", 50), NOW, 75);
+    expect(out.kind).toBe("up-to-date");
+    if (out.kind === "up-to-date") {
+      expect(out.latest).toBe("1.3.0");
+      expect(out.current).toBe("1.2.0");
+    }
+  });
+
+  it("no rolloutBucket → newer version always classified as update-available", () => {
+    // Even an unlikely deviceBucket=100 still gets the update when the
+    // manifest doesn't gate the rollout.
+    const out = classifyManifest("1.2.0", m("1.3.0", null), NOW, 100);
+    expect(out.kind).toBe("update-available");
+  });
+
+  it("boundary: deviceBucket == rolloutBucket → eligible (inclusive lower edge)", () => {
+    const out = classifyManifest("1.2.0", m("1.3.0", 42), NOW, 42);
+    expect(out.kind).toBe("update-available");
   });
 });

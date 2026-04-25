@@ -19,6 +19,7 @@ import {
   Notification,
   Tray,
 } from "electron";
+import os from "os";
 import path from "path";
 import {
   markWebContentsTrusted,
@@ -592,9 +593,18 @@ app.whenReady().then(() => {
   // up. We never block startup on the first fetch — `start()` schedules
   // an immediate `checkOnce` async + an interval; failures park in the
   // "error" state and the tray surfaces a Retry entry.
+  // Iter 34 — derive a stable per-installation identifier for staged
+  // rollouts. There's no pre-existing UUID stored anywhere in the app
+  // today; we synthesise one from `app.getName()` + the OS hostname so
+  // every install on a given host bucket-maps to the same number across
+  // restarts. (The hostname is local-only and not exfiltrated; the
+  // bucket itself is a sha256-derived integer in [1, 100].)
+  const installId = `${app.getName()}:${os.hostname()}`;
+
   versionCheckManager = new VersionCheckManager({
     manifestUrl: VERSION_MANIFEST_URL,
     currentVersion: app.getVersion(),
+    installId,
     onStateChange: (state) => {
       lastVersionCheckState = state;
       rebuildTrayMenu();

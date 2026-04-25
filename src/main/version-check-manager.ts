@@ -29,6 +29,8 @@
  *     promotes the state out of "error".
  */
 
+import { createHash } from "crypto";
+
 import { __test as autoUpdaterInternals, type AutoUpdateState } from "./auto-updater";
 
 const { isValidFeedUrl, parseSemver, isNewerVersion } = autoUpdaterInternals;
@@ -102,6 +104,14 @@ export interface VersionCheckOptions {
    * misbehaving subscriber can't kill the polling loop.
    */
   onStateChange?: (state: VersionCheckState) => void;
+  /**
+   * Iter 34 — stable per-installation identifier used to compute the
+   * staged-rollout bucket. When omitted, rollout suppression is
+   * disabled and every device is classified as if the manifest had no
+   * `rolloutBucket` field. Wiring in `index.ts` derives this from
+   * `app.getName() + machine identifier` once at startup.
+   */
+  installId?: string;
 }
 
 export interface VersionManifest {
@@ -138,6 +148,20 @@ export interface VersionManifest {
    * it to required.
    */
   releaseNotesUrl: string | null;
+  /**
+   * Iter 34 — staged-rollout bucket. When present, an integer in
+   * `[1, 100]` representing the percentage of the install base that
+   * should be classified as `update-available`. The device computes a
+   * stable per-installation bucket (also `[1, 100]`) and compares: if
+   * `deviceBucket <= rolloutBucket` the device is eligible; otherwise
+   * the manifest is suppressed and classified as `up-to-date` instead.
+   * Optional in v1 and v2 — `null` means "ship to everyone", which is
+   * the historical behaviour.
+   *
+   * Wrong-type / out-of-range values reject the WHOLE manifest at
+   * parse time (a server-side bug we'd rather surface than mask).
+   */
+  rolloutBucket: number | null;
 }
 
 /**
@@ -236,24 +260,75 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     // else: empty string OR allowlist rejection ⇒ silently drop.
   }
 
+  // Iter 34 — optional rolloutBucket. Integer in [1, 100]. Wrong-type or
+  // out-of-range values reject the whole manifest, mirroring the
+  // strictness on every other typed field — a server-side bug here
+  // (e.g. accidentally shipping `rolloutBucket: 0` and silencing the
+  // entire fleet) is louder than a missing convenience.
+  let rolloutBucket: number | null = null;
+  if (
+    Object.prototype.hasOwnProperty.call(obj, "rolloutBucket") &&
+    obj.rolloutBucket != null
+  ) {
+    const rb = obj.rolloutBucket;
+    if (typeof rb !== "number" || !Number.isFinite(rb) || !Number.isInteger(rb)) {
+      return null;
+    }
+    if (rb < 1 || rb > 100) return null;
+    rolloutBucket = rb;
+  }
+
   return {
     version: obj.version,
     downloadUrl,
     manifestVersion,
     sha256,
     releaseNotesUrl,
+    rolloutBucket,
   };
+}
+
+/**
+ * Iter 34 — derive a stable per-installation bucket in `[1, 100]` from
+ * an arbitrary installation identifier. Same input always yields the
+ * same bucket so a device with `deviceBucket=42` consistently sees
+ * (or doesn't see) every staged rollout the server publishes.
+ *
+ * Uses sha256 of the input, reads the first 4 bytes as a big-endian
+ * uint32, takes mod 100, +1 to map onto `[1, 100]`. The mod/distribution
+ * is uniform enough across realistic installation-ID populations
+ * (UUIDs, hostnames, machine fingerprints) for staged-rollout purposes
+ * — we are not running a CSPRNG, just bucketing.
+ */
+export function computeDeviceBucket(installId: string): number {
+  const digest = createHash("sha256").update(installId).digest();
+  const u32 =
+    ((digest[0] << 24) >>> 0) |
+    (digest[1] << 16) |
+    (digest[2] << 8) |
+    digest[3];
+  return (u32 >>> 0) % 100 + 1;
 }
 
 /**
  * Pure helper: given a current + remote semver string, return the next
  * VersionCheckState as if the fetch just succeeded. Exposed so tests
  * can pin the comparison without mocking `fetch`.
+ *
+ * Iter 34 — `deviceBucket` is the per-installation bucket in `[1, 100]`
+ * (see `computeDeviceBucket`). When the manifest carries a non-null
+ * `rolloutBucket`, devices with `deviceBucket > rolloutBucket` are
+ * silently classified as `up-to-date` even though a newer version is
+ * advertised — they're outside the rollout cohort. `null` means
+ * "ship to everyone" (historical behaviour). When `deviceBucket` is
+ * not provided, rollout suppression is disabled (used by tests that
+ * don't care about bucketing).
  */
 export function classifyManifest(
   current: string,
   manifest: VersionManifest,
   now: number,
+  deviceBucket?: number,
 ): VersionCheckState {
   if (parseSemver(current) == null) {
     return {
@@ -263,6 +338,18 @@ export function classifyManifest(
     };
   }
   if (isNewerVersion(manifest.version, current)) {
+    if (
+      manifest.rolloutBucket != null &&
+      deviceBucket != null &&
+      deviceBucket > manifest.rolloutBucket
+    ) {
+      return {
+        kind: "up-to-date",
+        current,
+        latest: manifest.version,
+        checkedAt: now,
+      };
+    }
     return {
       kind: "update-available",
       current,
@@ -292,7 +379,9 @@ export class VersionCheckManager {
   > & {
     fetch: typeof globalThis.fetch;
     onStateChange: (s: VersionCheckState) => void;
+    installId: string | null;
   };
+  private readonly deviceBucket: number | null;
 
   constructor(options: VersionCheckOptions) {
     if (!isValidFeedUrl(options.manifestUrl)) {
@@ -319,7 +408,10 @@ export class VersionCheckManager {
       fetchTimeoutMs: options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS,
       fetch: options.fetch ?? (globalThis.fetch?.bind(globalThis) as typeof globalThis.fetch),
       onStateChange: options.onStateChange ?? (() => {}),
+      installId: options.installId ?? null,
     };
+    this.deviceBucket =
+      this.opts.installId != null ? computeDeviceBucket(this.opts.installId) : null;
   }
 
   /**
@@ -375,8 +467,23 @@ export class VersionCheckManager {
           checkedAt: Date.now(),
         });
       }
+      // Iter 34 — log the rollout decision once per fetch when the
+      // manifest carries a bucket. Eligibility is the same predicate
+      // `classifyManifest` consults, so the log accurately reflects the
+      // suppression call.
+      if (manifest.rolloutBucket != null && this.deviceBucket != null) {
+        const eligible = this.deviceBucket <= manifest.rolloutBucket;
+        console.info(
+          `[version-check] rollout: device bucket=${this.deviceBucket}, manifest bucket=${manifest.rolloutBucket}, eligible=${eligible}`,
+        );
+      }
       return this.transition(
-        classifyManifest(this.opts.currentVersion, manifest, Date.now()),
+        classifyManifest(
+          this.opts.currentVersion,
+          manifest,
+          Date.now(),
+          this.deviceBucket ?? undefined,
+        ),
       );
     } catch (e) {
       const err = e as Error;
@@ -653,6 +760,7 @@ function progressBar(pct: number | null): string {
 export const __test = {
   parseManifest,
   classifyManifest,
+  computeDeviceBucket,
   readBodyCapped,
   MAX_MANIFEST_BYTES,
   MAX_SUPPORTED_MANIFEST_VERSION,
