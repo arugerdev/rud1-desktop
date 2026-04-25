@@ -33,12 +33,16 @@
  *   firstBootDedupe:list       — list persisted notified-host records (iter 28 Settings UI)
  *   firstBootDedupe:clearHost  — drop a single host from the persisted dedupe set
  *   firstBootDedupe:clearAll   — drop ALL hosts from the persisted dedupe set
+ *   versionCheck:state         — snapshot the live VersionCheckState (iter 37 Settings/About)
+ *   versionCheck:recheck       — trigger an immediate version-check refetch
+ *   clipboard:writeText        — copy a string to the OS clipboard (iter 37, length-capped)
+ *   shell:openExternal         — open an http/https URL in the system browser (iter 37, allowlisted)
  *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
  *   app:version       — get app version
  *   app:platform      — get OS platform
  */
 
-import { ipcMain, app, BrowserWindow } from "electron";
+import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
 import { vpnConnect, vpnDisconnect, vpnStatus } from "./vpn-manager";
 import { usbAttach, usbDetach, usbList } from "./usb-manager";
 import {
@@ -71,6 +75,7 @@ import {
 import { getStats as getSystemStats } from "./system-manager";
 import { probeFirmware } from "./firmware-discovery";
 import type { NotifiedHost } from "./first-boot-dedupe";
+import type { VersionCheckState } from "./version-check-manager";
 
 /**
  * Iter 28 — accessor surface that bridges the persisted first-boot
@@ -95,6 +100,27 @@ export interface FirstBootDedupeAccessor {
   clearAll: () => Promise<void>;
 }
 
+/**
+ * Iter 37 — accessor surface for the Settings/About panel's "Updates"
+ * section. The panel needs read access to the live `VersionCheckState`
+ * (so it can render the iter-36 blocked-state banner among other
+ * verdicts) plus a notification hook so main can push state transitions
+ * without the renderer polling. Mirrors the iter-28 first-boot-dedupe
+ * accessor pattern verbatim — `registerIpcHandlers` is called BEFORE
+ * `app.whenReady()` resolves and before the manager is constructed, so
+ * we late-bind via callbacks and the channels skip registration when the
+ * accessor is absent (keeps the iter-22 ipc-handlers test harness clean).
+ *
+ * `recheck` triggers an immediate re-poll; the renderer wires it to a
+ * "Check for updates now" button. Best-effort — the manager's
+ * `checkOnce` already handles overlapping fetches by racing to the
+ * latest state.
+ */
+export interface VersionCheckAccessor {
+  getState: () => VersionCheckState;
+  recheck: () => void;
+}
+
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
 
 // Control-character + whitespace + quote rejection list, applied against the
@@ -107,6 +133,41 @@ const UNSAFE_URL_CHARS = /[\x00-\x1f\x7f\s"<>\\^`{|}]/;
 // Hard cap so a megabyte sender URL from a compromised frame can't OOM the
 // URL parser or flood logs.
 const MAX_SENDER_URL_LENGTH = 2048;
+
+// Iter 37 — hard caps for the new clipboard / shell IPC channels so a
+// compromised renderer (or a misbehaving Settings/About panel) can't push a
+// runaway payload through. The clipboard cap is generous enough to hold a
+// long download URL or a paragraph of release-note text but refuses anything
+// resembling a paste-bomb. The shell cap is the same as the sender-URL cap.
+const MAX_CLIPBOARD_TEXT_LENGTH = 8192;
+const MAX_OPEN_EXTERNAL_URL_LENGTH = 2048;
+
+/**
+ * Iter 37 — allowlist for `shell:openExternal`. Restricted to http/https
+ * only (no `javascript:`, `file:`, `data:`, `mailto:`, etc.) to keep a
+ * compromised renderer from invoking the OS handler for a dangerous
+ * scheme. Returns the parsed URL on success, null on rejection.
+ *
+ * No origin pinning here — the operator may legitimately follow a
+ * release-notes URL or a download link to anywhere on the public web —
+ * but the scheme allowlist is a hard requirement. Userinfo components
+ * are also rejected (mirrors the policy in `isOriginAllowed` and
+ * `isValidFeedUrl`) to block credential smuggling.
+ */
+export function isOpenExternalUrlAllowed(rawUrl: unknown): boolean {
+  if (typeof rawUrl !== "string") return false;
+  if (rawUrl.length === 0 || rawUrl.length > MAX_OPEN_EXTERNAL_URL_LENGTH) return false;
+  if (UNSAFE_URL_CHARS.test(rawUrl)) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  if (parsed.username !== "" || parsed.password !== "") return false;
+  return true;
+}
 
 /**
  * Pure predicate used by `checkSender`. Separated so it is unit-testable
@@ -220,10 +281,15 @@ export const __test = {
   MAX_SENDER_URL_LENGTH,
   ALLOWED_ORIGIN,
   trustedWebContentsIds,
+  // Iter 37 — clipboard / shell allowlists.
+  isOpenExternalUrlAllowed,
+  MAX_CLIPBOARD_TEXT_LENGTH,
+  MAX_OPEN_EXTERNAL_URL_LENGTH,
 };
 
 export function registerIpcHandlers(opts: {
   firstBootDedupe?: FirstBootDedupeAccessor;
+  versionCheck?: VersionCheckAccessor;
 } = {}): void {
   ipcMain.handle("vpn:connect", async (event, wgConfig: string) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
@@ -699,4 +765,83 @@ export function registerIpcHandlers(opts: {
       }
     });
   }
+
+  // ─── iter 37: version-check state surface for Settings/About panel ──────
+  // The renderer-side Settings/About panel calls `versionCheck:state` to
+  // read the live `VersionCheckState` and subscribes to push updates via
+  // the `versionCheck:update` event (broadcast by index.ts on every state
+  // transition — same pattern as iter-28 firstBootDedupe:update). Same
+  // late-binding rationale as the dedupe accessor — the manager is
+  // constructed inside `app.whenReady()` so the registrar can't capture
+  // its instance at module load.
+  const versionCheck = opts.versionCheck;
+  if (versionCheck) {
+    ipcMain.handle("versionCheck:state", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        // Snapshot via JSON round-trip so a downstream consumer can't
+        // mutate the manager's in-memory state through a structurally
+        // shared reference. The state is small (a few hundred bytes
+        // worst case) so the clone cost is invisible.
+        const snapshot = JSON.parse(JSON.stringify(versionCheck.getState())) as VersionCheckState;
+        return { ok: true, result: snapshot };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+
+    ipcMain.handle("versionCheck:recheck", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        versionCheck.recheck();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+  }
+
+  // ─── iter 37: clipboard + shell:openExternal for the Settings/About panel ─
+  //
+  // The "Copy download URL" button in the iter-37 update-blocked banner
+  // must round-trip through main rather than calling
+  // `navigator.clipboard.writeText` — the data:-URL origin the panel
+  // loads from would otherwise need a permission grant the operator
+  // can't easily surface. Origin / sender check is the same as every
+  // other channel; the trustedWebContentsIds bypass for main-process-
+  // opened windows applies (the Settings/About window registers itself
+  // via markWebContentsTrusted just like the dedupe inspector did).
+  ipcMain.handle("clipboard:writeText", (event, text: unknown) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    if (typeof text !== "string") return { ok: false, error: "invalid text" };
+    if (text.length === 0) return { ok: false, error: "empty text" };
+    if (text.length > MAX_CLIPBOARD_TEXT_LENGTH) {
+      return { ok: false, error: "text exceeds size cap" };
+    }
+    try {
+      clipboard.writeText(text);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("shell:openExternal", async (event, url: unknown) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    if (!isOpenExternalUrlAllowed(url)) {
+      return { ok: false, error: "URL rejected by allowlist" };
+    }
+    try {
+      // `shell.openExternal` is async on the main process side; we await
+      // so the renderer's promise resolves only after the OS handler has
+      // been dispatched (or failed). The OS-side success/failure is
+      // best-effort — `shell.openExternal` doesn't surface a "no handler
+      // installed" error until much later — but the IPC envelope still
+      // matches the rest of the surface.
+      await shell.openExternal(url as string);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 }

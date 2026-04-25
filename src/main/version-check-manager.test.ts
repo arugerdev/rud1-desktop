@@ -5,6 +5,8 @@ import {
   parseManifest,
   classifyManifest,
   buildVersionCheckMenuItems,
+  formatBlockedStateMessage,
+  formatVersionCheckSummary,
   __test as versionCheckInternals,
   type VersionManifest,
   type VersionCheckState,
@@ -1443,5 +1445,208 @@ describe("buildVersionCheckMenuItems — blocked-by-min-bootstrap (iter 36)", ()
     }
     // (No exception thrown ⇒ test passes.)
     expect(items[0].enabled).toBe(false);
+  });
+});
+
+// ─── Iter 37 — Settings/About panel formatters ──────────────────────────────
+//
+// `formatBlockedStateMessage` is the headline addition: it renders the iter-36
+// `update-blocked-by-min-bootstrap` verdict into structured copy that the
+// data-URL Settings panel consumes. Pinning the operator-facing strings here
+// catches regressions ("Update blocked" vs "Download v… first") that would
+// otherwise only surface on a manual smoke test of the panel.
+//
+// `formatVersionCheckSummary` is the corresponding one-liner for the four
+// non-blocked verdicts; tested via a single each-branch sweep.
+
+describe("formatBlockedStateMessage (iter 37)", () => {
+  const mkBlocked = (
+    overrides: Partial<{
+      requiredMinVersion: string;
+      currentVersion: string;
+      targetVersion: string;
+      releaseNotesUrl: string | null;
+    }> = {},
+  ): VersionCheckState & { kind: "update-blocked-by-min-bootstrap" } => ({
+    kind: "update-blocked-by-min-bootstrap",
+    requiredMinVersion: overrides.requiredMinVersion ?? "1.2.0",
+    currentVersion: overrides.currentVersion ?? "1.0.0",
+    targetVersion: overrides.targetVersion ?? "1.5.0",
+    releaseNotesUrl: overrides.releaseNotesUrl ?? null,
+    checkedAt: 1_700_000_000_000,
+  });
+
+  it("formats the call-to-action banner with the required min version", () => {
+    const msg = formatBlockedStateMessage(mkBlocked());
+    expect(msg.banner).toBe(
+      "Download v1.2.0 manually first to continue receiving updates",
+    );
+  });
+
+  it("preserves the install/target version pair as caption rows", () => {
+    const msg = formatBlockedStateMessage(mkBlocked());
+    expect(msg.currentLine).toBe("Currently installed: v1.0.0");
+    expect(msg.targetLine).toBe("Target: v1.5.0");
+  });
+
+  it("passes through the optional releaseNotesUrl when present", () => {
+    const msg = formatBlockedStateMessage(
+      mkBlocked({ releaseNotesUrl: "https://rud1.es/changelog/v1.5.0" }),
+    );
+    expect(msg.releaseNotesUrl).toBe("https://rud1.es/changelog/v1.5.0");
+  });
+
+  it("returns null releaseNotesUrl when absent (no fallback fabrication)", () => {
+    const msg = formatBlockedStateMessage(mkBlocked({ releaseNotesUrl: null }));
+    expect(msg.releaseNotesUrl).toBeNull();
+  });
+
+  it("the download-hint is anchored to the requiredMinVersion (used for the clipboard button hover)", () => {
+    const msg = formatBlockedStateMessage(
+      mkBlocked({ requiredMinVersion: "2.0.0-rc.1" }),
+    );
+    expect(msg.downloadHint).toContain("v2.0.0-rc.1");
+  });
+
+  it("escapes nothing — pure string concatenation, the renderer handles HTML escaping", () => {
+    // Defensive: confirms the formatter does NOT pre-escape. If a future
+    // edit accidentally adds HTML escaping here, the renderer's own
+    // escape() would double-encode and the operator would see literal
+    // `&lt;` in the banner. Pinning the raw shape avoids that drift.
+    const msg = formatBlockedStateMessage(
+      mkBlocked({ requiredMinVersion: "1.2.0<script>" }),
+    );
+    expect(msg.banner).toContain("<script>");
+  });
+});
+
+describe("formatVersionCheckSummary (iter 37)", () => {
+  it("idle → 'Update check has not run yet.'", () => {
+    expect(formatVersionCheckSummary({ kind: "idle" })).toBe(
+      "Update check has not run yet.",
+    );
+  });
+
+  it("checking → 'Checking for updates…'", () => {
+    expect(formatVersionCheckSummary({ kind: "checking" })).toBe(
+      "Checking for updates…",
+    );
+  });
+
+  it("up-to-date → 'Up to date (vN.N.N).'", () => {
+    expect(
+      formatVersionCheckSummary({
+        kind: "up-to-date",
+        current: "1.4.2",
+        latest: "1.4.2",
+        checkedAt: 0,
+      }),
+    ).toBe("Up to date (v1.4.2).");
+  });
+
+  it("update-available → carries both current and latest", () => {
+    expect(
+      formatVersionCheckSummary({
+        kind: "update-available",
+        current: "1.0.0",
+        latest: "1.5.0",
+        downloadUrl: null,
+        releaseNotesUrl: null,
+        checkedAt: 0,
+      }),
+    ).toBe("Update available — v1.5.0 (currently v1.0.0).");
+  });
+
+  it("update-blocked-by-min-bootstrap → leads with the required intermediate", () => {
+    expect(
+      formatVersionCheckSummary({
+        kind: "update-blocked-by-min-bootstrap",
+        requiredMinVersion: "1.2.0",
+        currentVersion: "1.0.0",
+        targetVersion: "1.5.0",
+        releaseNotesUrl: null,
+        checkedAt: 0,
+      }),
+    ).toBe("Update blocked: install v1.2.0 manually first.");
+  });
+
+  it("error → carries the upstream message verbatim", () => {
+    expect(
+      formatVersionCheckSummary({
+        kind: "error",
+        message: "manifest HTTP 502",
+        checkedAt: 0,
+      }),
+    ).toBe("Couldn't check for updates: manifest HTTP 502");
+  });
+});
+
+// ─── Iter 37 — VersionCheckManager.getState() snapshot ──────────────────────
+//
+// The iter-37 IPC channel `versionCheck:state` reads the live state via
+// the manager's `getState()` method. The method existed pre-iter-37 (added
+// in iter 29) but its contract — "always returns the latest transition,
+// including the iter-36 blocked variant" — is now load-bearing for the
+// Settings/About panel. Pinning the round-trip here guards against a
+// regression that would silently downgrade the panel to a stale view.
+
+describe("VersionCheckManager.getState() — iter 37 snapshot contract", () => {
+  function jsonRes(body: unknown, init: ResponseInit = { status: 200 }): Response {
+    return new Response(JSON.stringify(body), {
+      ...init,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  it("returns idle before checkOnce runs", () => {
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () => new Response("{}"),
+    });
+    expect(mgr.getState()).toEqual({ kind: "idle" });
+  });
+
+  it("returns the live update-blocked-by-min-bootstrap verdict after a successful check", async () => {
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () =>
+        jsonRes({
+          version: "1.5.0",
+          minBootstrapVersion: "1.2.0",
+          downloadUrl: "https://rud1.es/desktop/download",
+        }),
+    });
+    await mgr.checkOnce();
+    const s = mgr.getState();
+    expect(s.kind).toBe("update-blocked-by-min-bootstrap");
+    if (s.kind === "update-blocked-by-min-bootstrap") {
+      expect(s.requiredMinVersion).toBe("1.2.0");
+      expect(s.currentVersion).toBe("1.0.0");
+      expect(s.targetVersion).toBe("1.5.0");
+    }
+  });
+
+  it("getState() and the onStateChange callback observe the same state object", async () => {
+    let observed: VersionCheckState | null = null;
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () =>
+        jsonRes({
+          version: "1.5.0",
+          minBootstrapVersion: "1.2.0",
+        }),
+      onStateChange: (s) => {
+        // Capture only the final transition (we expect 'checking' then
+        // the verdict). The contract under test is that the `getState()`
+        // snapshot at end-of-await matches what the listener saw.
+        if (s.kind === "update-blocked-by-min-bootstrap") observed = s;
+      },
+    });
+    await mgr.checkOnce();
+    expect(observed).not.toBeNull();
+    expect(mgr.getState()).toEqual(observed);
   });
 });

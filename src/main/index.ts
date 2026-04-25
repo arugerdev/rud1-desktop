@@ -47,6 +47,8 @@ import { createTray as createTrayInstance, setTrayIcon } from "./tray";
 import {
   VersionCheckManager,
   buildVersionCheckMenuItems,
+  formatBlockedStateMessage,
+  formatVersionCheckSummary,
   type VersionCheckState,
 } from "./version-check-manager";
 import {
@@ -77,6 +79,11 @@ const FIRMWARE_PROBE_INTERVAL_MS = 60_000;
 
 let mainWindow: BrowserWindow | null = null;
 let dedupeWindow: BrowserWindow | null = null;
+// Iter 37 — singleton Settings/About inspector window. Opened from the
+// tray's "Settings & About" entry; reused on subsequent clicks. The
+// renderer subscribes to `versionCheck:update` events broadcast from
+// main so it stays in sync without polling — see `broadcastVersionCheckUpdate`.
+let settingsWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let lastFirmwareProbe: FirmwareProbeResult | null = null;
 let firmwareProbeTimer: NodeJS.Timeout | null = null;
@@ -219,6 +226,15 @@ function rebuildTrayMenu(): void {
   )) {
     items.push(it);
   }
+  // Iter 37 — Settings/About panel entry. Opens the in-app inspector
+  // window that surfaces the live version-check state (in particular the
+  // iter-36 update-blocked-by-min-bootstrap banner) plus links into the
+  // existing iter-28 first-boot dedupe inspector.
+  items.push({ type: "separator" });
+  items.push({
+    label: "Settings & About…",
+    click: () => { showSettingsWindow(); },
+  });
   items.push({ type: "separator" });
   items.push({ label: "Quit", click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));
@@ -532,6 +548,244 @@ function buildDedupeWindowHtml(): string {
   return "data:text/html;charset=utf-8," + encodeURIComponent(html);
 }
 
+// ─── Iter 37 — Settings/About panel ────────────────────────────────────────
+//
+// Surfaces the live `VersionCheckState` (in particular the iter-36
+// `update-blocked-by-min-bootstrap` verdict) in a small inspector window.
+// Reuses the iter-28 data:-URL + trustedWebContentsIds pattern so the
+// origin allowlist isn't weakened. The renderer is a dumb template that
+// reads the state on open, subscribes to push updates, and supports two
+// operations:
+//   • "Copy download URL" → IPC clipboard:writeText (avoids the
+//     navigator.clipboard permission grant for data: origins)
+//   • "What's new" link    → IPC shell:openExternal (allowlisted to
+//     http/https main-side)
+
+function broadcastVersionCheckUpdate(state: VersionCheckState): void {
+  if (!settingsWindow || settingsWindow.isDestroyed()) return;
+  // Defensive clone via JSON round-trip mirrors the IPC handler's
+  // anti-aliasing snapshot — a malicious / buggy renderer that retained a
+  // reference can't mutate the manager's in-memory state through it.
+  try {
+    const snapshot = JSON.parse(JSON.stringify(state)) as VersionCheckState;
+    settingsWindow.webContents.send("versionCheck:update", snapshot);
+  } catch {
+    // best-effort
+  }
+}
+
+function showSettingsWindow(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.focus();
+    return;
+  }
+  settingsWindow = new BrowserWindow({
+    width: 580,
+    height: 540,
+    title: "rud1 — Settings & About",
+    backgroundColor: "#09090b",
+    minimizable: false,
+    maximizable: false,
+    parent: mainWindow ?? undefined,
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  settingsWindow.setMenu(null);
+  // Same trust-bridge rationale as the dedupe inspector: the panel loads
+  // from a `data:` URL whose origin would never pass `isOriginAllowed`,
+  // so we register its webContents id in the trusted set. The main
+  // process opened this window and controls its HTML byte-for-byte.
+  const trustedId = settingsWindow.webContents.id;
+  markWebContentsTrusted(trustedId);
+  settingsWindow.loadURL(buildSettingsWindowHtml());
+  settingsWindow.on("closed", () => {
+    unmarkWebContentsTrusted(trustedId);
+    settingsWindow = null;
+  });
+}
+
+function buildSettingsWindowHtml(): string {
+  // CSP mirrors the dedupe inspector — deny everything by default,
+  // allow inline scripts/styles only (the bridge runs in the isolated
+  // preload context unaffected by document CSP). No connect-src — the
+  // renderer talks only via IPC.
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
+<title>rud1 — Settings & About</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#09090b; color:#e4e4e7; margin:0; padding:20px; font-size:13px; line-height:1.5; }
+  h1 { font-size:15px; font-weight:600; margin:0 0 4px 0; }
+  h2 { font-size:13px; font-weight:600; margin:24px 0 8px 0; color:#e4e4e7; text-transform:uppercase; letter-spacing:0.04em; }
+  p { margin:0 0 8px 0; }
+  .muted { color:#a1a1aa; font-size:12px; }
+  .banner { background:#7f1d1d; color:#fef2f2; padding:12px 14px; border-radius:6px; border:1px solid #b91c1c; margin:0 0 12px 0; font-weight:500; }
+  .banner.warn { background:#78350f; color:#fffbeb; border-color:#b45309; }
+  .banner.ok { background:#14532d; color:#f0fdf4; border-color:#166534; }
+  .summary { padding:8px 0; border-bottom:1px solid #27272a; }
+  .row { display:flex; justify-content:space-between; padding:4px 0; }
+  .row .k { color:#a1a1aa; }
+  .row .v { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  button { background:#27272a; color:#e4e4e7; border:1px solid #3f3f46; border-radius:4px; padding:5px 12px; font-size:12px; cursor:pointer; font-family:inherit; }
+  button:hover { background:#3f3f46; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  button.primary { background:#1d4ed8; border-color:#1e40af; color:#eff6ff; }
+  button.primary:hover { background:#1e40af; }
+  .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  a { color:#93c5fd; cursor:pointer; text-decoration:underline; }
+  a:hover { color:#bfdbfe; }
+  .toast { position:fixed; bottom:14px; right:14px; background:#1d4ed8; color:#eff6ff; padding:8px 12px; border-radius:4px; font-size:12px; opacity:0; transition:opacity 0.2s; pointer-events:none; }
+  .toast.show { opacity:1; }
+  code { font-family: ui-monospace, "SF Mono", Consolas, monospace; background:#27272a; padding:2px 5px; border-radius:3px; font-size:12px; }
+</style>
+</head>
+<body>
+  <h1>Settings &amp; About</h1>
+  <p class="muted">rud1 desktop — operator controls and update status.</p>
+
+  <h2>Updates</h2>
+  <div id="updates"><p class="muted">Loading…</p></div>
+
+  <h2>First-boot notifications</h2>
+  <p class="muted">Manage hosts the desktop app has already notified you about.</p>
+  <div class="actions">
+    <button id="open-dedupe">Open notified-hosts inspector…</button>
+  </div>
+
+  <div id="toast" class="toast" aria-live="polite"></div>
+
+<script>
+  // Settings/About panel renderer. Talks to main exclusively through
+  // window.electronAPI.{versionCheck,clipboard,shell} which are wired up
+  // in preload/index.ts (iter 37).
+  var updatesEl = document.getElementById('updates');
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+  function escape(s) {
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() {
+      toastEl.classList.remove('show');
+    }, 2200);
+  }
+
+  function renderBlocked(state) {
+    // Mirrors formatBlockedStateMessage in version-check-manager.ts.
+    // Kept inline so the renderer is self-contained inside the data URL
+    // — the formatter's contract is what's tested in the main-process
+    // suite; this script only handles the DOM mapping.
+    var banner = 'Download v' + escape(state.requiredMinVersion) + ' manually first to continue receiving updates';
+    var notes = state.releaseNotesUrl
+      ? '<p><a id="rn-link">What\\'s new — view release notes</a></p>'
+      : '';
+    updatesEl.innerHTML =
+      '<div class="banner">' + banner + '</div>' +
+      '<div class="summary">' +
+        '<div class="row"><span class="k">Currently installed</span><span class="v">v' + escape(state.currentVersion) + '</span></div>' +
+        '<div class="row"><span class="k">Target version</span><span class="v">v' + escape(state.targetVersion) + '</span></div>' +
+        '<div class="row"><span class="k">Required intermediate</span><span class="v">v' + escape(state.requiredMinVersion) + '</span></div>' +
+      '</div>' +
+      notes +
+      '<div class="actions">' +
+        '<button id="copy-url" class="primary">Copy download URL</button>' +
+        '<button id="recheck">Check for updates now</button>' +
+      '</div>';
+
+    document.getElementById('copy-url').addEventListener('click', function() {
+      // The download URL the operator needs is the published page for
+      // the bridge build — we don't have a precise per-version URL in
+      // the manifest schema yet (iter 36 only carries the version
+      // string), so we copy the version-anchored hint and the operator
+      // pastes into a browser. A future schema rev may add an explicit
+      // bridgeDownloadUrl per minBootstrapVersion.
+      var url = state.releaseNotesUrl || ('https://rud1.es/desktop/download?version=' + encodeURIComponent(state.requiredMinVersion));
+      window.electronAPI.clipboard.writeText(url).then(function(res) {
+        if (res && res.ok) toast('Copied download URL to clipboard');
+        else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+      });
+    });
+    document.getElementById('recheck').addEventListener('click', function() {
+      window.electronAPI.versionCheck.recheck();
+      toast('Re-checking for updates…');
+    });
+    if (state.releaseNotesUrl) {
+      document.getElementById('rn-link').addEventListener('click', function() {
+        window.electronAPI.shell.openExternal(state.releaseNotesUrl);
+      });
+    }
+  }
+
+  function renderState(state) {
+    if (!state) {
+      updatesEl.innerHTML = '<p class="muted">Update status unavailable.</p>';
+      return;
+    }
+    if (state.kind === 'update-blocked-by-min-bootstrap') {
+      renderBlocked(state);
+      return;
+    }
+    var summary = '';
+    var bannerCls = '';
+    if (state.kind === 'idle') summary = 'Update check has not run yet.';
+    else if (state.kind === 'checking') summary = 'Checking for updates…';
+    else if (state.kind === 'up-to-date') {
+      summary = 'Up to date (v' + escape(state.current) + ').';
+      bannerCls = 'ok';
+    }
+    else if (state.kind === 'update-available') {
+      summary = 'Update available — v' + escape(state.latest) + ' (currently v' + escape(state.current) + ').';
+      bannerCls = 'warn';
+    }
+    else if (state.kind === 'error') summary = "Couldn't check for updates: " + escape(state.message);
+    var banner = bannerCls ? '<div class="banner ' + bannerCls + '">' + summary + '</div>' : '<p>' + summary + '</p>';
+    updatesEl.innerHTML = banner +
+      '<div class="actions">' +
+        '<button id="recheck">Check for updates now</button>' +
+      '</div>';
+    document.getElementById('recheck').addEventListener('click', function() {
+      window.electronAPI.versionCheck.recheck();
+      toast('Re-checking for updates…');
+    });
+  }
+
+  // Initial fetch + subscribe to push updates from main.
+  window.electronAPI.versionCheck.state().then(function(res) {
+    if (res && res.ok) renderState(res.result);
+    else renderState(null);
+  });
+  if (typeof window.electronAPI.versionCheck.onUpdate === 'function') {
+    window.electronAPI.versionCheck.onUpdate(function(state) { renderState(state); });
+  }
+
+  // Dedupe inspector launcher — this just opens the existing iter-28
+  // window. There is no IPC for "open dedupe inspector" today, so we
+  // fall back to listing + offering a hint if the inspector isn't
+  // accessible from here.
+  document.getElementById('open-dedupe').addEventListener('click', function() {
+    // No direct IPC: surface a hint that the inspector is on the tray
+    // submenu. This is honest about the iter-28 boundary without
+    // pretending we can launch it from a sibling panel.
+    toast('Open from the tray menu → First-boot notifications');
+  });
+</script>
+</body>
+</html>`;
+  return "data:text/html;charset=utf-8," + encodeURIComponent(html);
+}
+
 // notifyFirstBootDevice fires a single OS notification when a first-boot
 // rud1 appears on the LAN. Clicking the notification opens the device's
 // setup URL in the system browser — same destination as the tray entry,
@@ -567,6 +821,20 @@ app.whenReady().then(() => {
       list: () => notifiedHosts,
       clearHost: (host) => clearNotifiedHost(host),
       clearAll: () => clearAllNotifiedHosts(),
+    },
+    // Iter 37 — Settings/About panel surface. Late-bound: the manager is
+    // constructed a few lines below inside this same whenReady block, so
+    // the accessor closures snapshot `versionCheckManager` at call time
+    // rather than at registrar time. `getState` falls back to the cached
+    // `lastVersionCheckState` if the manager is null (shouldn't happen at
+    // runtime — it's set immediately below — but the fallback keeps the
+    // typing honest).
+    versionCheck: {
+      getState: () =>
+        versionCheckManager ? versionCheckManager.getState() : lastVersionCheckState,
+      recheck: () => {
+        void versionCheckManager?.checkOnce();
+      },
     },
   });
   mainWindow = createWindow();
@@ -614,6 +882,11 @@ app.whenReady().then(() => {
     onStateChange: (state) => {
       lastVersionCheckState = state;
       rebuildTrayMenu();
+      // Iter 37 — push the new state to the Settings/About panel if it's
+      // open so the operator sees verdict transitions (idle → checking →
+      // update-blocked-by-min-bootstrap, etc.) without reopening the
+      // window. Best-effort: a closed panel is a no-op.
+      broadcastVersionCheckUpdate(state);
     },
   });
   versionCheckManager.start();

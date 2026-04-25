@@ -784,4 +784,56 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () => ipcRenderer.removeListener("firstBootDedupe:update", listener);
     },
   },
+
+  // Iter 37 — Settings/About panel "Updates" section. Surfaces the live
+  // `VersionCheckState` to a small inspector window opened from the tray
+  // submenu. The blocked-by-min-bootstrap state in particular is the
+  // headline addition: an operator running an old enough version sees a
+  // banner with a "Copy download URL" button (clipboard via IPC) so they
+  // can install the bridge build manually.
+  //   state    — read the current VersionCheckState
+  //   recheck  — trigger an immediate refetch of the manifest
+  //   onUpdate — subscribe to push updates broadcast by main on every
+  //              state transition (no polling required)
+  versionCheck: {
+    state: () =>
+      ipcRenderer.invoke("versionCheck:state") as Promise<
+        | { ok: true; result: import("../main/version-check-manager").VersionCheckState }
+        | { ok: false; error: string }
+      >,
+    recheck: () =>
+      ipcRenderer.invoke("versionCheck:recheck") as Promise<
+        | { ok: true }
+        | { ok: false; error: string }
+      >,
+    onUpdate: (
+      cb: (state: import("../main/version-check-manager").VersionCheckState) => void,
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: import("../main/version-check-manager").VersionCheckState,
+      ) => cb(state);
+      ipcRenderer.on("versionCheck:update", listener);
+      return () => ipcRenderer.removeListener("versionCheck:update", listener);
+    },
+  },
+
+  // Iter 37 — clipboard + shell:openExternal for the Settings/About panel.
+  // `clipboard.writeText` is invoked from main rather than the renderer's
+  // `navigator.clipboard` so the data:-URL panel doesn't need a permission
+  // grant. `shell.openExternal` is allowlisted main-side to http/https only.
+  clipboard: {
+    writeText: (text: string) =>
+      ipcRenderer.invoke("clipboard:writeText", text) as Promise<
+        | { ok: true }
+        | { ok: false; error: string }
+      >,
+  },
+  shell: {
+    openExternal: (url: string) =>
+      ipcRenderer.invoke("shell:openExternal", url) as Promise<
+        | { ok: true }
+        | { ok: false; error: string }
+      >,
+  },
 });

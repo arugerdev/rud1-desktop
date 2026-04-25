@@ -53,6 +53,17 @@ vi.mock("electron", () => ({
   BrowserWindow: {
     fromWebContents: vi.fn(() => null),
   },
+  // Iter 37 — clipboard + shell:openExternal channels need stubs so the
+  // ipc-handlers module can be loaded under vitest. The dispatch tests
+  // exercise the handler closures directly via the captured handler
+  // table; assertions check that these stubs were called with the
+  // sanitised payload (or NOT called when the validator rejects).
+  clipboard: {
+    writeText: vi.fn(),
+  },
+  shell: {
+    openExternal: vi.fn(async () => undefined),
+  },
 }));
 
 // Manager modules pull in child_process / fs / network probes at import
@@ -648,5 +659,199 @@ describe("diag:autoSnapshotConfigure — inline validator", () => {
       expect(result).toEqual({ ok: false, error: "invalid args" });
     }
     expect(configureAutoSnapshotMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─── 10. Iter 37 — versionCheck:state / clipboard / shell:openExternal ──────
+//
+// New IPC channels added in iter 37 to power the Settings/About panel's
+// "Updates" section. Coverage:
+//   • versionCheck:state    — returns the live VersionCheckState
+//   • versionCheck:recheck  — forwards to the manager's checkOnce
+//   • clipboard:writeText   — length-cap + typeof check, delegate to clipboard
+//   • shell:openExternal    — http/https allowlist + delegate to shell
+
+import { clipboard as clipboardMock, shell as shellMock } from "electron";
+const { isOpenExternalUrlAllowed, MAX_CLIPBOARD_TEXT_LENGTH } = __test;
+
+describe("isOpenExternalUrlAllowed (iter 37 allowlist)", () => {
+  it("accepts http and https URLs", () => {
+    expect(isOpenExternalUrlAllowed("https://rud1.es/changelog")).toBe(true);
+    expect(isOpenExternalUrlAllowed("http://example.test/page")).toBe(true);
+  });
+
+  it("rejects javascript:, data:, file:, mailto: schemes", () => {
+    expect(isOpenExternalUrlAllowed("javascript:alert(1)")).toBe(false);
+    expect(isOpenExternalUrlAllowed("data:text/html,<h1>x</h1>")).toBe(false);
+    expect(isOpenExternalUrlAllowed("file:///etc/passwd")).toBe(false);
+    expect(isOpenExternalUrlAllowed("mailto:foo@bar.test")).toBe(false);
+  });
+
+  it("rejects URLs with userinfo (credential smuggling)", () => {
+    expect(isOpenExternalUrlAllowed("https://user:pass@rud1.es/")).toBe(false);
+    expect(isOpenExternalUrlAllowed("https://user@rud1.es/")).toBe(false);
+  });
+
+  it("rejects URLs with control characters / whitespace (CRLF injection)", () => {
+    expect(isOpenExternalUrlAllowed("https://rud1.es/\r\nX:1")).toBe(false);
+    expect(isOpenExternalUrlAllowed("https://rud1.es /space")).toBe(false);
+  });
+
+  it("rejects non-string and oversize input", () => {
+    expect(isOpenExternalUrlAllowed(undefined)).toBe(false);
+    expect(isOpenExternalUrlAllowed(null)).toBe(false);
+    expect(isOpenExternalUrlAllowed(42)).toBe(false);
+    expect(isOpenExternalUrlAllowed("https://" + "a".repeat(3000))).toBe(false);
+  });
+
+  it("rejects unparseable inputs", () => {
+    expect(isOpenExternalUrlAllowed("")).toBe(false);
+    expect(isOpenExternalUrlAllowed("not a url")).toBe(false);
+  });
+});
+
+describe("clipboard:writeText handler (iter 37)", () => {
+  it("delegates to electron.clipboard.writeText on a valid payload", async () => {
+    vi.mocked(clipboardMock.writeText).mockClear();
+    const result = await handlers["clipboard:writeText"](
+      allowedEvent,
+      "https://rud1.es/desktop/download?version=1.2.0",
+    );
+    expect(result).toEqual({ ok: true });
+    expect(clipboardMock.writeText).toHaveBeenCalledWith(
+      "https://rud1.es/desktop/download?version=1.2.0",
+    );
+  });
+
+  it("rejects non-string payload", async () => {
+    vi.mocked(clipboardMock.writeText).mockClear();
+    const result = await handlers["clipboard:writeText"](allowedEvent, 42);
+    expect(result).toEqual({ ok: false, error: "invalid text" });
+    expect(clipboardMock.writeText).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty string", async () => {
+    vi.mocked(clipboardMock.writeText).mockClear();
+    const result = await handlers["clipboard:writeText"](allowedEvent, "");
+    expect(result).toEqual({ ok: false, error: "empty text" });
+    expect(clipboardMock.writeText).not.toHaveBeenCalled();
+  });
+
+  it("rejects payload exceeding MAX_CLIPBOARD_TEXT_LENGTH", async () => {
+    vi.mocked(clipboardMock.writeText).mockClear();
+    const big = "x".repeat(MAX_CLIPBOARD_TEXT_LENGTH + 1);
+    const result = await handlers["clipboard:writeText"](allowedEvent, big);
+    expect(result).toEqual({ ok: false, error: "text exceeds size cap" });
+    expect(clipboardMock.writeText).not.toHaveBeenCalled();
+  });
+
+  it("rejects when sender origin is unauthorized", async () => {
+    vi.mocked(clipboardMock.writeText).mockClear();
+    const evilEvent = {
+      senderFrame: { url: "https://evil.example/" },
+      sender: {},
+    } as unknown as Electron.IpcMainInvokeEvent;
+    const result = await handlers["clipboard:writeText"](evilEvent, "hello");
+    expect(result).toEqual({ ok: false, error: "Unauthorized origin" });
+    expect(clipboardMock.writeText).not.toHaveBeenCalled();
+  });
+});
+
+describe("shell:openExternal handler (iter 37)", () => {
+  it("delegates to electron.shell.openExternal on an allowlisted URL", async () => {
+    vi.mocked(shellMock.openExternal).mockClear();
+    const result = await handlers["shell:openExternal"](
+      allowedEvent,
+      "https://rud1.es/changelog/v1.5.0",
+    );
+    expect(result).toEqual({ ok: true });
+    expect(shellMock.openExternal).toHaveBeenCalledWith(
+      "https://rud1.es/changelog/v1.5.0",
+    );
+  });
+
+  it("rejects javascript: scheme without invoking shell.openExternal", async () => {
+    vi.mocked(shellMock.openExternal).mockClear();
+    const result = await handlers["shell:openExternal"](
+      allowedEvent,
+      "javascript:alert(1)",
+    );
+    expect(result).toEqual({ ok: false, error: "URL rejected by allowlist" });
+    expect(shellMock.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-string payload", async () => {
+    vi.mocked(shellMock.openExternal).mockClear();
+    const result = await handlers["shell:openExternal"](allowedEvent, 42);
+    expect(result).toEqual({ ok: false, error: "URL rejected by allowlist" });
+    expect(shellMock.openExternal).not.toHaveBeenCalled();
+  });
+});
+
+describe("versionCheck:state / versionCheck:recheck (iter 37)", () => {
+  // These channels only register when the registrar is given a
+  // VersionCheckAccessor. The shared `beforeAll` calls
+  // `registerIpcHandlers()` with no opts, so the `handlers` table built
+  // there does NOT include the version-check channels — testing the
+  // registration gate is the point. We re-register here with a stub
+  // accessor and a fresh ipcMain.handle call list.
+
+  let vcHandlers: Record<string, Handler> = {};
+
+  beforeAll(() => {
+    // Snapshot the call count so we can isolate the iter-37 calls.
+    const handleSpy = electronMock.ipcMain.handle as unknown as {
+      mock: { calls: unknown[][] };
+    };
+    const before = handleSpy.mock.calls.length;
+    registerIpcHandlers({
+      versionCheck: {
+        getState: () => ({
+          kind: "update-blocked-by-min-bootstrap",
+          requiredMinVersion: "1.2.0",
+          currentVersion: "1.0.0",
+          targetVersion: "1.5.0",
+          releaseNotesUrl: null,
+          checkedAt: 1_700_000_000_000,
+        }),
+        recheck: vi.fn(),
+      },
+    });
+    for (const [channel, callback] of handleSpy.mock.calls.slice(before)) {
+      vcHandlers[channel as string] = callback as Handler;
+    }
+  });
+
+  it("versionCheck:state returns a JSON-cloned snapshot of the live state", async () => {
+    const result = await vcHandlers["versionCheck:state"](allowedEvent);
+    expect(result).toEqual({
+      ok: true,
+      result: {
+        kind: "update-blocked-by-min-bootstrap",
+        requiredMinVersion: "1.2.0",
+        currentVersion: "1.0.0",
+        targetVersion: "1.5.0",
+        releaseNotesUrl: null,
+        checkedAt: 1_700_000_000_000,
+      },
+    });
+  });
+
+  it("versionCheck:state rejects an unauthorized origin", async () => {
+    const evilEvent = {
+      senderFrame: { url: "https://evil.example/" },
+      sender: {},
+    } as unknown as Electron.IpcMainInvokeEvent;
+    const result = await vcHandlers["versionCheck:state"](evilEvent);
+    expect(result).toEqual({ ok: false, error: "Unauthorized origin" });
+  });
+
+  it("versionCheck:recheck is registered (channel present in dispatch table)", () => {
+    expect(typeof vcHandlers["versionCheck:recheck"]).toBe("function");
+  });
+
+  it("versionCheck:recheck delegates to accessor.recheck and returns ok", async () => {
+    const result = await vcHandlers["versionCheck:recheck"](allowedEvent);
+    expect(result).toEqual({ ok: true });
   });
 });

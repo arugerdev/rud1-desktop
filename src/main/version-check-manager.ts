@@ -903,6 +903,92 @@ export function buildVersionCheckMenuItems(
   ];
 }
 
+// ─── Iter 37 — Settings/About panel formatters ──────────────────────────────
+//
+// Pure helpers consumed by the Settings/About data-URL window's "Updates"
+// section. Extracted out of the HTML template so the copy is unit-testable
+// without spinning up a renderer. Each helper takes a fully-typed
+// `VersionCheckState` (or one of its variants) and returns a plain
+// presentation object — the renderer is a dumb mapper from these shapes to
+// DOM nodes.
+//
+// The blocked-state copy is the headline: a clear "Download v{X} manually
+// first" call to action plus the installed/target version pair so the
+// operator can confirm they're following the right migration ladder.
+
+export interface BlockedStateMessage {
+  /** Headline banner copy. */
+  banner: string;
+  /** "Currently installed: v…" caption row. */
+  currentLine: string;
+  /** "Target: v…" caption row. */
+  targetLine: string;
+  /** The download URL the "Copy download URL" button copies, or null. */
+  downloadHint: string;
+  /** When non-null, a "What's new" changelog URL the renderer surfaces. */
+  releaseNotesUrl: string | null;
+}
+
+/**
+ * Format the iter-36 `update-blocked-by-min-bootstrap` state into the copy
+ * the iter-37 Settings/About panel renders. Pure: no DOM, no Electron.
+ *
+ * Rationale for keeping this a separate helper:
+ *   • the HTML template builder in index.ts can stay a string-concat path
+ *     (no logic interleaved with markup, easier to scan for XSS holes);
+ *   • unit tests can pin the exact operator-facing copy without parsing
+ *     HTML — a regression in the headline ("Update blocked" vs "Download
+ *     v… first") is loudly caught;
+ *   • a future iter that retitles or i18n's the panel only needs to swap
+ *     this function out, not re-grep the template.
+ *
+ * The download-URL hint is intentionally NOT a clickable URL in the copy
+ * — the operator copies it via the "Copy download URL" button (clipboard
+ * IPC) and pastes into a browser or installer. This avoids the
+ * data:-origin permission grant that `navigator.clipboard.writeText` would
+ * otherwise require.
+ */
+export function formatBlockedStateMessage(
+  state: VersionCheckState & { kind: "update-blocked-by-min-bootstrap" },
+): BlockedStateMessage {
+  return {
+    banner: `Download v${state.requiredMinVersion} manually first to continue receiving updates`,
+    currentLine: `Currently installed: v${state.currentVersion}`,
+    targetLine: `Target: v${state.targetVersion}`,
+    downloadHint: `Manual download required for v${state.requiredMinVersion}`,
+    releaseNotesUrl: state.releaseNotesUrl,
+  };
+}
+
+/**
+ * Build the headline copy for the non-blocked verdicts. Returned as a
+ * single string the panel can render in a paragraph; the blocked state has
+ * its own structured message via `formatBlockedStateMessage`.
+ *
+ * Iter 37 — kept brief; the blocked path is the main feature of this
+ * iter, the others are nice-to-have for context. The strings are
+ * semantically equivalent to the tray-menu rows from `buildVersionCheckMenuItems`
+ * but reworded to fit a panel paragraph (no leading triangle, etc.).
+ */
+export function formatVersionCheckSummary(state: VersionCheckState): string {
+  switch (state.kind) {
+    case "idle":
+      return "Update check has not run yet.";
+    case "checking":
+      return "Checking for updates…";
+    case "up-to-date":
+      return `Up to date (v${state.current}).`;
+    case "update-available":
+      return `Update available — v${state.latest} (currently v${state.current}).`;
+    case "update-blocked-by-min-bootstrap":
+      // Headline summary; the full blocked-state UI is rendered from
+      // `formatBlockedStateMessage` and a dedicated banner.
+      return `Update blocked: install v${state.requiredMinVersion} manually first.`;
+    case "error":
+      return `Couldn't check for updates: ${state.message}`;
+  }
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -931,4 +1017,7 @@ export const __test = {
   compareSemver,
   formatBytes,
   progressBar,
+  // Iter 37 — Settings/About formatters.
+  formatBlockedStateMessage,
+  formatVersionCheckSummary,
 };
