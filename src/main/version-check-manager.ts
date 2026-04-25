@@ -1377,12 +1377,26 @@ export interface BlockedDiagnosticsState {
 export function buildBlockedDiagnosticsBlob(
   state: BlockedDiagnosticsState,
   capturedAtMs: number,
+  runtimeAppVersion?: string | null,
 ): string {
   const hint = formatBlockedHashHint(state);
+  // Iter 45: runtimeAppVersion (typically `app.getVersion()` at copy
+  // time) overrides `state.currentVersion` when provided. The state's
+  // `currentVersion` is what the version-check stored at fetch time,
+  // which under iter-30+ bridge-only update paths can drift from the
+  // running app's actual version (e.g. when a manifest fetch lands a
+  // new bridge but the Electron app hasn't restarted to pick up the
+  // new version yet). When the runtime value is missing or empty, we
+  // fall back to `state.currentVersion` so legacy callers + tests
+  // keep round-tripping byte-for-byte.
+  const currentVersion =
+    typeof runtimeAppVersion === "string" && runtimeAppVersion.length > 0
+      ? runtimeAppVersion
+      : state.currentVersion;
   const envelope = {
     capturedAt: new Date(capturedAtMs).toISOString(),
     kind: "update-blocked-by-min-bootstrap" as const,
-    currentVersion: state.currentVersion,
+    currentVersion,
     targetVersion: state.targetVersion,
     requiredMinVersion: state.requiredMinVersion,
     downloadUrl: pickDownloadUrl(state),
@@ -1484,12 +1498,21 @@ export function buildUpToDateDiagnosticsBlob(
 export function buildUpdateAvailableDiagnosticsBlob(
   state: UpdateAvailableDiagnosticsState,
   capturedAtMs: number,
+  runtimeAppVersion?: string | null,
 ): string {
   const hint = formatBlockedHashHint({ bridgeSha256: state.bridgeSha256 });
+  // Iter 45: runtimeAppVersion (typically `app.getVersion()` at copy
+  // time) overrides `state.current` when provided — same rationale
+  // as `buildBlockedDiagnosticsBlob`. Fallback preserved so legacy
+  // callers + iter-43 tests round-trip byte-for-byte.
+  const currentVersion =
+    typeof runtimeAppVersion === "string" && runtimeAppVersion.length > 0
+      ? runtimeAppVersion
+      : state.current;
   const envelope = {
     capturedAt: new Date(capturedAtMs).toISOString(),
     kind: "update-available" as const,
-    currentVersion: state.current,
+    currentVersion,
     targetVersion: state.latest,
     // Re-route through pickDownloadUrl so the operator-side precedence
     // chain stays the source of truth. The iter-30 `downloadUrl` field

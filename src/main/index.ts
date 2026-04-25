@@ -846,10 +846,24 @@ function buildSettingsWindowHtml(currentVersion: string): string {
       else if (state.bridgeDownloadUrl && isAllowed2(state.bridgeDownloadUrl)) url2 = state.bridgeDownloadUrl;
       else if (state.releaseNotesUrl) url2 = state.releaseNotesUrl;
       else url2 = 'https://rud1.es/desktop/download?version=' + encodeURIComponent(minV2);
+      // Iter 45 — currentVersion sourced from APP_VERSION (threaded
+      // through from app.getVersion() at HTML build time) when
+      // available, falling back to state.currentVersion for parity
+      // with the helper's legacy behaviour. Same rationale as the
+      // iter-44 error-verdict thread: the stored state value is what
+      // the version-check stored at fetch time, which under iter-30+
+      // bridge-only update paths can drift from the running app's
+      // actual version. The defensive fallback keeps the iter-42
+      // key-ordering pin holding byte-for-byte even when APP_VERSION
+      // is somehow null/empty (shouldn't happen in production but
+      // protects against a bad HTML rebuild).
+      var currentVersion2 = (typeof APP_VERSION === 'string' && APP_VERSION.length > 0)
+        ? APP_VERSION
+        : state.currentVersion;
       var envelope = {
         capturedAt: new Date().toISOString(),
         kind: 'update-blocked-by-min-bootstrap',
-        currentVersion: state.currentVersion,
+        currentVersion: currentVersion2,
         targetVersion: state.targetVersion,
         requiredMinVersion: state.requiredMinVersion,
         downloadUrl: url2,
@@ -963,10 +977,20 @@ function buildSettingsWindowHtml(currentVersion: string): string {
           var hashHex3 = (typeof rawHash3 === 'string' && /^[0-9a-f]{64}$/i.test(rawHash3))
             ? rawHash3.toLowerCase()
             : null;
+          // Iter 45 — currentVersion sourced from APP_VERSION
+          // (threaded through from app.getVersion() at HTML build
+          // time) when available, falling back to state.current for
+          // parity with the helper's legacy behaviour. Same rationale
+          // as the iter-44 error-verdict thread: state.current is the
+          // version the manifest fetch saw, which can drift from the
+          // running app's actual version under bridge-only updates.
+          var currentVersion3 = (typeof APP_VERSION === 'string' && APP_VERSION.length > 0)
+            ? APP_VERSION
+            : state.current;
           envelope = {
             capturedAt: new Date().toISOString(),
             kind: 'update-available',
-            currentVersion: state.current,
+            currentVersion: currentVersion3,
             targetVersion: state.latest,
             downloadUrl: url3,
             bridgeSha256: hashHex3,

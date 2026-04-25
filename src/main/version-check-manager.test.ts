@@ -3007,3 +3007,217 @@ describe("buildErrorDiagnosticsBlob — currentVersion threading (iter 44)", () 
     expect(JSON.parse(helperBlob).currentVersion).toBe(APP_VERSION);
   });
 });
+
+describe("buildBlockedDiagnosticsBlob — currentVersion threading (iter 45)", () => {
+  // Iter 45 — extend the iter-44 APP_VERSION thread to the blocked
+  // verdict. Unlike `error`, the blocked state DOES carry
+  // `currentVersion` natively (sourced from the version-check at
+  // fetch time), so the helper's legacy path is to read off state.
+  // The optional `runtimeAppVersion` parameter overrides that when
+  // provided — the rationale being that under iter-30+ bridge-only
+  // update paths, the manifest fetch's stored version can drift from
+  // the running app's actual `app.getVersion()` truth between
+  // restarts. Three specs mirror the iter-44 contract: threaded value
+  // wins; missing/empty falls back to state; inline renderer rebuild
+  // matches helper byte-for-byte.
+  const { buildBlockedDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+
+  const baseState = {
+    currentVersion: "1.4.0",
+    targetVersion: "2.1.0",
+    requiredMinVersion: "1.7.0",
+    bridgeDownloadUrl: "https://rud1.es/desktop/v2.1.0.dmg",
+  };
+
+  it("threading runtimeAppVersion overrides state.currentVersion in the envelope", () => {
+    const out = JSON.parse(
+      buildBlockedDiagnosticsBlob(baseState, FIXED_AT, "1.5.2"),
+    );
+    expect(out.currentVersion).toBe("1.5.2");
+    // Other fields are still pulled off state — only currentVersion
+    // is overridden.
+    expect(out.targetVersion).toBe("2.1.0");
+    expect(out.requiredMinVersion).toBe("1.7.0");
+    // Iter-42 key ordering (capturedAt → kind → currentVersion →
+    // targetVersion → requiredMinVersion → downloadUrl → ...) MUST be
+    // preserved.
+    const blob = buildBlockedDiagnosticsBlob(baseState, FIXED_AT, "1.5.2");
+    const order = [
+      '"kind"',
+      '"currentVersion"',
+      '"targetVersion"',
+      '"requiredMinVersion"',
+      '"downloadUrl"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("omitting runtimeAppVersion falls back to state.currentVersion (legacy iter-42 path)", () => {
+    const blobLegacy = buildBlockedDiagnosticsBlob(baseState, FIXED_AT);
+    const blobUndefined = buildBlockedDiagnosticsBlob(
+      baseState,
+      FIXED_AT,
+      undefined,
+    );
+    const blobNull = buildBlockedDiagnosticsBlob(baseState, FIXED_AT, null);
+    const blobEmpty = buildBlockedDiagnosticsBlob(baseState, FIXED_AT, "");
+    // All four byte-for-byte identical to the iter-42 helper output —
+    // legacy callers and existing test fixtures keep round-tripping
+    // unchanged.
+    expect(blobLegacy).toBe(blobUndefined);
+    expect(blobLegacy).toBe(blobNull);
+    expect(blobLegacy).toBe(blobEmpty);
+    expect(JSON.parse(blobLegacy).currentVersion).toBe("1.4.0");
+  });
+
+  it("inline renderer rebuild with APP_VERSION matches the helper byte-for-byte", () => {
+    // Mirrors the iter-45 inline rebuild in src/main/index.ts. The
+    // panel reads APP_VERSION (JSON-encoded app.getVersion()) and
+    // prefers it over `state.currentVersion`. We hand-build the same
+    // envelope here with the SAME defensive guard the renderer uses
+    // (typeof + length>0) and assert parity with the helper output.
+    const APP_VERSION = "3.0.0-rc.4";
+    const fakeState = {
+      ...baseState,
+      releaseNotesUrl: null as string | null,
+      manifestVersion: 2 as number | null,
+    };
+    const capturedAt = new Date(FIXED_AT).toISOString();
+    // Inline renderer's pickDownloadUrl branch — for this fixture the
+    // scalar branch wins since no keyed map / releaseNotes is set.
+    const url2 = fakeState.bridgeDownloadUrl;
+    const inlineCurrentVersion =
+      typeof APP_VERSION === "string" && APP_VERSION.length > 0
+        ? APP_VERSION
+        : fakeState.currentVersion;
+    const inlineEnvelope = {
+      capturedAt,
+      kind: "update-blocked-by-min-bootstrap" as const,
+      currentVersion: inlineCurrentVersion,
+      targetVersion: fakeState.targetVersion,
+      requiredMinVersion: fakeState.requiredMinVersion,
+      downloadUrl: url2,
+      bridgeSha256: null,
+      releaseNotesUrl: fakeState.releaseNotesUrl ?? null,
+      manifestVersion: fakeState.manifestVersion ?? null,
+    };
+    const inlineBlob = JSON.stringify(inlineEnvelope, null, 2);
+    const helperBlob = buildBlockedDiagnosticsBlob(
+      fakeState,
+      FIXED_AT,
+      APP_VERSION,
+    );
+    expect(inlineBlob).toBe(helperBlob);
+    expect(JSON.parse(helperBlob).currentVersion).toBe(APP_VERSION);
+  });
+});
+
+describe("buildUpdateAvailableDiagnosticsBlob — currentVersion threading (iter 45)", () => {
+  // Iter 45 — same rationale as the blocked-verdict thread above.
+  // The update-available state DOES carry `current` natively, but
+  // the manifest's stored version can drift from the running app's
+  // actual `app.getVersion()` under bridge-only update paths.
+  const { buildUpdateAvailableDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+
+  const baseState = {
+    current: "1.4.0",
+    latest: "1.5.0",
+    downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+    releaseNotesUrl: null as string | null,
+    bridgeSha256: null as string | null,
+    manifestVersion: 2 as number | null,
+  };
+
+  it("threading runtimeAppVersion overrides state.current in the envelope", () => {
+    const out = JSON.parse(
+      buildUpdateAvailableDiagnosticsBlob(baseState, FIXED_AT, "1.4.1"),
+    );
+    expect(out.currentVersion).toBe("1.4.1");
+    expect(out.targetVersion).toBe("1.5.0");
+    // iter-43 key ordering preserved (capturedAt → kind →
+    // currentVersion → targetVersion → downloadUrl → bridgeSha256 →
+    // releaseNotesUrl → manifestVersion).
+    const blob = buildUpdateAvailableDiagnosticsBlob(
+      baseState,
+      FIXED_AT,
+      "1.4.1",
+    );
+    const order = [
+      '"kind"',
+      '"currentVersion"',
+      '"targetVersion"',
+      '"downloadUrl"',
+      '"bridgeSha256"',
+      '"releaseNotesUrl"',
+      '"manifestVersion"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("omitting runtimeAppVersion falls back to state.current (legacy iter-43 path)", () => {
+    const blobLegacy = buildUpdateAvailableDiagnosticsBlob(baseState, FIXED_AT);
+    const blobUndefined = buildUpdateAvailableDiagnosticsBlob(
+      baseState,
+      FIXED_AT,
+      undefined,
+    );
+    const blobNull = buildUpdateAvailableDiagnosticsBlob(
+      baseState,
+      FIXED_AT,
+      null,
+    );
+    const blobEmpty = buildUpdateAvailableDiagnosticsBlob(
+      baseState,
+      FIXED_AT,
+      "",
+    );
+    expect(blobLegacy).toBe(blobUndefined);
+    expect(blobLegacy).toBe(blobNull);
+    expect(blobLegacy).toBe(blobEmpty);
+    expect(JSON.parse(blobLegacy).currentVersion).toBe("1.4.0");
+  });
+
+  it("inline renderer rebuild with APP_VERSION matches the helper byte-for-byte", () => {
+    // Mirrors the iter-45 inline rebuild for the update-available
+    // verdict — same threading discipline as the blocked verdict
+    // above. Hand-built envelope matches the helper byte-for-byte.
+    const APP_VERSION = "3.0.0-rc.4";
+    const capturedAt = new Date(FIXED_AT).toISOString();
+    // pickDownloadUrl behaviour for this fixture: scalar branch wins.
+    const url3 = baseState.downloadUrl;
+    const inlineCurrentVersion =
+      typeof APP_VERSION === "string" && APP_VERSION.length > 0
+        ? APP_VERSION
+        : baseState.current;
+    const inlineEnvelope = {
+      capturedAt,
+      kind: "update-available" as const,
+      currentVersion: inlineCurrentVersion,
+      targetVersion: baseState.latest,
+      downloadUrl: url3,
+      bridgeSha256: null,
+      releaseNotesUrl: baseState.releaseNotesUrl ?? null,
+      manifestVersion: baseState.manifestVersion ?? null,
+    };
+    const inlineBlob = JSON.stringify(inlineEnvelope, null, 2);
+    const helperBlob = buildUpdateAvailableDiagnosticsBlob(
+      baseState,
+      FIXED_AT,
+      APP_VERSION,
+    );
+    expect(inlineBlob).toBe(helperBlob);
+    expect(JSON.parse(helperBlob).currentVersion).toBe(APP_VERSION);
+  });
+});
