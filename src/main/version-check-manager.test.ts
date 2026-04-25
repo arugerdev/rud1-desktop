@@ -1940,3 +1940,254 @@ describe("Settings panel — Copy download URL precedence (iter 38)", () => {
     );
   });
 });
+
+// ─── Iter 39 — bridgeDownloadUrls map (per-minBootstrapVersion) ──────────────
+//
+// Promotes the iter-38 scalar bridgeDownloadUrl to a keyed map so a
+// fleet manifest can ship one document and still route every device to
+// the right bootstrap installer. The scalar stays as a fallback for
+// unkeyed manifests; the keyed lookup wins ONLY when an exact match
+// exists for the device's `requiredMinVersion`.
+
+describe("parseManifest — bridgeDownloadUrls map (iter 39)", () => {
+  it("preserves a fully valid 3-key map", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeDownloadUrls: {
+        "1.0.0": "https://rud1.es/desktop/bridge/v1.0.0",
+        "1.2.0": "https://rud1.es/desktop/bridge/v1.2.0",
+        "1.4.1": "https://rud1.es/desktop/bridge/v1.4.1",
+      },
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeDownloadUrls).toEqual({
+      "1.0.0": "https://rud1.es/desktop/bridge/v1.0.0",
+      "1.2.0": "https://rud1.es/desktop/bridge/v1.2.0",
+      "1.4.1": "https://rud1.es/desktop/bridge/v1.4.1",
+    });
+  });
+
+  it("drops only the entry with an invalid URL value, retains the others", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeDownloadUrls: {
+        "1.0.0": "https://rud1.es/desktop/bridge/v1.0.0",
+        "1.2.0": "javascript:alert(1)", // bad — silently dropped
+        "1.4.1": "https://rud1.es/desktop/bridge/v1.4.1",
+      },
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeDownloadUrls).toEqual({
+      "1.0.0": "https://rud1.es/desktop/bridge/v1.0.0",
+      "1.4.1": "https://rud1.es/desktop/bridge/v1.4.1",
+    });
+  });
+
+  it("drops only the entry whose key is not semver-shaped, retains the others", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeDownloadUrls: {
+        "1.0.0": "https://rud1.es/desktop/bridge/v1.0.0",
+        "not-a-version": "https://rud1.es/desktop/bridge/x", // bad key — dropped
+        "1.4.1": "https://rud1.es/desktop/bridge/v1.4.1",
+      },
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeDownloadUrls).toEqual({
+      "1.0.0": "https://rud1.es/desktop/bridge/v1.0.0",
+      "1.4.1": "https://rud1.es/desktop/bridge/v1.4.1",
+    });
+  });
+
+  it("rejects the whole manifest when bridgeDownloadUrls is the wrong TYPE (string)", () => {
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        bridgeDownloadUrls: "https://rud1.es/desktop/bridge/v1.2.0",
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects the whole manifest when bridgeDownloadUrls is an array", () => {
+    // Arrays are typeof 'object' but semantically the wrong shape — a
+    // server-side typo we'd rather surface than silently mask.
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        bridgeDownloadUrls: ["1.0.0", "https://rud1.es/desktop/bridge/v1.0.0"],
+      }),
+    ).toBeNull();
+  });
+
+  it("empty map → coerced to undefined (not an empty {} on the parsed shape)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeDownloadUrls: {},
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeDownloadUrls).toBeUndefined();
+  });
+
+  it("map where every entry fails validation → coerced to undefined (post-filter empty)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeDownloadUrls: {
+        "1.2.0": "javascript:alert(1)",       // bad URL
+        "not-a-version": "https://rud1.es/x", // bad key
+        "1.0.0": 42,                          // bad value type
+      },
+    });
+    expect(m).not.toBeNull();
+    expect(m?.bridgeDownloadUrls).toBeUndefined();
+  });
+
+  it("missing field → undefined (back-compat with iter-38 scalar-only manifests)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/v1.2.0",
+    });
+    expect(m?.bridgeDownloadUrls).toBeUndefined();
+    expect(m?.bridgeDownloadUrl).toBe("https://rud1.es/desktop/bridge/v1.2.0");
+  });
+
+  it("classifyManifest threads bridgeDownloadUrls into the blocked state", () => {
+    const out = classifyManifest(
+      "1.0.0",
+      {
+        version: "1.5.0",
+        downloadUrl: null,
+        manifestVersion: 1,
+        sha256: null,
+        releaseNotesUrl: null,
+        rolloutBucket: null,
+        minBootstrapVersion: "1.2.0",
+        bridgeDownloadUrl: null,
+        bridgeDownloadUrls: {
+          "1.2.0": "https://rud1.es/desktop/bridge/v1.2.0",
+        },
+      },
+      1_700_000_000_000,
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+    if (out.kind === "update-blocked-by-min-bootstrap") {
+      expect(out.bridgeDownloadUrls).toEqual({
+        "1.2.0": "https://rud1.es/desktop/bridge/v1.2.0",
+      });
+    }
+  });
+});
+
+describe("pickDownloadUrl — keyed precedence (iter 39)", () => {
+  it("keyed map match wins over the iter-38 scalar bridgeDownloadUrl", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+      bridgeDownloadUrls: {
+        "1.2.0": "https://rud1.es/desktop/bridge/keyed-1.2.0",
+        "1.0.0": "https://rud1.es/desktop/bridge/keyed-1.0.0",
+      },
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/bridge/keyed-1.2.0");
+  });
+
+  it("no keyed match → falls through to the iter-38 scalar bridgeDownloadUrl", () => {
+    // Map is present but no entry matches `requiredMinVersion`; the
+    // scalar must still win over releaseNotes/synthesized.
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+      bridgeDownloadUrls: {
+        "1.0.0": "https://rud1.es/desktop/bridge/keyed-1.0.0",
+        "1.4.1": "https://rud1.es/desktop/bridge/keyed-1.4.1",
+      },
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/bridge/scalar");
+  });
+
+  it("keyed match present but no scalar → keyed still wins", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: null,
+      bridgeDownloadUrls: {
+        "1.2.0": "https://rud1.es/desktop/bridge/keyed-1.2.0",
+      },
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/bridge/keyed-1.2.0");
+  });
+
+  it("no keyed match AND no scalar → falls through to releaseNotesUrl", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: null,
+      bridgeDownloadUrls: {
+        "1.4.1": "https://rud1.es/desktop/bridge/keyed-1.4.1",
+      },
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/changelog/v1.5.0");
+  });
+
+  it("keyed value that fails the allowlist → defensive fall-through to scalar", () => {
+    // Defensive: a hand-constructed state object that bypasses
+    // parse-time validation should not leak an unsafe URL through the
+    // keyed branch. The scalar wins instead.
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+      bridgeDownloadUrls: {
+        "1.2.0": "javascript:alert(1)",
+      },
+      releaseNotesUrl: null,
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/bridge/scalar");
+  });
+
+  it("undefined map (iter-38 scalar-only manifest) → behaves exactly like iter 38", () => {
+    const url = pickDownloadUrl({
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      requiredMinVersion: "1.2.0",
+    });
+    expect(url).toBe("https://rud1.es/desktop/bridge/scalar");
+  });
+});
+
+describe("Settings panel — Copy download URL precedence (iter 39)", () => {
+  it("keyed manifest copies the keyed URL, NOT the scalar", () => {
+    const state: VersionCheckState = {
+      kind: "update-blocked-by-min-bootstrap",
+      requiredMinVersion: "1.2.0",
+      currentVersion: "1.0.0",
+      targetVersion: "1.5.0",
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+      bridgeDownloadUrls: {
+        "1.2.0": "https://rud1.es/desktop/bridge/keyed-1.2.0",
+      },
+      checkedAt: 0,
+    };
+    expect(pickDownloadUrl(state)).toBe(
+      "https://rud1.es/desktop/bridge/keyed-1.2.0",
+    );
+  });
+
+  it("regression: iter-38 scalar-only state still copies the scalar URL", () => {
+    // Backwards-compat pin: a manifest written before iter-39 (no map
+    // at all) must still flow through the precedence chain unchanged.
+    const state: VersionCheckState = {
+      kind: "update-blocked-by-min-bootstrap",
+      requiredMinVersion: "1.2.0",
+      currentVersion: "1.0.0",
+      targetVersion: "1.5.0",
+      releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/bridge/scalar",
+      checkedAt: 0,
+    };
+    expect(pickDownloadUrl(state)).toBe(
+      "https://rud1.es/desktop/bridge/scalar",
+    );
+  });
+});

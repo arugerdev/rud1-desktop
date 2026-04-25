@@ -705,20 +705,40 @@ function buildSettingsWindowHtml(): string {
       '</div>';
 
     document.getElementById('copy-url').addEventListener('click', function() {
-      // Precedence (iter 38): bridgeDownloadUrl → releaseNotesUrl → synthesized.
-      // Bridge URL is re-validated here so an upstream regression can't
-      // leak an unsafe scheme to clipboard via the panel.
-      var bridge = state.bridgeDownloadUrl;
-      var bridgeOk = false;
-      if (typeof bridge === 'string' && bridge.length > 0 && bridge.length <= 2048 && !/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(bridge)) {
+      // Precedence (iter 39):
+      //   1. bridgeDownloadUrls[requiredMinVersion] (keyed map, iter 39)
+      //   2. bridgeDownloadUrl                       (scalar fallback, iter 38)
+      //   3. releaseNotesUrl                         (iter 33 / iter 37 fallback)
+      //   4. synthesized URL
+      // Each candidate URL is re-validated through the same allowlist
+      // used at parse time so an upstream regression cannot leak an
+      // unsafe scheme to clipboard via the panel.
+      function isAllowed(u) {
+        if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
+        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
         try {
-          var parsed = new URL(bridge);
-          bridgeOk = parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '';
-        } catch (e) { bridgeOk = false; }
+          var parsed = new URL(u);
+          return parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '';
+        } catch (e) { return false; }
       }
-      var url = bridgeOk
-        ? bridge
-        : (state.releaseNotesUrl || ('https://rud1.es/desktop/download?version=' + encodeURIComponent(state.requiredMinVersion)));
+      var keyed = null;
+      var map = state.bridgeDownloadUrls;
+      var minV = state.requiredMinVersion;
+      if (map && typeof map === 'object' && typeof minV === 'string' && minV.length > 0 &&
+          Object.prototype.hasOwnProperty.call(map, minV) && isAllowed(map[minV])) {
+        keyed = map[minV];
+      }
+      var scalar = state.bridgeDownloadUrl;
+      var url;
+      if (keyed) {
+        url = keyed;
+      } else if (scalar && isAllowed(scalar)) {
+        url = scalar;
+      } else if (state.releaseNotesUrl) {
+        url = state.releaseNotesUrl;
+      } else {
+        url = 'https://rud1.es/desktop/download?version=' + encodeURIComponent(minV);
+      }
       window.electronAPI.clipboard.writeText(url).then(function(res) {
         if (res && res.ok) toast('Copied download URL to clipboard');
         else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));

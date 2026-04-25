@@ -110,6 +110,18 @@ export type VersionCheckState =
       // at parse time). Surfaced to the Settings/About panel's "Copy
       // download URL" button as the preferred copy target.
       bridgeDownloadUrl: string | null;
+      // Iter 39 — per-`minBootstrapVersion` bridge download map. Each
+      // key is a semver-shaped version string (`MAJOR.MINOR.PATCH...`)
+      // identifying the bootstrap version the value installer covers,
+      // each value is an https-allowlist-validated URL pointing at that
+      // bootstrap installer. The Settings/About "Copy download URL"
+      // button looks up `bridgeDownloadUrls[requiredMinVersion]` first
+      // and only falls through to the iter-38 scalar / iter-37 release
+      // notes / synthesized fallback when no keyed match exists. The
+      // map is `undefined` (not `null`) when the manifest didn't carry
+      // one or when every entry was filtered out by validation; this
+      // keeps the iter-38 scalar-only path strictly backward-compatible.
+      bridgeDownloadUrls?: Record<string, string>;
       checkedAt: number;
     }
   | { kind: "error"; message: string; checkedAt: number };
@@ -244,6 +256,29 @@ export interface VersionManifest {
    * field.
    */
   bridgeDownloadUrl: string | null;
+  /**
+   * Iter 39 — per-`minBootstrapVersion` bridge download map. Promotes
+   * the iter-38 scalar `bridgeDownloadUrl` to a keyed lookup so a
+   * multi-version fleet can serve a different bootstrap installer per
+   * minimum version requirement.
+   *
+   * Each key is a semver-shaped string (`MAJOR.MINOR.PATCH...` —
+   * matches the `minBootstrapVersion` shape gate used elsewhere in
+   * this file). Each value is validated through the iter-38
+   * `isBridgeDownloadUrlAllowed` allowlist. Individual entries that
+   * fail either check are SILENTLY DROPPED (consistent with the
+   * iter-33 `releaseNotesUrl` stance — bad-but-not-essential
+   * convenience data degrades gracefully). The whole manifest is only
+   * rejected when `bridgeDownloadUrls` is the wrong TYPE (anything
+   * other than a plain object — strings, arrays, numbers, etc.); a
+   * server-side type swap is a louder signal than a typo'd entry.
+   *
+   * After filtering, an empty map is coerced to `undefined` so
+   * downstream code only has to special-case the missing-map shape
+   * once. Optional in v1 and v2 manifests; the iter-38 scalar
+   * remains the documented fallback for unkeyed manifests.
+   */
+  bridgeDownloadUrls?: Record<string, string>;
 }
 
 /**
@@ -395,6 +430,39 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     // else: empty string OR allowlist rejection ⇒ silently drop.
   }
 
+  // Iter 39 — optional bridgeDownloadUrls map. Promotes iter-38's scalar
+  // to a per-`minBootstrapVersion` lookup. The whole-manifest reject only
+  // fires when the field is the wrong TYPE (not a plain object); within
+  // a well-typed map, individual entries that fail key/value validation
+  // are silently dropped (iter-33 stance for non-essential convenience
+  // data). An empty map after filtering coerces to undefined so the
+  // downstream `pickDownloadUrl` chain can rely on `undefined === no map`.
+  let bridgeDownloadUrls: Record<string, string> | undefined;
+  if (
+    Object.prototype.hasOwnProperty.call(obj, "bridgeDownloadUrls") &&
+    obj.bridgeDownloadUrls != null
+  ) {
+    const raw = obj.bridgeDownloadUrls;
+    // Reject wrong types loud-and-early. Arrays are typeof 'object' but
+    // semantically the wrong shape — a manifest publisher who wrote
+    // `bridgeDownloadUrls: ["1.2.0", "url"]` made a server-side mistake
+    // we'd rather surface than mask.
+    if (typeof raw !== "object" || Array.isArray(raw)) return null;
+    const filtered: Record<string, string> = {};
+    for (const key of Object.keys(raw as Record<string, unknown>)) {
+      const value = (raw as Record<string, unknown>)[key];
+      if (typeof key !== "string" || key.length === 0) continue;
+      if (!MIN_BOOTSTRAP_VERSION_SHAPE.test(key)) continue;
+      if (parseSemver(key) == null) continue;
+      if (typeof value !== "string") continue;
+      if (!isBridgeDownloadUrlAllowed(value)) continue;
+      filtered[key] = value;
+    }
+    if (Object.keys(filtered).length > 0) {
+      bridgeDownloadUrls = filtered;
+    }
+  }
+
   return {
     version: obj.version,
     downloadUrl,
@@ -404,6 +472,7 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     rolloutBucket,
     minBootstrapVersion,
     bridgeDownloadUrl,
+    bridgeDownloadUrls,
   };
 }
 
@@ -494,6 +563,7 @@ export function classifyManifest(
           targetVersion: manifest.version,
           releaseNotesUrl: manifest.releaseNotesUrl,
           bridgeDownloadUrl: manifest.bridgeDownloadUrl,
+          bridgeDownloadUrls: manifest.bridgeDownloadUrls,
           checkedAt: now,
         };
       }
@@ -1031,22 +1101,30 @@ export function formatVersionCheckSummary(state: VersionCheckState): string {
   }
 }
 
-// ─── Iter 38 — Settings/About panel: download URL precedence ────────────────
+// ─── Iter 38 / 39 — Settings/About panel: download URL precedence ───────────
 //
 // Pure helper picking the URL the "Copy download URL" button copies when
-// the verdict is `update-blocked-by-min-bootstrap`. Precedence:
-//   1. bridgeDownloadUrl (iter 38) — manifest-supplied direct link to the
-//      bridge installer; preferred so the operator lands on the right
-//      version with one paste.
-//   2. releaseNotesUrl (iter 33 fallback used by iter-37) — better than the
-//      synthesized URL because it's a real link the publisher wrote.
-//   3. Synthesized `https://rud1.es/desktop/download?version={X}` — last
+// the verdict is `update-blocked-by-min-bootstrap`. Iter-39 precedence:
+//   1. bridgeDownloadUrls[requiredMinVersion] (iter 39) — exact-match
+//      keyed lookup against the manifest's per-bootstrap-version map. A
+//      multi-version fleet's manifest can ship one map and route every
+//      device to the right installer in one round trip.
+//   2. bridgeDownloadUrl (iter 38) — scalar fallback for unkeyed
+//      manifests (or manifests where the keyed map didn't include this
+//      device's `requiredMinVersion`).
+//   3. releaseNotesUrl (iter 33 fallback used by iter-37) — better than
+//      the synthesized URL because it's a real link the publisher wrote.
+//   4. Synthesized `https://rud1.es/desktop/download?version={X}` — last
 //      resort when no manifest fields are usable.
 //
-// `bridgeDownloadUrl` is re-validated through the same allowlist used at
-// parse time so a future caller that hands us an unverified state object
-// (e.g. a synthetic test fixture, an IPC round-trip from a misbehaving
-// renderer) cannot smuggle an unsafe URL through the precedence chain.
+// Both the keyed and the scalar URL are re-validated through the same
+// allowlist used at parse time so a caller that hands us an unverified
+// state object (a synthetic test fixture, an IPC round-trip from a
+// misbehaving renderer, an old build of the renderer that pre-dates the
+// parse-time validation) cannot smuggle an unsafe URL through the
+// precedence chain. The keyed lookup also re-runs the semver shape gate
+// on the key — a key that wasn't validated at parse time (e.g. because
+// the state was constructed in-memory by the caller) still cannot match.
 
 const BRIDGE_DOWNLOAD_URL_UNSAFE_CHARS = /[\x00-\x1f\x7f\s"<>\\^`{|}]/;
 const BRIDGE_DOWNLOAD_URL_MAX_LENGTH = 2048;
@@ -1068,9 +1146,25 @@ export function isBridgeDownloadUrlAllowed(rawUrl: unknown): boolean {
 
 export function pickDownloadUrl(state: {
   bridgeDownloadUrl?: string | null;
+  bridgeDownloadUrls?: Record<string, string>;
   releaseNotesUrl?: string | null;
   requiredMinVersion?: string;
 }): string {
+  // Iter 39 — keyed lookup wins when an exact match exists for this
+  // device's `requiredMinVersion`. The defensive re-validation here
+  // mirrors the iter-38 scalar branch: a future caller that
+  // hand-constructs the state cannot bypass parse-time validation.
+  if (
+    state.bridgeDownloadUrls != null &&
+    typeof state.requiredMinVersion === "string" &&
+    state.requiredMinVersion.length > 0 &&
+    Object.prototype.hasOwnProperty.call(state.bridgeDownloadUrls, state.requiredMinVersion)
+  ) {
+    const keyed = state.bridgeDownloadUrls[state.requiredMinVersion];
+    if (isBridgeDownloadUrlAllowed(keyed)) {
+      return keyed;
+    }
+  }
   if (state.bridgeDownloadUrl && isBridgeDownloadUrlAllowed(state.bridgeDownloadUrl)) {
     return state.bridgeDownloadUrl;
   }
