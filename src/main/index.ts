@@ -11,11 +11,24 @@
  *   RUD1_DEV_TOOLS    — open DevTools on start (set to "1" for debugging)
  */
 
-import { app, BrowserWindow, shell, Menu, Tray, nativeImage } from "electron";
+import {
+  app,
+  BrowserWindow,
+  shell,
+  Menu,
+  Notification,
+  Tray,
+  nativeImage,
+} from "electron";
 import path from "path";
 import { registerIpcHandlers } from "./ipc-handlers";
 import { resumeAutoSnapshotFromDisk } from "./auto-snapshot-manager";
-import { probeFirmware, isFirstBoot, type FirmwareProbeResult } from "./firmware-discovery";
+import {
+  probeFirmware,
+  isFirstBoot,
+  shouldNotifyFirstBoot,
+  type FirmwareProbeResult,
+} from "./firmware-discovery";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
@@ -127,12 +140,45 @@ function startFirmwareProbeLoop(): void {
 }
 
 async function runFirmwareProbe(): Promise<void> {
+  const prev = lastFirmwareProbe;
+  let next: FirmwareProbeResult | null = null;
   try {
-    lastFirmwareProbe = await probeFirmware();
+    next = await probeFirmware();
   } catch {
-    lastFirmwareProbe = null;
+    next = null;
   }
+  lastFirmwareProbe = next;
   rebuildTrayMenu();
+  if (next != null && shouldNotifyFirstBoot(prev, next)) {
+    notifyFirstBootDevice(next);
+  }
+}
+
+// notifyFirstBootDevice fires a single OS notification when a first-boot
+// rud1 appears on the LAN. Clicking the notification opens the device's
+// setup URL in the system browser — same destination as the tray entry,
+// just discoverable without the operator hunting for the tray icon.
+//
+// Notification.isSupported() is false on:
+//   - Linux without notify-send / libnotify       (silent no-op)
+//   - Windows when toast notifications are off in OS settings
+//   - Production builds without an app User Model ID set on first run
+//
+// We swallow the support gap silently rather than logging — the tray menu
+// already surfaces the same affordance, so notification absence is a
+// graceful degradation, not an error.
+function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
+  if (!Notification.isSupported()) return;
+  const note = new Notification({
+    title: "rud1 device ready to configure",
+    body: `A first-boot device is on the LAN at ${probe.host}. Click to open the setup wizard.`,
+    silent: false,
+  });
+  note.on("click", () => {
+    void shell.openExternal(probe.setupUrl);
+    mainWindow?.show();
+  });
+  note.show();
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────

@@ -242,3 +242,36 @@ function probeOne(
 export function isFirstBoot(probe: FirmwareProbeResult): boolean {
   return probe.reachable && probe.setup !== null && probe.setup.complete === false;
 }
+
+/**
+ * shouldNotifyFirstBoot — rising-edge predicate for the desktop notification.
+ *
+ * Returns true exactly when the operator should see ONE OS notification
+ * because a first-boot device just became visible on the LAN. We notify on:
+ *
+ *   - prev=null               → next=first-boot   (cold app start with a Pi
+ *                                                   already in setup mode)
+ *   - prev=anything-not-fb    → next=first-boot   (Pi just plugged in)
+ *   - prev=first-boot(hostA)  → next=first-boot(hostB) when hostA != hostB
+ *     (a different unconfigured device replaced the previous one — rare but
+ *     plausible if the operator finishes one and powers another)
+ *
+ * We deliberately do NOT notify when:
+ *
+ *   - next.reachable=false                       (silence on disconnect)
+ *   - next.reachable=true && next.setup.complete (already-paired device)
+ *   - prev was already first-boot at the same host (still the same device,
+ *     no point spamming)
+ *
+ * Pure function — no Electron / IPC dependency so the rising-edge logic
+ * can be exercised by unit tests without a real Notification surface.
+ */
+export function shouldNotifyFirstBoot(
+  prev: FirmwareProbeResult | null,
+  next: FirmwareProbeResult,
+): boolean {
+  if (!isFirstBoot(next)) return false;
+  if (prev == null) return true;
+  if (!isFirstBoot(prev)) return true;
+  return prev.host !== next.host;
+}

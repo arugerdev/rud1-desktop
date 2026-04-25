@@ -8,7 +8,12 @@ import { describe, expect, it, afterEach } from "vitest";
 import http from "http";
 import { AddressInfo } from "net";
 
-import { isFirstBoot, probeFirmware } from "./firmware-discovery";
+import {
+  isFirstBoot,
+  probeFirmware,
+  shouldNotifyFirstBoot,
+  type FirmwareProbeResult,
+} from "./firmware-discovery";
 
 let activeServer: http.Server | null = null;
 
@@ -130,6 +135,122 @@ describe("probeFirmware", () => {
     const probe = await probeFirmware(["127.0.0.1"], port);
     expect(probe.reachable).toBe(false);
     expect(probe.error).toBe("status 503");
+  });
+});
+
+// ─── shouldNotifyFirstBoot ────────────────────────────────────────────────
+//
+// Helpers to keep the assertions terse — every probe used here is a fully-
+// formed `FirmwareProbeResult`, so building them inline in each test
+// becomes noisy.
+
+function probeUnreachable(host = ""): FirmwareProbeResult {
+  return {
+    reachable: false,
+    host,
+    panelUrl: "",
+    setupUrl: "",
+    setup: null,
+    probedAt: 0,
+    error: "no firmware detected",
+  };
+}
+
+function probeFirstBoot(host: string): FirmwareProbeResult {
+  return {
+    reachable: true,
+    host,
+    panelUrl: `http://${host}`,
+    setupUrl: `http://${host}/setup`,
+    setup: {
+      complete: false,
+      deviceName: "",
+      deviceLocation: "",
+      notes: "",
+      completedAt: null,
+      deviceSerial: "",
+      firmwareVersion: "",
+    },
+    probedAt: 0,
+  };
+}
+
+function probeAlreadyPaired(host: string): FirmwareProbeResult {
+  return {
+    reachable: true,
+    host,
+    panelUrl: `http://${host}`,
+    setupUrl: `http://${host}/setup`,
+    setup: {
+      complete: true,
+      deviceName: "",
+      deviceLocation: "",
+      notes: "",
+      completedAt: null,
+      deviceSerial: "",
+      firmwareVersion: "",
+    },
+    probedAt: 0,
+  };
+}
+
+describe("shouldNotifyFirstBoot", () => {
+  it("notifies on cold start when a first-boot device is already on LAN", () => {
+    expect(shouldNotifyFirstBoot(null, probeFirstBoot("rud1.local"))).toBe(true);
+  });
+
+  it("notifies on the rising edge from no-device → first-boot", () => {
+    expect(
+      shouldNotifyFirstBoot(probeUnreachable(), probeFirstBoot("rud1.local")),
+    ).toBe(true);
+  });
+
+  it("notifies on the rising edge from already-paired → first-boot", () => {
+    expect(
+      shouldNotifyFirstBoot(
+        probeAlreadyPaired("rud1.local"),
+        probeFirstBoot("192.168.50.1"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT notify when the same first-boot device is still detected", () => {
+    expect(
+      shouldNotifyFirstBoot(
+        probeFirstBoot("rud1.local"),
+        probeFirstBoot("rud1.local"),
+      ),
+    ).toBe(false);
+  });
+
+  it("notifies again when first-boot host changes (different device)", () => {
+    expect(
+      shouldNotifyFirstBoot(
+        probeFirstBoot("rud1.local"),
+        probeFirstBoot("192.168.50.1"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT notify when the device disappears from the LAN", () => {
+    expect(
+      shouldNotifyFirstBoot(probeFirstBoot("rud1.local"), probeUnreachable()),
+    ).toBe(false);
+  });
+
+  it("does NOT notify for an already-paired device on cold start", () => {
+    expect(
+      shouldNotifyFirstBoot(null, probeAlreadyPaired("rud1.local")),
+    ).toBe(false);
+  });
+
+  it("does NOT notify when an already-paired device stays already-paired", () => {
+    expect(
+      shouldNotifyFirstBoot(
+        probeAlreadyPaired("rud1.local"),
+        probeAlreadyPaired("rud1.local"),
+      ),
+    ).toBe(false);
   });
 });
 
