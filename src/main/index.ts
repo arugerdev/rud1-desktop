@@ -15,12 +15,20 @@ import { app, BrowserWindow, shell, Menu, Tray, nativeImage } from "electron";
 import path from "path";
 import { registerIpcHandlers } from "./ipc-handlers";
 import { resumeAutoSnapshotFromDisk } from "./auto-snapshot-manager";
+import { probeFirmware, isFirstBoot, type FirmwareProbeResult } from "./firmware-discovery";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
+// Recheck cadence for the LAN firmware probe. 60s is short enough that an
+// operator who plugs a device in during a session sees the tray entry
+// within a minute, but long enough that the probe is invisible on the
+// network.
+const FIRMWARE_PROBE_INTERVAL_MS = 60_000;
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let lastFirmwareProbe: FirmwareProbeResult | null = null;
+let firmwareProbeTimer: NodeJS.Timeout | null = null;
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -59,15 +67,72 @@ function createTray(): void {
   );
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon.resize({ width: 16 }));
 
-  const menu = Menu.buildFromTemplate([
-    { label: "Open rud1", click: () => { mainWindow?.show() ?? createWindow(); } },
-    { type: "separator" },
-    { label: "Quit", click: () => app.quit() },
-  ]);
+  rebuildTrayMenu();
 
-  tray.setToolTip("rud1 Desktop");
-  tray.setContextMenu(menu);
   tray.on("click", () => { mainWindow?.show() ?? createWindow(); });
+}
+
+// rebuildTrayMenu refreshes the context menu using the cached
+// `lastFirmwareProbe`. Called both at tray-creation time AND whenever the
+// background probe finishes — `lastFirmwareProbe.reachable` deciding the
+// shape of the menu (a "Configure local rud1" entry appears only when a
+// first-boot device is on the LAN). Setting tooltip + context menu is
+// idempotent so we don't bother diffing.
+function rebuildTrayMenu(): void {
+  if (!tray) return;
+  const items: Electron.MenuItemConstructorOptions[] = [
+    { label: "Open rud1", click: () => { mainWindow?.show() ?? createWindow(); } },
+  ];
+  if (lastFirmwareProbe && isFirstBoot(lastFirmwareProbe)) {
+    const url = lastFirmwareProbe.setupUrl;
+    items.push({ type: "separator" });
+    items.push({
+      // The host is appended in parens so the operator can tell apart
+      // multiple devices on the same LAN at a glance — `rud1.local` is
+      // ambiguous on a multi-Pi network, but `192.168.50.1` is not.
+      label: `Configure local rud1 (${lastFirmwareProbe.host})`,
+      click: () => { void shell.openExternal(url); },
+    });
+  } else if (lastFirmwareProbe && lastFirmwareProbe.reachable) {
+    // Already-paired device on the LAN — surface a quick-link to its panel
+    // so the operator can hop into the local UI without switching tabs.
+    items.push({ type: "separator" });
+    items.push({
+      label: `Open local rud1 panel (${lastFirmwareProbe.host})`,
+      click: () => { void shell.openExternal(lastFirmwareProbe!.panelUrl); },
+    });
+  }
+  items.push({ type: "separator" });
+  items.push({ label: "Quit", click: () => app.quit() });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+  const tip =
+    lastFirmwareProbe && isFirstBoot(lastFirmwareProbe)
+      ? "rud1 Desktop — first-boot device on LAN"
+      : "rud1 Desktop";
+  tray.setToolTip(tip);
+}
+
+// startFirmwareProbeLoop schedules a recurring LAN probe. Intentionally
+// fire-and-forget: a failed probe leaves `lastFirmwareProbe.reachable=false`
+// and the tray menu collapses to the no-device shape on the next rebuild.
+function startFirmwareProbeLoop(): void {
+  void runFirmwareProbe();
+  firmwareProbeTimer = setInterval(() => {
+    void runFirmwareProbe();
+  }, FIRMWARE_PROBE_INTERVAL_MS);
+  // Allow the process to exit even when the timer is still running.
+  if (typeof firmwareProbeTimer.unref === "function") {
+    firmwareProbeTimer.unref();
+  }
+}
+
+async function runFirmwareProbe(): Promise<void> {
+  try {
+    lastFirmwareProbe = await probeFirmware();
+  } catch {
+    lastFirmwareProbe = null;
+  }
+  rebuildTrayMenu();
 }
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -76,6 +141,7 @@ app.whenReady().then(() => {
   registerIpcHandlers();
   mainWindow = createWindow();
   createTray();
+  startFirmwareProbeLoop();
 
   // Resume opt-in periodic diagnosis snapshots if the operator had them
   // enabled. Fire-and-forget: startup must not block on disk I/O, and
@@ -99,6 +165,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  if (firmwareProbeTimer) {
+    clearInterval(firmwareProbeTimer);
+    firmwareProbeTimer = null;
+  }
   tray?.destroy();
 });
 

@@ -712,4 +712,38 @@ contextBridge.exposeInMainWorld("electronAPI", {
     getPlatform: () =>
       ipcRenderer.invoke("app:platform") as Promise<NodeJS.Platform>,
   },
+
+  setup: {
+    // Best-effort probe of the operator's LAN for a rud1 device. Tries
+    // `rud1.local` (mDNS) and `192.168.50.1` (setup-AP fallback) in parallel.
+    // The renderer uses this to decide whether to surface a "Configure your
+    // rud1 now" banner — `reachable=false` means no device responded within
+    // the budget and the banner stays hidden.
+    probeFirmware: () =>
+      ipcRenderer.invoke("setup:probeFirmware") as Promise<
+        | {
+            ok: true;
+            result: {
+              reachable: boolean;
+              host: string;
+              panelUrl: string;
+              setupUrl: string;
+              setup:
+                | {
+                    complete: boolean;
+                    deviceName: string;
+                    deviceLocation: string;
+                    notes: string;
+                    completedAt: number | null;
+                    deviceSerial: string;
+                    firmwareVersion: string;
+                  }
+                | null;
+              probedAt: number;
+              error?: string;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+  },
 });

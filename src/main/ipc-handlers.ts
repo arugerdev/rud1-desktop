@@ -66,6 +66,7 @@ import {
   triggerAutoSnapshotNow,
 } from "./auto-snapshot-manager";
 import { getStats as getSystemStats } from "./system-manager";
+import { probeFirmware } from "./firmware-discovery";
 
 const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
 
@@ -577,4 +578,20 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:platform", () => process.platform);
+
+  // setup:probeFirmware — best-effort discovery of a locally-reachable rud1
+  // device. The renderer (cloud panel embedded in the BrowserWindow) calls
+  // this to decide whether to surface a "Configure your rud1 now" banner.
+  // The probe is rate-limited at the manager level by virtue of being short
+  // and parallel; the renderer is expected to call it on app focus / tray
+  // open, not on a fast timer.
+  ipcMain.handle("setup:probeFirmware", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const probe = await probeFirmware();
+      return { ok: true, result: probe };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 }
