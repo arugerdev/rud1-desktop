@@ -45,6 +45,7 @@ describe("parseManifest", () => {
       sha256: null,
       releaseNotesUrl: null,
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -60,6 +61,7 @@ describe("parseManifest", () => {
       sha256: null,
       releaseNotesUrl: null,
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -75,6 +77,7 @@ describe("parseManifest", () => {
       sha256: null,
       releaseNotesUrl: null,
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -113,6 +116,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       sha256: VALID_SHA_MIXED.toLowerCase(),
       releaseNotesUrl: null,
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -130,6 +134,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       sha256: VALID_SHA,
       releaseNotesUrl: null,
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -212,6 +217,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       sha256: null,
       releaseNotesUrl: null,
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -228,6 +234,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       sha256: VALID_SHA_MIXED.toLowerCase(),
       releaseNotesUrl: null,
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -362,6 +369,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
       sha256: VALID_SHA,
       releaseNotesUrl: "https://rud1.es/changelog",
       rolloutBucket: null,
+      minBootstrapVersion: null,
     });
   });
 
@@ -392,6 +400,7 @@ describe("classifyManifest", () => {
     sha256: null,
     releaseNotesUrl: null,
     rolloutBucket: null,
+    minBootstrapVersion: null,
   });
 
   it("flags an update when remote > current", () => {
@@ -753,6 +762,7 @@ describe("classifyManifest — rolloutBucket suppression (iter 34)", () => {
     sha256: "a".repeat(64),
     releaseNotesUrl: null,
     rolloutBucket,
+    minBootstrapVersion: null,
   });
 
   it("eligible bucket (deviceBucket <= rolloutBucket) → update-available", () => {
@@ -803,6 +813,7 @@ describe("classifyManifest — forceRollout override (iter 35)", () => {
     sha256: "a".repeat(64),
     releaseNotesUrl: null,
     rolloutBucket,
+    minBootstrapVersion: null,
   });
 
   it("ineligible bucket BUT forceRollout=true → update-available", () => {
@@ -957,5 +968,480 @@ describe("VersionCheckManager forceRollout predicate (iter 35)", () => {
     await mgr.checkOnce();
     // Suppression still fires because the throw collapses to false.
     expect(states.at(-1)?.kind).toBe("up-to-date");
+  });
+});
+
+// ─── Iter 36 — minBootstrapVersion staged-migration gate ─────────────────────
+//
+// The manifest may now advertise a `minBootstrapVersion` indicating the
+// lowest currently-installed desktop release that may auto-update directly
+// to `version`. Devices below the anchor are blocked: the operator must
+// install an intermediate bridge build by hand. The blocked state is a
+// distinct VersionCheckState variant (not just an "error") so the tray
+// menu can render an actionable label and still surface the changelog.
+//
+// Scope:
+//   • parseManifest — accept-valid / missing→null / null→null /
+//                     empty-string→reject / non-string→reject /
+//                     malformed-shape→reject; v1 + v2 both accept the field.
+//   • compareSemver — identity / simple ordering / shorter-prefix.
+//   • classifyManifest — blocks when current < min, allows when current ≥
+//     min, allows when min absent, composes with sha256+rolloutBucket+strict.
+//   • buildVersionCheckMenuItems — blocked-state row labels.
+
+const { compareSemver: compareSemverInternal, MIN_BOOTSTRAP_VERSION_SHAPE } =
+  versionCheckInternals;
+
+describe("parseManifest — minBootstrapVersion (iter 36)", () => {
+  const VALID_SHA = "a".repeat(64);
+
+  it("v1 manifest with valid minBootstrapVersion → preserved", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      minBootstrapVersion: "1.2.0",
+    });
+    expect(m).toEqual({
+      version: "1.5.0",
+      downloadUrl: null,
+      manifestVersion: 1,
+      sha256: null,
+      releaseNotesUrl: null,
+      rolloutBucket: null,
+      minBootstrapVersion: "1.2.0",
+    });
+  });
+
+  it("v2 manifest with valid minBootstrapVersion → preserved", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      minBootstrapVersion: "1.2.0",
+    });
+    expect(m).toEqual({
+      version: "1.5.0",
+      downloadUrl: null,
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      releaseNotesUrl: null,
+      rolloutBucket: null,
+      minBootstrapVersion: "1.2.0",
+    });
+  });
+
+  it("manifest with prerelease-shaped minBootstrapVersion → preserved", () => {
+    // The shape regex is anchored on the MAJOR.MINOR.PATCH triplet so
+    // prerelease/build suffixes pass through to parseSemver, which
+    // accepts them per the iter-21 RFC implementation.
+    const m = parseManifest({
+      version: "2.0.0",
+      minBootstrapVersion: "1.2.0-rc.1",
+    });
+    expect(m?.minBootstrapVersion).toBe("1.2.0-rc.1");
+  });
+
+  it("missing field → null (behaviour unchanged)", () => {
+    const m = parseManifest({ version: "1.5.0" });
+    expect(m?.minBootstrapVersion).toBeNull();
+  });
+
+  it("explicit null → null (behaviour unchanged)", () => {
+    const m = parseManifest({ version: "1.5.0", minBootstrapVersion: null });
+    expect(m?.minBootstrapVersion).toBeNull();
+  });
+
+  it("explicit undefined → null (behaviour unchanged)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      minBootstrapVersion: undefined,
+    });
+    expect(m?.minBootstrapVersion).toBeNull();
+  });
+
+  it("empty string → rejects whole manifest", () => {
+    expect(
+      parseManifest({ version: "1.5.0", minBootstrapVersion: "" }),
+    ).toBeNull();
+  });
+
+  it("non-string types → rejects whole manifest", () => {
+    expect(
+      parseManifest({ version: "1.5.0", minBootstrapVersion: 1 }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", minBootstrapVersion: 1.2 }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", minBootstrapVersion: true }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        minBootstrapVersion: { major: 1, minor: 2, patch: 0 },
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        minBootstrapVersion: ["1", "2", "0"],
+      }),
+    ).toBeNull();
+  });
+
+  it("malformed shape (`not-semver` / `1.2` / `1.2.3.4-`) → rejects whole manifest", () => {
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        minBootstrapVersion: "not-semver",
+      }),
+    ).toBeNull();
+    expect(
+      parseManifest({ version: "1.5.0", minBootstrapVersion: "1.2" }),
+    ).toBeNull();
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        minBootstrapVersion: "1.2.3.4-",
+      }),
+    ).toBeNull();
+    // Leading whitespace breaks the anchored shape regex.
+    expect(
+      parseManifest({ version: "1.5.0", minBootstrapVersion: " 1.2.3" }),
+    ).toBeNull();
+  });
+
+  it("malformed minBootstrapVersion in v2 manifest → rejects whole manifest", () => {
+    // Compose with the v2 sha256 requirement: the shape failure is
+    // hit BEFORE we'd get to surface a sha256 issue, but the rejection
+    // is the same — the whole manifest goes away.
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        manifestVersion: 2,
+        sha256: VALID_SHA,
+        minBootstrapVersion: "1.2",
+      }),
+    ).toBeNull();
+  });
+
+  it("MIN_BOOTSTRAP_VERSION_SHAPE matches anchored MAJOR.MINOR.PATCH only", () => {
+    // Pin the regex so a future refactor that loosens the shape (e.g.
+    // permits `v` prefix or trailing whitespace) trips a test rather
+    // than silently changing the gate.
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test("1.2.3")).toBe(true);
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test("1.2.3-rc.1")).toBe(true);
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test("0.0.0")).toBe(true);
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test("1.2")).toBe(false);
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test("v1.2.3")).toBe(false);
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test("not-semver")).toBe(false);
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test(" 1.2.3")).toBe(false);
+    expect(MIN_BOOTSTRAP_VERSION_SHAPE.test("")).toBe(false);
+  });
+});
+
+describe("compareSemver (iter 36)", () => {
+  // The helper lives in auto-updater.ts and is re-exported through the
+  // version-check-manager __test hatch so the staged-migration suite can
+  // pin its semantics without reaching across files.
+
+  it("identity: equal versions return 0", () => {
+    const a = { major: 1, minor: 2, patch: 3, prerelease: "" };
+    const b = { major: 1, minor: 2, patch: 3, prerelease: "" };
+    expect(compareSemverInternal(a, b)).toBe(0);
+  });
+
+  it("simple ordering: lower < higher per axis", () => {
+    const lower = { major: 1, minor: 2, patch: 3, prerelease: "" };
+    const higherMajor = { major: 2, minor: 0, patch: 0, prerelease: "" };
+    const higherMinor = { major: 1, minor: 3, patch: 0, prerelease: "" };
+    const higherPatch = { major: 1, minor: 2, patch: 4, prerelease: "" };
+    expect(compareSemverInternal(lower, higherMajor)).toBeLessThan(0);
+    expect(compareSemverInternal(lower, higherMinor)).toBeLessThan(0);
+    expect(compareSemverInternal(lower, higherPatch)).toBeLessThan(0);
+    expect(compareSemverInternal(higherMajor, lower)).toBeGreaterThan(0);
+    expect(compareSemverInternal(higherMinor, lower)).toBeGreaterThan(0);
+    expect(compareSemverInternal(higherPatch, lower)).toBeGreaterThan(0);
+  });
+
+  it("length differences: 1.0 vs 1.0.0 — short form rejected by parseManifest", () => {
+    // The iter-21 parser refuses `1.0` outright (parseManifest returns
+    // null for any version that doesn't match MAJOR.MINOR.PATCH), so
+    // the gate's behaviour on a "shorter" semver string is "reject the
+    // whole manifest" — exercised here via parseManifest to pin the
+    // contract that a length mismatch never silently coerces.
+    expect(parseManifest({ version: "1.0" })).toBeNull();
+    // A canonical `1.0.0` round-trips equal under the helper.
+    const eq = compareSemverInternal(
+      { major: 1, minor: 0, patch: 0, prerelease: "" },
+      { major: 1, minor: 0, patch: 0, prerelease: "" },
+    );
+    expect(eq).toBe(0);
+  });
+
+  it("prerelease ranks below the matching release", () => {
+    const release = { major: 1, minor: 2, patch: 0, prerelease: "" };
+    const pre = { major: 1, minor: 2, patch: 0, prerelease: "rc.1" };
+    expect(compareSemverInternal(pre, release)).toBeLessThan(0);
+    expect(compareSemverInternal(release, pre)).toBeGreaterThan(0);
+  });
+});
+
+describe("classifyManifest — minBootstrapVersion gate (iter 36)", () => {
+  const NOW = 1_700_000_000_000;
+  const m = (
+    overrides: Partial<VersionManifest> & { version: string },
+  ): VersionManifest => ({
+    downloadUrl: "https://rud1.es/dl",
+    manifestVersion: 1,
+    sha256: null,
+    releaseNotesUrl: null,
+    rolloutBucket: null,
+    minBootstrapVersion: null,
+    ...overrides,
+  });
+
+  it("blocks when current < minBootstrapVersion (current=1.0.0, min=1.2.0, target=1.5.0)", () => {
+    const out = classifyManifest(
+      "1.0.0",
+      m({ version: "1.5.0", minBootstrapVersion: "1.2.0" }),
+      NOW,
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+    if (out.kind === "update-blocked-by-min-bootstrap") {
+      expect(out.requiredMinVersion).toBe("1.2.0");
+      expect(out.currentVersion).toBe("1.0.0");
+      expect(out.targetVersion).toBe("1.5.0");
+      expect(out.checkedAt).toBe(NOW);
+    }
+  });
+
+  it("allows when current == minBootstrapVersion (boundary, inclusive)", () => {
+    // current >= min is allowed — only strictly less is blocked.
+    const out = classifyManifest(
+      "1.2.0",
+      m({ version: "1.5.0", minBootstrapVersion: "1.2.0" }),
+      NOW,
+    );
+    expect(out.kind).toBe("update-available");
+  });
+
+  it("allows when current > minBootstrapVersion", () => {
+    const out = classifyManifest(
+      "1.3.0",
+      m({ version: "1.5.0", minBootstrapVersion: "1.2.0" }),
+      NOW,
+    );
+    expect(out.kind).toBe("update-available");
+  });
+
+  it("allows when minBootstrapVersion is absent (null)", () => {
+    const out = classifyManifest(
+      "1.0.0",
+      m({ version: "1.5.0", minBootstrapVersion: null }),
+      NOW,
+    );
+    expect(out.kind).toBe("update-available");
+  });
+
+  it("blocked state preserves releaseNotesUrl so 'What's new' still works", () => {
+    const out = classifyManifest(
+      "1.0.0",
+      m({
+        version: "1.5.0",
+        minBootstrapVersion: "1.2.0",
+        releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+      }),
+      NOW,
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+    if (out.kind === "update-blocked-by-min-bootstrap") {
+      expect(out.releaseNotesUrl).toBe(
+        "https://rud1.es/changelog/v1.5.0",
+      );
+    }
+  });
+
+  it("never blocks an up-to-date device (remote == current)", () => {
+    // The version-comparison gate runs FIRST; min-bootstrap is only
+    // consulted on the path that would have promoted to update-available.
+    const out = classifyManifest(
+      "1.5.0",
+      m({ version: "1.5.0", minBootstrapVersion: "9.9.9" }),
+      NOW,
+    );
+    expect(out.kind).toBe("up-to-date");
+  });
+
+  it("composes with sha256 (v2): blocked even when sha256 is valid", () => {
+    // The block fires at classify time; the artifact's sha256 is only
+    // checked at apply time. So a v2 manifest with a perfectly valid
+    // sha256 still blocks an out-of-bootstrap device — the operator
+    // never even gets to download.
+    const out = classifyManifest(
+      "1.0.0",
+      m({
+        version: "1.5.0",
+        manifestVersion: 2,
+        sha256: "b".repeat(64),
+        minBootstrapVersion: "1.2.0",
+      }),
+      NOW,
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+  });
+
+  it("composes with rolloutBucket: out-of-bucket suppression wins (silent up-to-date)", () => {
+    // Iter-34 contract: an out-of-bucket device classifies silently as
+    // up-to-date. The min-bootstrap gate runs AFTER that suppression so
+    // the operator never sees a "blocked" row for a manifest they were
+    // never going to receive anyway.
+    const out = classifyManifest(
+      "1.0.0",
+      m({
+        version: "1.5.0",
+        rolloutBucket: 50,
+        minBootstrapVersion: "1.2.0",
+      }),
+      NOW,
+      75, // deviceBucket > 50 → suppressed
+    );
+    expect(out.kind).toBe("up-to-date");
+  });
+
+  it("composes with rolloutBucket: in-bucket device still hits the block", () => {
+    const out = classifyManifest(
+      "1.0.0",
+      m({
+        version: "1.5.0",
+        rolloutBucket: 50,
+        minBootstrapVersion: "1.2.0",
+      }),
+      NOW,
+      25, // deviceBucket <= 50 → eligible
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+  });
+
+  it("composes with forceRollout (iter 35): override unblocks bucket but block still fires", () => {
+    // forceRollout=true bypasses the bucket gate; the min-bootstrap
+    // gate is independent and still trips for an out-of-bootstrap
+    // device. A tester who flipped the rollout-force flag still can't
+    // jump a staged-migration anchor.
+    const out = classifyManifest(
+      "1.0.0",
+      m({
+        version: "1.5.0",
+        rolloutBucket: 50,
+        minBootstrapVersion: "1.2.0",
+      }),
+      NOW,
+      75,
+      true,
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+  });
+
+  it("composes with sha256 + rolloutBucket + min-bootstrap: in-bucket v2 still blocks", () => {
+    // The kitchen-sink case the spec asks for explicitly: every gate
+    // would otherwise pass except the staged-migration anchor.
+    const out = classifyManifest(
+      "1.0.0",
+      m({
+        version: "1.5.0",
+        manifestVersion: 2,
+        sha256: "c".repeat(64),
+        rolloutBucket: 50,
+        minBootstrapVersion: "1.2.0",
+      }),
+      NOW,
+      25, // in-bucket
+    );
+    expect(out.kind).toBe("update-blocked-by-min-bootstrap");
+    if (out.kind === "update-blocked-by-min-bootstrap") {
+      expect(out.requiredMinVersion).toBe("1.2.0");
+      expect(out.targetVersion).toBe("1.5.0");
+    }
+  });
+});
+
+describe("buildVersionCheckMenuItems — blocked-by-min-bootstrap (iter 36)", () => {
+  const blockedState = (
+    releaseNotesUrl: string | null = null,
+  ): VersionCheckState => ({
+    kind: "update-blocked-by-min-bootstrap",
+    requiredMinVersion: "1.2.0",
+    currentVersion: "1.0.0",
+    targetVersion: "1.5.0",
+    releaseNotesUrl,
+    checkedAt: 1_700_000_000_000,
+  });
+
+  it("renders a clear blocked-state row label calling for a manual install", () => {
+    const items = buildVersionCheckMenuItems(blockedState());
+    expect(items[0].label).toBe(
+      "Update requires manual install: download v1.2.0 first",
+    );
+    expect(items[0].enabled).toBe(false);
+  });
+
+  it("includes Currently installed + Target version informational rows", () => {
+    const items = buildVersionCheckMenuItems(blockedState());
+    expect(items.map((i) => i.label)).toEqual([
+      "Update requires manual install: download v1.2.0 first",
+      "Currently installed: v1.0.0",
+      "Target version: v1.5.0",
+      "Check for updates now",
+    ]);
+  });
+
+  it("renders the 'What's new' row when releaseNotesUrl is set", () => {
+    const opens: string[] = [];
+    const items = buildVersionCheckMenuItems(
+      blockedState("https://rud1.es/changelog/v1.5.0"),
+      { openExternal: (u) => opens.push(u) },
+    );
+    expect(items.map((i) => i.label)).toEqual([
+      "Update requires manual install: download v1.2.0 first",
+      "Currently installed: v1.0.0",
+      "Target version: v1.5.0",
+      "What's new — view release notes",
+      "Check for updates now",
+    ]);
+    // Click on "What's new" opens the changelog in the system browser.
+    items[3].click?.();
+    expect(opens).toEqual(["https://rud1.es/changelog/v1.5.0"]);
+  });
+
+  it("the recheck row triggers handlers.recheck", () => {
+    let rechecks = 0;
+    const items = buildVersionCheckMenuItems(blockedState(), {
+      recheck: () => {
+        rechecks += 1;
+      },
+    });
+    items.at(-1)?.click?.();
+    expect(rechecks).toBe(1);
+  });
+
+  it("does NOT trigger startDownload even when auto-update flow is engaged", () => {
+    // The whole point of the blocked state: no auto-update download is
+    // attempted. The download row is replaced with a disabled label,
+    // and there's no clickable update-available entry to mis-route.
+    const items = buildVersionCheckMenuItems(
+      blockedState("https://rud1.es/changelog/v1.5.0"),
+      {
+        startDownload: () => {
+          throw new Error("startDownload must NOT fire in blocked state");
+        },
+      },
+      { kind: "idle" }, // auto-update engaged but idle
+    );
+    // None of the items should attempt a download click. We just
+    // exercise every click target to confirm.
+    for (const it of items) {
+      it.click?.();
+    }
+    // (No exception thrown ⇒ test passes.)
+    expect(items[0].enabled).toBe(false);
   });
 });

@@ -33,7 +33,7 @@ import { createHash } from "crypto";
 
 import { __test as autoUpdaterInternals, type AutoUpdateState } from "./auto-updater";
 
-const { isValidFeedUrl, parseSemver, isNewerVersion } = autoUpdaterInternals;
+const { isValidFeedUrl, parseSemver, isNewerVersion, compareSemver } = autoUpdaterInternals;
 
 // Hard cap on the body we'll read from the manifest URL. A well-formed
 // release feed is a few hundred bytes; anything bigger is almost
@@ -54,6 +54,15 @@ const MAX_SUPPORTED_MANIFEST_VERSION = 2;
 // rejected so a manifest with `sha256: "deadbeef"` (too short) or
 // `sha256: "...zzz..."` (non-hex) can't slip past the v2 gate.
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
+
+// Iter 36 — minBootstrapVersion shape gate. Anchored at start; the
+// sha256-style strictness ("malformed → reject the whole manifest") is the
+// same as for `version` itself. We deliberately keep the regex permissive
+// enough to accept prerelease / build-metadata suffixes (`1.2.3-rc.1+sha`)
+// but require the leading `MAJOR.MINOR.PATCH` triplet — anything else is a
+// server-side typo we'd rather surface than mask. The dedicated `parseSemver`
+// run a few lines later then performs the full RFC parse.
+const MIN_BOOTSTRAP_VERSION_SHAPE = /^\d+\.\d+\.\d+/;
 
 // Default poll cadence. Hourly is plenty — release announcements aren't
 // time-critical, and we want to be invisible on the network. Caller can
@@ -78,6 +87,24 @@ export type VersionCheckState =
       // the recheck entry when this is non-null. Validated through the
       // same allowlist as `downloadUrl` at parse time so unsafe URLs
       // never reach the state.
+      releaseNotesUrl: string | null;
+      checkedAt: number;
+    }
+  | {
+      // Iter 36 — staged-migration gate. The manifest advertised a
+      // `minBootstrapVersion` and the currently-installed app is older
+      // than it: the operator must do a manual install of the
+      // intermediate `requiredMinVersion` first before the auto-update
+      // path will agree to apply `targetVersion`. The "What's new" link
+      // (changelog) is still surfaced when the manifest carried one so
+      // the operator can read context before downloading the bridge
+      // build by hand. The download row is replaced with a clear
+      // blocked-state label — auto-update + external-browser flows are
+      // both refused for this fetch tick.
+      kind: "update-blocked-by-min-bootstrap";
+      requiredMinVersion: string;
+      currentVersion: string;
+      targetVersion: string;
       releaseNotesUrl: string | null;
       checkedAt: number;
     }
@@ -175,6 +202,25 @@ export interface VersionManifest {
    * parse time (a server-side bug we'd rather surface than mask).
    */
   rolloutBucket: number | null;
+  /**
+   * Iter 36 — staged-migration anchor. When present, a non-empty
+   * semver-shaped string (`MAJOR.MINOR.PATCH[...]`) identifying the
+   * lowest currently-installed desktop version that may auto-update to
+   * `version` directly. If the running app is BELOW
+   * `minBootstrapVersion`, `classifyManifest` refuses the update and
+   * surfaces `update-blocked-by-min-bootstrap` instead — the operator
+   * must do a manual install of the intermediate version first
+   * (`download v{requiredMinVersion}`).
+   *
+   * Optional in BOTH v1 and v2 manifests; the spec reserves the right
+   * to promote it to required in v3. Malformed values (empty string,
+   * non-string, `"1.2"`, `"1.2.3.4-"`, etc.) reject the whole
+   * manifest, mirroring the strictness applied to `sha256` and the
+   * other typed fields — the integrity of the migration anchor is too
+   * load-bearing to silently drop. Missing / null / undefined → stored
+   * as `null`, behaviour unchanged (no gate).
+   */
+  minBootstrapVersion: string | null;
 }
 
 /**
@@ -291,6 +337,24 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     rolloutBucket = rb;
   }
 
+  // Iter 36 — optional minBootstrapVersion. Non-empty semver-shaped
+  // string; malformed values reject the whole manifest (same loud-fail
+  // policy as sha256). The shape regex is a cheap pre-filter — the
+  // canonical parse runs through `parseSemver` so a value that passes
+  // the shape but fails full RFC parsing (e.g. `"1.2.3.4-"` — extra
+  // numeric segment) still rejects.
+  let minBootstrapVersion: string | null = null;
+  if (
+    Object.prototype.hasOwnProperty.call(obj, "minBootstrapVersion") &&
+    obj.minBootstrapVersion != null
+  ) {
+    if (typeof obj.minBootstrapVersion !== "string") return null;
+    if (obj.minBootstrapVersion.length === 0) return null;
+    if (!MIN_BOOTSTRAP_VERSION_SHAPE.test(obj.minBootstrapVersion)) return null;
+    if (parseSemver(obj.minBootstrapVersion) == null) return null;
+    minBootstrapVersion = obj.minBootstrapVersion;
+  }
+
   return {
     version: obj.version,
     downloadUrl,
@@ -298,6 +362,7 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     sha256,
     releaseNotesUrl,
     rolloutBucket,
+    minBootstrapVersion,
   };
 }
 
@@ -369,6 +434,27 @@ export function classifyManifest(
         latest: manifest.version,
         checkedAt: now,
       };
+    }
+    // Iter 36 — staged-migration gate. Runs AFTER the rollout bucket
+    // gate (so an out-of-bucket device stays in the silent up-to-date
+    // path) and BEFORE the update-available promotion. The min anchor
+    // was already shape-validated at parse time, so `parseSemver`
+    // returning null here is impossible in practice; the defensive
+    // check exists only so a future schema rev that accepts looser
+    // shapes can't silently bypass the gate.
+    if (manifest.minBootstrapVersion != null) {
+      const cur = parseSemver(current);
+      const min = parseSemver(manifest.minBootstrapVersion);
+      if (cur != null && min != null && compareSemver(cur, min) < 0) {
+        return {
+          kind: "update-blocked-by-min-bootstrap",
+          requiredMinVersion: manifest.minBootstrapVersion,
+          currentVersion: current,
+          targetVersion: manifest.version,
+          releaseNotesUrl: manifest.releaseNotesUrl,
+          checkedAt: now,
+        };
+      }
     }
     return {
       kind: "update-available",
@@ -768,6 +854,42 @@ export function buildVersionCheckMenuItems(
       },
     ];
   }
+  // Iter 36 — staged-migration block. The download row is replaced by a
+  // disabled label that calls the operator to install the bridge build
+  // by hand; the "What's new" link still works (changelogs are read-only
+  // content). Auto-update + external-browser flows are both refused for
+  // this fetch tick — `applyAndRestart` would fail downstream anyway,
+  // but surfacing the block in the menu is what makes the migration
+  // policy visible.
+  if (state.kind === "update-blocked-by-min-bootstrap") {
+    const items: MenuItemShape[] = [
+      {
+        label: `Update requires manual install: download v${state.requiredMinVersion} first`,
+        enabled: false,
+      },
+      {
+        label: `Currently installed: v${state.currentVersion}`,
+        enabled: false,
+      },
+      {
+        label: `Target version: v${state.targetVersion}`,
+        enabled: false,
+      },
+    ];
+    if (state.releaseNotesUrl) {
+      items.push({
+        label: "What's new — view release notes",
+        click: () => {
+          handlers.openExternal?.(state.releaseNotesUrl as string);
+        },
+      });
+    }
+    items.push({
+      label: "Check for updates now",
+      click: () => { handlers.recheck?.(); },
+    });
+    return items;
+  }
   // error
   return [
     {
@@ -802,6 +924,11 @@ export const __test = {
   MAX_MANIFEST_BYTES,
   MAX_SUPPORTED_MANIFEST_VERSION,
   SHA256_HEX_REGEX,
+  // Iter 36 — re-export the auto-updater's compareSemver via this
+  // module's __test hatch so the test suite for staged-migration logic
+  // can exercise the helper without reaching across files.
+  MIN_BOOTSTRAP_VERSION_SHAPE,
+  compareSemver,
   formatBytes,
   progressBar,
 };
