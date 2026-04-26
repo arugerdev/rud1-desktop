@@ -187,11 +187,35 @@ async function tunnelServiceExistsWindows(): Promise<boolean> {
 /** Best-effort teardown used by the idempotent connect path. On Windows
  *  we positively probe for the service before issuing the uninstall;
  *  on Unix wg-quick is already idempotent enough that we just swallow
- *  the well-known "is not a wireguard interface" string. */
+ *  the well-known "is not a wireguard interface" string.
+ *
+ *  Windows-specific subtlety: `wireguard.exe /uninstalltunnelservice`
+ *  returns synchronously, but the Service Control Manager keeps the
+ *  service in DELETE_PENDING state for a short window while in-flight
+ *  handles release. If the subsequent `/installtunnelservice` runs
+ *  during that window, WireGuard rejects it with "Tunnel already
+ *  installed and running" and the user gets no tunnel — exactly the
+ *  bug the operator was hitting in the panel: click Connect, the
+ *  status said "fresh install" because the panel hadn't surfaced the
+ *  prior service, idempotent connect calls teardown → install in
+ *  series, and the install crashed into the trailing handle. We poll
+ *  `tunnelServiceExistsWindows` for up to 3 s after the uninstall so
+ *  the install path sees a fully-flushed SCM state.
+ */
 async function teardownIfPresent(): Promise<void> {
   if (process.platform === "win32") {
     if (!(await tunnelServiceExistsWindows())) return;
     await disconnectWindows();
+    // Wait for SCM to drop the DELETE_PENDING marker. 3s is generous
+    // (typical case is <500ms) but bounded so a stuck service surfaces
+    // as a clear timeout rather than a hang. After the budget elapses
+    // we fall through and let `/installtunnelservice` fail loudly with
+    // its own diagnostic — better than swallowing the timeout.
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      if (!(await tunnelServiceExistsWindows())) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
     return;
   }
   try {
@@ -207,19 +231,33 @@ async function teardownIfPresent(): Promise<void> {
 
 async function statusWindows(): Promise<{ connected: boolean; ip?: string }> {
   assertTunnelName(TUNNEL_NAME);
-  try {
-    // execFile (no shell) — previously used `exec` with a quoted string,
-    // which is a shell-parsed form. TUNNEL_NAME is hardcoded today, but
-    // passing it as argv keeps us safe if it ever becomes dynamic.
-    const { stdout } = await execFileAsync(
-      "netsh",
-      ["interface", "show", "interface", TUNNEL_NAME],
-      { windowsHide: true },
-    );
-    return parseNetshInterface(stdout);
-  } catch {
-    return { connected: false };
+  // Two distinct questions the renderer mixes into one boolean:
+  //
+  //   (a) Does a tunnel SERVICE currently exist on this machine? The panel
+  //       needs to know this on entry so it can offer Disconnect instead
+  //       of Connect when the user lands on a session that already has a
+  //       tunnel installed (e.g. the app was closed while the service
+  //       stayed running, or the install succeeded but the page reloaded).
+  //   (b) Has WireGuard handshaked successfully? Useful for diagnostics
+  //       chips ("Tunnel up 12s") but NOT load-bearing for the disconnect
+  //       button — a tunnel installed but never handshaked still needs
+  //       to be uninstalled before a fresh connect.
+  //
+  // `sc.exe query` is the locale-immune source of truth for (a) — same
+  // probe `tunnelServiceExistsWindows` uses for the teardown gate. We
+  // promote it here so the renderer's `vpn:status` reflects "the OS has
+  // a WireGuardTunnel$rud1 service" the moment the user opens the panel,
+  // without waiting for a handshake. netsh remains as a secondary IP
+  // probe but we no longer require it to flip `connected`.
+  if (await tunnelServiceExistsWindows()) {
+    // netsh interface show doesn't carry an IP for WireGuard tunnels —
+    // they're not standard netsh-managed interfaces. Returning just
+    // `connected: true` is enough: the renderer paints the device's
+    // VPN IP from the cloud's `VpnConfig.address` (the canonical
+    // allocation) rather than relying on the desktop bridge for it.
+    return { connected: true };
   }
+  return { connected: false };
 }
 
 async function connectUnix(wgConfig: string): Promise<void> {
@@ -244,8 +282,19 @@ async function statusUnix(): Promise<{ connected: boolean; ip?: string }> {
   try {
     const wg = wgPath();
     const { stdout } = await execFileAsync(wg, ["show", TUNNEL_NAME]);
-    return parseWgShow(stdout);
+    // Same precondition as statusWindows: when `wg show <name>` returns
+    // 0 the interface exists in the kernel — that's what the renderer
+    // means by "connected" for purposes of choosing Connect vs
+    // Disconnect. parseWgShow used to require a "latest handshake" line
+    // which made an installed-but-unhandshaked tunnel report `false`,
+    // and the panel kept offering Connect over a tunnel that already
+    // existed → the next install collided with "Tunnel already
+    // installed" on systems that re-use the wg interface name.
+    const parsed = parseWgShow(stdout);
+    return parsed.ip ? { connected: true, ip: parsed.ip } : { connected: true };
   } catch {
+    // Non-zero from `wg show` means the interface isn't there — that's
+    // the only case where we want to offer Connect.
     return { connected: false };
   }
 }
@@ -288,7 +337,25 @@ export async function vpnConnect(wgConfig: string): Promise<void> {
   //      device endpoint changed); rolling the service picks it up.
   await teardownIfPresent();
   if (process.platform === "win32") {
-    await connectWindows(wgConfig);
+    try {
+      await connectWindows(wgConfig);
+    } catch (err) {
+      // Defence in depth against the SCM DELETE_PENDING race: even with
+      // teardownIfPresent's 3s flush window, a slow machine (or an SCM
+      // backed up by an unrelated install) can still surface "Tunnel
+      // already installed and running" on the very next install. Single
+      // retry: tear down again, then install. If THAT still fails the
+      // error propagates and the renderer surfaces the toast — at that
+      // point we've spent ~6s on retry budget and something genuinely
+      // odd is going on.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/already installed/i.test(msg)) {
+        await teardownIfPresent();
+        await connectWindows(wgConfig);
+      } else {
+        throw err;
+      }
+    }
   } else {
     await connectUnix(wgConfig);
   }
