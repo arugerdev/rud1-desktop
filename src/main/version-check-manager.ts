@@ -29,7 +29,7 @@
  *     promotes the state out of "error".
  */
 
-import { createHash } from "crypto";
+import { createHash, createPublicKey, verify as cryptoVerify } from "crypto";
 
 import { __test as autoUpdaterInternals, type AutoUpdateState } from "./auto-updater";
 
@@ -178,7 +178,16 @@ export type VersionCheckState =
         | "signature-unreachable"
         | "signature-empty"
         | "signature-http-status"
-        | "signature-not-supported-by-manifest-version";
+        | "signature-not-supported-by-manifest-version"
+        // Iter 49 — sig-VERIFY (independent of iter-48 sig-strict).
+        // `signature-pubkey-misconfigured` fires when SIG_VERIFY=1 is
+        // set but `RUD1_DESKTOP_SIG_PUBKEY` is missing or malformed.
+        // `signature-invalid` collapses BOTH parse failures (malformed
+        // sidecar bytes — wrong algo prefix, length, base64) AND verify
+        // failures (good shape, but the ed25519 signature doesn't match
+        // the publisher pubkey + signed-data). Iter 50 may split.
+        | "signature-pubkey-misconfigured"
+        | "signature-invalid";
       // Always populated when the manifest carried a signatureUrl
       // (reasons 1/2/3); `null` when the gate fired because the
       // manifest is < v3 (reason 4 — there's no URL to report).
@@ -1349,6 +1358,140 @@ export function formatVersionCheckSummary(state: VersionCheckState): string {
 const BRIDGE_DOWNLOAD_URL_UNSAFE_CHARS = /[\x00-\x1f\x7f\s"<>\\^`{|}]/;
 const BRIDGE_DOWNLOAD_URL_MAX_LENGTH = 2048;
 
+// ─── Iter 49 — minisign signature parse + verify ──────────────────────────
+//
+// The iter-48 fetch gate confirms reachability + a non-empty body. Iter 49
+// layers REAL ed25519 minisign verification on top: when sig-verify is on,
+// the fetched bytes are parsed as a minisign sidecar (algo `0x4564` ||
+// keyId(8) || ed25519_signature(64) → ~100 base64 chars on line 2 of the
+// file) and the signature is verified against a hardcoded publisher
+// pubkey using Node's built-in `crypto` module (no new deps).
+//
+// Two pure helpers, both exported via the test hatch:
+//   • parseMinisignSignature(bytes) → { keyId, signature } | null
+//   • verifyMinisignSignature({ pubkey, signedData, sigBytes }) → boolean
+//
+// Neither helper throws on malformed input — they return null / false so
+// the gate caller can pipeline through `?? null` and surface the
+// `signature-invalid` reason (which collapses parse + verify failures
+// for now; iter 50 can split if support readers want the distinction).
+
+const MINISIGN_ALGO_BYTE_0 = 0x45; // 'E'
+const MINISIGN_ALGO_BYTE_1 = 0x64; // 'd'  → "Ed" legacy algo prefix
+const MINISIGN_KEYID_LEN = 8;
+const MINISIGN_SIG_LEN = 64;
+const MINISIGN_RAW_LEN = 2 + MINISIGN_KEYID_LEN + MINISIGN_SIG_LEN; // 74 bytes
+
+// SPKI prefix for an X.509 ed25519 SubjectPublicKeyInfo. `crypto.createPublicKey`
+// requires DER-wrapped pubkey bytes when format='der' / type='spki' — the
+// raw 32-byte ed25519 pubkey from the minisign envelope must be prefixed
+// with this 12-byte ASN.1 header to round-trip through the loader.
+//   30 2a 30 05 06 03 2b 65 70  03 21 00
+// (SEQUENCE(42) → SEQUENCE(5) → OID 1.3.101.112 ed25519 → BIT STRING(33),
+//  zero unused bits, then the 32 raw pubkey bytes).
+const ED25519_SPKI_PREFIX = Buffer.from([
+  0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+]);
+
+/**
+ * Iter 49 — parse a minisign sidecar file's bytes into the algo-stripped
+ * keyId + signature. Returns null on ANY malformed input. NEVER throws.
+ *
+ * The sidecar text format:
+ *
+ *     untrusted comment: <free text>\n
+ *     <base64 of (0x4564 || keyId(8) || sig(64))>\n
+ *     trusted comment: <free text>\n
+ *     <base64 of sig(64)>\n
+ *
+ * For the legacy format we only care about line 2 (the untrusted-signature
+ * line). The trusted-comment line + the second base64 line are accepted
+ * but ignored — iter 50+ can layer trusted-comment verification on top.
+ *
+ * Comment-only files (no signature line at all) are rejected as malformed.
+ */
+export function parseMinisignSignature(
+  bytes: Buffer,
+): { keyId: Buffer; signature: Buffer } | null {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) return null;
+  // Decode as UTF-8 — minisign sidecars are pure ASCII so any
+  // non-ASCII byte will round-trip into a replacement char and fail
+  // the strict base64 regex below.
+  let text: string;
+  try {
+    text = bytes.toString("utf8");
+  } catch {
+    return null;
+  }
+  // Normalise CRLF → LF so a Windows-line-ending sidecar parses the
+  // same as a POSIX one. Then split on LF and discard trailing blanks.
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  // Drop empty trailing lines.
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length < 2) return null;
+  // Find the first non-comment line — that's our base64 signature line.
+  // A "comment" is any line starting with `untrusted comment:` or
+  // `trusted comment:` (the two minisign conventions). Other lines are
+  // rejected as malformed: a real minisign file never has free-form
+  // text outside the two comment slots.
+  let sigLine: string | null = null;
+  for (const line of lines) {
+    if (line.startsWith("untrusted comment:") || line.startsWith("trusted comment:")) {
+      continue;
+    }
+    sigLine = line;
+    break;
+  }
+  if (sigLine == null || sigLine.length === 0) return null;
+  // Strict base64: only the standard charset + optional `=` padding.
+  if (!/^[A-Za-z0-9+/]+=*$/.test(sigLine)) return null;
+  let raw: Buffer;
+  try {
+    raw = Buffer.from(sigLine, "base64");
+  } catch {
+    return null;
+  }
+  if (raw.length !== MINISIGN_RAW_LEN) return null;
+  if (raw[0] !== MINISIGN_ALGO_BYTE_0 || raw[1] !== MINISIGN_ALGO_BYTE_1) return null;
+  const keyId = raw.subarray(2, 2 + MINISIGN_KEYID_LEN);
+  const signature = raw.subarray(2 + MINISIGN_KEYID_LEN);
+  return { keyId, signature };
+}
+
+/**
+ * Iter 49 — verify an ed25519 signature against the publisher pubkey.
+ *
+ * `pubkey` is the RAW 32-byte ed25519 pubkey (already stripped of the
+ *   minisign algo + keyId prefix by `parseSigPubkey`).
+ * `signedData` is the bytes the signature covers (for our use, the
+ *   manifest's pinned SHA-256 hex string from iter-31, encoded as UTF-8).
+ * `sigBytes` is the 64-byte ed25519 signature (already extracted from
+ *   the sidecar by `parseMinisignSignature`).
+ *
+ * Returns false on ANY failure — bad pubkey, wrong signature length,
+ * crypto module rejecting the buffer, signature mismatch. NEVER throws.
+ */
+export function verifyMinisignSignature(args: {
+  pubkey: Buffer;
+  signedData: Buffer;
+  sigBytes: Buffer;
+}): boolean {
+  if (!Buffer.isBuffer(args.pubkey) || args.pubkey.length !== 32) return false;
+  if (!Buffer.isBuffer(args.signedData)) return false;
+  if (!Buffer.isBuffer(args.sigBytes) || args.sigBytes.length !== MINISIGN_SIG_LEN) {
+    return false;
+  }
+  try {
+    const der = Buffer.concat([ED25519_SPKI_PREFIX, args.pubkey]);
+    const publicKey = createPublicKey({ key: der, format: "der", type: "spki" });
+    // ed25519 uses null algorithm — Node's `crypto.verify` recognises
+    // the null first arg as "use the key's native algorithm".
+    return cryptoVerify(null, args.signedData, publicKey, args.sigBytes);
+  } catch {
+    return false;
+  }
+}
+
 // ─── Iter 48 — signature-fetch gate ────────────────────────────────────────
 //
 // `applySignatureFetchGate` is the pre-install seam the index.ts tray
@@ -1406,6 +1549,29 @@ export interface SignatureFetchGateOptions {
   fetch?: typeof globalThis.fetch;
   /** Wall clock at gate-time. Defaults to `Date.now()`. */
   now?: number;
+  /**
+   * Iter 49 — when true, after a successful fetch the gate parses the
+   * sidecar bytes as a minisign signature and verifies them against
+   * `verifyPubkey` over `verifySignedData`. Off → byte-identical iter-48
+   * passthrough. The flag is independent of the iter-48 sig-strict
+   * gate (a publisher can opt into FETCH-only OR FETCH+VERIFY).
+   */
+  verifyEnabled?: boolean;
+  /**
+   * Iter 49 — raw 32-byte ed25519 publisher pubkey (already stripped
+   * of the minisign algo + keyId prefix by `parseSigPubkey`). Required
+   * when `verifyEnabled === true`; null/undefined surfaces the
+   * `signature-pubkey-misconfigured` reason.
+   */
+  verifyPubkey?: Buffer | null;
+  /**
+   * Iter 49 — bytes the signature covers. For our use, the manifest's
+   * pinned SHA-256 hex string (from iter-31), encoded as UTF-8. The
+   * gate caller threads this in from `lastManifestSha256`. Optional —
+   * an empty / missing signed-data is treated as a verify failure
+   * (the verifier returns false on a mismatched signature).
+   */
+  verifySignedData?: Buffer | null;
 }
 
 /**
@@ -1549,6 +1715,67 @@ export async function applySignatureFetchGate(
         manifestVersion,
         checkedAt: now,
       };
+    }
+    // Iter 49 — sig-VERIFY layer. Off → byte-identical iter-48 passthrough.
+    // On → parse the sidecar bytes as a minisign signature and verify
+    // them against the publisher pubkey over the signed-data. Pubkey
+    // misconfiguration (missing / wrong-length / null) fails closed
+    // with `signature-pubkey-misconfigured` BEFORE attempting parse —
+    // a misconfigured publisher should see a distinct, actionable
+    // reason (rather than the generic `signature-invalid`).
+    if (options.verifyEnabled === true) {
+      if (
+        options.verifyPubkey == null ||
+        !Buffer.isBuffer(options.verifyPubkey) ||
+        options.verifyPubkey.length !== 32
+      ) {
+        return {
+          kind: "update-blocked-by-signature-fetch",
+          reason: "signature-pubkey-misconfigured",
+          signatureUrl: validated,
+          currentVersion: state.current,
+          targetVersion: state.latest,
+          downloadUrl: state.downloadUrl,
+          releaseNotesUrl: state.releaseNotesUrl,
+          manifestVersion,
+          checkedAt: now,
+        };
+      }
+      const parsed = parseMinisignSignature(Buffer.from(buf));
+      if (parsed == null) {
+        return {
+          kind: "update-blocked-by-signature-fetch",
+          reason: "signature-invalid",
+          signatureUrl: validated,
+          currentVersion: state.current,
+          targetVersion: state.latest,
+          downloadUrl: state.downloadUrl,
+          releaseNotesUrl: state.releaseNotesUrl,
+          manifestVersion,
+          checkedAt: now,
+        };
+      }
+      const signedData = Buffer.isBuffer(options.verifySignedData)
+        ? options.verifySignedData
+        : Buffer.alloc(0);
+      const ok = verifyMinisignSignature({
+        pubkey: options.verifyPubkey,
+        signedData,
+        sigBytes: parsed.signature,
+      });
+      if (!ok) {
+        return {
+          kind: "update-blocked-by-signature-fetch",
+          reason: "signature-invalid",
+          signatureUrl: validated,
+          currentVersion: state.current,
+          targetVersion: state.latest,
+          downloadUrl: state.downloadUrl,
+          releaseNotesUrl: state.releaseNotesUrl,
+          manifestVersion,
+          checkedAt: now,
+        };
+      }
     }
     // Pass — return the original verdict UNCHANGED.
     return state;
@@ -2057,7 +2284,11 @@ export interface BlockedBySignatureFetchDiagnosticsState {
     | "signature-unreachable"
     | "signature-empty"
     | "signature-http-status"
-    | "signature-not-supported-by-manifest-version";
+    | "signature-not-supported-by-manifest-version"
+    // Iter 49 — see VersionCheckState union for rationale on
+    // collapsing parse + verify failures into `signature-invalid`.
+    | "signature-pubkey-misconfigured"
+    | "signature-invalid";
   signatureUrl: string | null;
   httpStatus?: number;
   currentVersion: string;
@@ -2153,4 +2384,14 @@ export const __test = {
   applySignatureFetchGate,
   buildBlockedBySignatureFetchDiagnosticsBlob,
   SIG_FETCH_MIN_BYTES,
+  // Iter 49 — minisign sidecar parser + ed25519 signature verifier.
+  // Pure functions, no env / fs deps; the iter-49 test suite uses
+  // crypto.generateKeyPairSync('ed25519') + crypto.sign to construct
+  // fixtures so tests don't depend on a hardcoded publisher key.
+  parseMinisignSignature,
+  verifyMinisignSignature,
+  ED25519_SPKI_PREFIX,
+  MINISIGN_SIG_LEN,
+  MINISIGN_KEYID_LEN,
+  MINISIGN_RAW_LEN,
 };

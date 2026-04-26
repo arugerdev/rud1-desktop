@@ -304,6 +304,29 @@ const AUTO_UPDATE_ROLLOUT_FORCE_ENV = "RUD1_DESKTOP_ROLLOUT_FORCE";
 // the literal "1" enables; "true", "yes", "on", "0", "", undefined all
 // fall through to the persisted-config read.
 const SIG_STRICT_ENV = "RUD1_DESKTOP_SIG_STRICT";
+// Iter 49 — signature-VERIFY mode (independent of iter-48 SIG_STRICT —
+// SIG_STRICT is FETCH+reachability; SIG_VERIFY is FETCH+CRYPTO). The
+// operator can opt into FETCH-only (iter-48 reachability gate) OR
+// FETCH+VERIFY (this iter's ed25519 minisign signature check). Both
+// flags are independent: turning SIG_VERIFY on does NOT imply SIG_STRICT.
+// In practice index.ts wires VERIFY behind STRICT so a publisher who
+// wants crypto turns BOTH on, but the parser/gate keep them separate so
+// a future "verify if a sidecar is advertised, otherwise allow" mode
+// can drop in without re-plumbing.
+//
+// Truthiness contract MIRRORS iter-48 / iter-31 / iter-35: only the
+// LITERAL "1" enables. Persisted-config sibling (`sigVerify` boolean)
+// for MDM-style deployments.
+const SIG_VERIFY_ENV = "RUD1_DESKTOP_SIG_VERIFY";
+// Iter 49 — minisign publisher pubkey (the line beginning with `RWQ`
+// in a typical `minisign.pub`). Base64-encoded `0x4564` (algo) ||
+// keyId(8) || ed25519_pubkey(32) — 42 raw bytes → ~56 base64 chars.
+// When `SIG_VERIFY=1` is set and this var is missing / malformed, the
+// gate fails closed with the new `signature-pubkey-misconfigured`
+// reason. Pinning the key in env (not source) so a single rebuild
+// doesn't require a code change to rotate keys; iter 50+ may move
+// to a key registry once rotation becomes a real workflow.
+const SIG_PUBKEY_ENV = "RUD1_DESKTOP_SIG_PUBKEY";
 // Iter 48 — per-fetch timeout for the .sig HEAD/GET. Short enough that
 // a stuck CDN doesn't block the operator's "Restart to install" click
 // for more than a few seconds; long enough that a slow phone tether
@@ -565,6 +588,99 @@ export function parseSigFetchTimeoutMs(env?: NodeJS.ProcessEnv): number {
 }
 
 /**
+ * Iter 49 — sig-verify gate (mirrors iter-48 sig-strict pattern).
+ *
+ * Off by default. Truthiness: env var must be the LITERAL "1" — same
+ * unambiguous-toggle contract as the iter-31 strict / iter-48 sig-strict
+ * gates. Independent of every other auto-update flag — a developer on
+ * `npm run dev` may want to enable verify against a fixture key without
+ * flipping any other gate.
+ *
+ * Persisted-config sibling (`sigVerify` boolean) for MDM-style
+ * deployments that pin the setting without exporting an env var.
+ */
+export function isSigVerifyEnabled(opts: {
+  env?: NodeJS.ProcessEnv;
+  appOverride?: { getPath: (n: string) => string };
+  fileSystem?: typeof fs;
+} = {}): boolean {
+  const env = opts.env ?? process.env;
+  const a = opts.appOverride ?? deps.app ?? electronApp;
+  const fileSystem = opts.fileSystem ?? deps.fileSystem ?? fs;
+  if (env[SIG_VERIFY_ENV] === "1") return true;
+  if (!a) return false;
+  const cfg = readPersistedConfigSigVerify(() => a.getPath("userData"), fileSystem);
+  return cfg.sigVerify === true;
+}
+
+/**
+ * Read the `sigVerify` flag from the persisted config file. Sibling of
+ * `readPersistedConfigSigStrict` for the same reason as the iter-48
+ * trio: a hand-edited file with one valid and one typo'd field stays
+ * half-functional rather than collapsing the whole loader.
+ */
+function readPersistedConfigSigVerify(
+  getUserData: () => string,
+  fileSystem: typeof fs,
+): { sigVerify?: boolean } {
+  try {
+    const p = path.join(getUserData(), AUTO_UPDATE_CONFIG_FILE);
+    const raw = fileSystem.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.sigVerify === "boolean") {
+      return { sigVerify: parsed.sigVerify };
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Iter 49 — parse the `RUD1_DESKTOP_SIG_PUBKEY` env var into a raw
+ * 32-byte ed25519 public key. The env value is the BASE64 line that
+ * appears in a `minisign.pub` file (typically beginning with `RWQ`):
+ *
+ *     base64( 0x45 0x64 || keyId(8 bytes) || ed25519_pubkey(32 bytes) )
+ *
+ * Total raw length: 42 bytes → ~56 base64 characters. We strip the
+ * algo + keyId prefix and return only the 32-byte pubkey suitable for
+ * passing to `crypto.createPublicKey({ format: 'der', type: 'spki' })`
+ * once wrapped in the SPKI prefix.
+ *
+ * Returns null on any malformed input — missing env var, empty string,
+ * non-base64 chars, wrong decoded length, wrong algorithm prefix. NO
+ * throws. The gate caller pipelines through `?? null` and surfaces the
+ * `signature-pubkey-misconfigured` reason on null.
+ */
+export function parseSigPubkey(
+  env?: NodeJS.ProcessEnv,
+): { keyId: Buffer; pubkey: Buffer } | null {
+  const e = env ?? process.env;
+  const raw = e[SIG_PUBKEY_ENV];
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  // Strict base64: only the standard charset + optional `=` padding.
+  // Reject anything else outright so a malformed env var doesn't slip
+  // through Buffer.from's lenient decoder (which silently strips
+  // unknown chars).
+  if (!/^[A-Za-z0-9+/]+=*$/.test(trimmed)) return null;
+  let decoded: Buffer;
+  try {
+    decoded = Buffer.from(trimmed, "base64");
+  } catch {
+    return null;
+  }
+  // 2 (algo) + 8 (keyId) + 32 (pubkey) = 42 bytes
+  if (decoded.length !== 42) return null;
+  if (decoded[0] !== 0x45 || decoded[1] !== 0x64) return null; // 'Ed' algo prefix
+  const keyId = decoded.subarray(2, 10);
+  const pubkey = decoded.subarray(10, 42);
+  return { keyId, pubkey };
+}
+
+/**
  * Read the `rolloutForce` flag from the persisted config file.
  * Sibling of `readPersistedConfigStrict` for the same reason: a
  * hand-edited file with one valid and one typo'd field stays half-
@@ -805,6 +921,14 @@ export const __test = {
   isSigStrictEnabled,
   readPersistedConfigSigStrict,
   parseSigFetchTimeoutMs,
+  // Iter 49 — sig-verify gate (independent of sig-strict) + minisign
+  // pubkey env parser. The verify gate is wired through
+  // applySignatureFetchGate — see version-check-manager.ts.
+  SIG_VERIFY_ENV,
+  SIG_PUBKEY_ENV,
+  isSigVerifyEnabled,
+  readPersistedConfigSigVerify,
+  parseSigPubkey,
   setStateForTesting: (s: AutoUpdateState) => { state = s; },
   resetStateForTesting: () => { state = { kind: "idle" }; listeners = []; deps = {}; },
 };

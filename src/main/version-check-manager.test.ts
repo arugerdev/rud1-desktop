@@ -1,4 +1,17 @@
 import { describe, it, expect } from "vitest";
+// Iter 49 — crypto for fixture generation (ed25519 keypair + raw signature).
+// Tests construct minisign sidecar bytes from scratch so they don't depend
+// on a hardcoded publisher key shipped in source.
+import { generateKeyPairSync, sign as cryptoSign, KeyObject } from "crypto";
+
+// Iter 49 — env helpers live in auto-updater.ts (sigStrict / sigVerify
+// share a module). Imported at top-level so the iter-49 env-helper
+// suite has stable schema-checked references rather than going through
+// require() (which vitest's ESM loader rejects).
+import {
+  parseSigPubkey,
+  isSigVerifyEnabled,
+} from "./auto-updater";
 
 import {
   VersionCheckManager,
@@ -4402,5 +4415,597 @@ describe("iter-31 sha256 strict + iter-48 sig strict composition (iter 48)", () 
     // The iter-31 sha256 field on the manifest is independent of
     // the iter-48 gate's outcome — pinning the contract.
     expect(manifest!.sha256).toBe(VALID_SHA);
+  });
+});
+
+// ─── Iter 49 — minisign parse + verify + gate integration ──────────────────
+//
+// Layered on iter-48's fetch gate. Tests construct ed25519 keypairs +
+// real ed25519 signatures via Node's `crypto` module so we don't depend
+// on a hardcoded publisher key in the test fixture. Coverage:
+//
+//   parseMinisignSignature:
+//     1. well-formed sidecar with both untrusted + trusted comments
+//     2. well-formed sidecar with only the untrusted-comment line
+//     3. CRLF line endings normalize to LF
+//     4. malformed length (raw decoded bytes != 74)
+//     5. wrong algorithm prefix (not 0x4564)
+//     6. base64 garbage (non-base64 chars)
+//     7. missing newlines / single-line input rejected
+//     8. comment-only file (no signature line) rejected
+//     9. empty buffer / non-buffer input rejected
+//
+//   verifyMinisignSignature:
+//    10. good signature → true
+//    11. wrong pubkey → false
+//    12. tampered signed-data → false
+//    13. wrong-length pubkey → false
+//    14. wrong-length sigBytes → false
+//
+//   applySignatureFetchGate (verify on):
+//    15. verify-on + fetch-fails-first → stops at fetch (verify never runs)
+//    16. verify-on + parse-fails-on-fetched-bytes → signature-invalid
+//    17. verify-on + verify-passes → original verdict UNCHANGED
+//    18. verify-on + missing pubkey → signature-pubkey-misconfigured
+//    19. verify-on + verify-fails (good shape, wrong sig) → signature-invalid
+//    20. verify-OFF + fetch passes → byte-identical iter-48 passthrough
+describe("parseMinisignSignature — iter 49", () => {
+  const { parseMinisignSignature } = versionCheckInternals;
+
+  // Construct a well-formed minisign sidecar buffer for the given raw
+  // 64-byte signature + 8-byte keyId. The legacy minisign format:
+  //   untrusted comment: <text>\n
+  //   <base64 of (0x4564 || keyId(8) || sig(64))>\n
+  //   trusted comment: <text>\n
+  //   <base64 of trusted-sig(64)>\n
+  function buildSidecar(
+    keyId: Buffer,
+    sig: Buffer,
+    opts: {
+      includeTrusted?: boolean;
+      lineEnding?: "\n" | "\r\n";
+      trailingNewline?: boolean;
+    } = {},
+  ): Buffer {
+    const eol = opts.lineEnding ?? "\n";
+    const includeTrusted = opts.includeTrusted ?? true;
+    const trailing = opts.trailingNewline ?? true;
+    const raw = Buffer.concat([Buffer.from([0x45, 0x64]), keyId, sig]);
+    const sigB64 = raw.toString("base64");
+    let out =
+      "untrusted comment: signature from minisign secret key" +
+      eol +
+      sigB64;
+    if (includeTrusted) {
+      const trustedSigB64 = sig.toString("base64");
+      out +=
+        eol +
+        "trusted comment: timestamp:0\tfile:rud1-update.bin" +
+        eol +
+        trustedSigB64;
+    }
+    if (trailing) out += eol;
+    return Buffer.from(out, "utf8");
+  }
+
+  const KEY_ID = Buffer.alloc(8, 0xab);
+  const SIG = Buffer.alloc(64, 0xcd);
+
+  // 1. Both comment lines present.
+  it("parses a well-formed sidecar with both untrusted + trusted comments", () => {
+    const out = parseMinisignSignature(buildSidecar(KEY_ID, SIG));
+    expect(out).not.toBeNull();
+    expect(out!.keyId.equals(KEY_ID)).toBe(true);
+    expect(out!.signature.equals(SIG)).toBe(true);
+  });
+
+  // 2. Only untrusted comment.
+  it("parses a sidecar with ONLY the untrusted-comment line (trusted block absent)", () => {
+    const out = parseMinisignSignature(
+      buildSidecar(KEY_ID, SIG, { includeTrusted: false }),
+    );
+    expect(out).not.toBeNull();
+    expect(out!.signature.equals(SIG)).toBe(true);
+  });
+
+  // 3. CRLF normalization.
+  it("normalises CRLF line endings (Windows-saved sidecar parses)", () => {
+    const out = parseMinisignSignature(
+      buildSidecar(KEY_ID, SIG, { lineEnding: "\r\n" }),
+    );
+    expect(out).not.toBeNull();
+    expect(out!.keyId.equals(KEY_ID)).toBe(true);
+  });
+
+  // 4. Wrong decoded length — too short.
+  it("rejects a sidecar whose base64 decodes to < 74 bytes", () => {
+    const shortRaw = Buffer.concat([Buffer.from([0x45, 0x64]), Buffer.alloc(8, 0)]); // 10 bytes
+    const text =
+      "untrusted comment: x\n" + shortRaw.toString("base64") + "\n";
+    const out = parseMinisignSignature(Buffer.from(text, "utf8"));
+    expect(out).toBeNull();
+  });
+
+  // 4b. Wrong decoded length — too long.
+  it("rejects a sidecar whose base64 decodes to > 74 bytes", () => {
+    const longRaw = Buffer.concat([
+      Buffer.from([0x45, 0x64]),
+      Buffer.alloc(80, 0),
+    ]);
+    const text =
+      "untrusted comment: x\n" + longRaw.toString("base64") + "\n";
+    expect(parseMinisignSignature(Buffer.from(text, "utf8"))).toBeNull();
+  });
+
+  // 5. Wrong algo prefix.
+  it("rejects a sidecar with an algorithm prefix other than 0x4564", () => {
+    const wrongAlgo = Buffer.concat([
+      Buffer.from([0x45, 0x44]), // 'ED' (uppercase) — not 'Ed'
+      KEY_ID,
+      SIG,
+    ]);
+    const text =
+      "untrusted comment: x\n" + wrongAlgo.toString("base64") + "\n";
+    expect(parseMinisignSignature(Buffer.from(text, "utf8"))).toBeNull();
+  });
+
+  // 6. Base64 garbage on the signature line.
+  it("rejects a sidecar with non-base64 characters on the signature line", () => {
+    const text = "untrusted comment: x\nthis-is-not-base64!@#$%\n";
+    expect(parseMinisignSignature(Buffer.from(text, "utf8"))).toBeNull();
+  });
+
+  // 7. Missing newline — single-line input has no signature line at all
+  //    once we drop the comment; the function must reject.
+  it("rejects a single-line input (no newline → only the comment, no sig line)", () => {
+    const text = "untrusted comment: only a comment, no signature";
+    expect(parseMinisignSignature(Buffer.from(text, "utf8"))).toBeNull();
+  });
+
+  // 8. Comment-only file — both lines are comments.
+  it("rejects a comment-only file (no signature line)", () => {
+    const text =
+      "untrusted comment: alpha\ntrusted comment: beta\n";
+    expect(parseMinisignSignature(Buffer.from(text, "utf8"))).toBeNull();
+  });
+
+  // 9. Empty / non-buffer.
+  it("rejects an empty buffer + non-buffer input", () => {
+    expect(parseMinisignSignature(Buffer.alloc(0))).toBeNull();
+    // @ts-expect-error — runtime guard against a non-buffer caller
+    expect(parseMinisignSignature("not-a-buffer")).toBeNull();
+    // @ts-expect-error — runtime guard
+    expect(parseMinisignSignature(null)).toBeNull();
+  });
+});
+
+describe("verifyMinisignSignature — iter 49", () => {
+  const { verifyMinisignSignature } = versionCheckInternals;
+
+  // Generate an ed25519 keypair + extract the raw 32-byte pubkey via the
+  // SPKI DER export (the iter-49 helper expects raw 32 bytes — we strip
+  // the SPKI prefix the same way parseSigPubkey would after stripping
+  // the minisign algo + keyId).
+  function rawPubkeyFrom(key: KeyObject): Buffer {
+    const spki = key.export({ format: "der", type: "spki" }) as Buffer;
+    // SPKI prefix for ed25519 is 12 bytes; the raw pubkey is the trailing 32.
+    return spki.subarray(spki.length - 32);
+  }
+
+  // 10. Good signature.
+  it("returns true for a signature signed by the matching pubkey over the same data", () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const data = Buffer.from("manifest-sha256-hex-string", "utf8");
+    const sigBytes = cryptoSign(null, data, privateKey);
+    const ok = verifyMinisignSignature({
+      pubkey: rawPubkeyFrom(publicKey),
+      signedData: data,
+      sigBytes,
+    });
+    expect(ok).toBe(true);
+  });
+
+  // 11. Wrong pubkey.
+  it("returns false when the signature was made by a DIFFERENT private key", () => {
+    const a = generateKeyPairSync("ed25519");
+    const b = generateKeyPairSync("ed25519");
+    const data = Buffer.from("manifest-sha256-hex-string", "utf8");
+    const sigBytes = cryptoSign(null, data, a.privateKey);
+    const ok = verifyMinisignSignature({
+      pubkey: rawPubkeyFrom(b.publicKey),
+      signedData: data,
+      sigBytes,
+    });
+    expect(ok).toBe(false);
+  });
+
+  // 12. Tampered data.
+  it("returns false when the signed-data has been tampered with", () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const data = Buffer.from("manifest-sha256-hex-string", "utf8");
+    const sigBytes = cryptoSign(null, data, privateKey);
+    const tampered = Buffer.from("manifest-sha256-hex-strinG", "utf8"); // last char G
+    const ok = verifyMinisignSignature({
+      pubkey: rawPubkeyFrom(publicKey),
+      signedData: tampered,
+      sigBytes,
+    });
+    expect(ok).toBe(false);
+  });
+
+  // 13. Wrong-length pubkey.
+  it("returns false on a wrong-length pubkey (NEVER throws)", () => {
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const data = Buffer.from("x", "utf8");
+    const sigBytes = cryptoSign(null, data, privateKey);
+    expect(
+      verifyMinisignSignature({
+        pubkey: Buffer.alloc(31),
+        signedData: data,
+        sigBytes,
+      }),
+    ).toBe(false);
+    expect(
+      verifyMinisignSignature({
+        pubkey: Buffer.alloc(33),
+        signedData: data,
+        sigBytes,
+      }),
+    ).toBe(false);
+  });
+
+  // 14. Wrong-length sigBytes.
+  it("returns false on a wrong-length signature (NEVER throws)", () => {
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const data = Buffer.from("x", "utf8");
+    expect(
+      verifyMinisignSignature({
+        pubkey: rawPubkeyFrom(publicKey),
+        signedData: data,
+        sigBytes: Buffer.alloc(63),
+      }),
+    ).toBe(false);
+    expect(
+      verifyMinisignSignature({
+        pubkey: rawPubkeyFrom(publicKey),
+        signedData: data,
+        sigBytes: Buffer.alloc(65),
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("applySignatureFetchGate verify-on integration — iter 49", () => {
+  const { applySignatureFetchGate } = versionCheckInternals;
+  const GOOD_SIG_URL = "https://rud1.es/desktop/v1.5.0.dmg.sig";
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+
+  function rawPubkeyFrom(key: KeyObject): Buffer {
+    const spki = key.export({ format: "der", type: "spki" }) as Buffer;
+    return spki.subarray(spki.length - 32);
+  }
+
+  function buildSidecar(keyId: Buffer, sig: Buffer): Buffer {
+    const raw = Buffer.concat([Buffer.from([0x45, 0x64]), keyId, sig]);
+    const sigB64 = raw.toString("base64");
+    const text =
+      "untrusted comment: signature from minisign secret key\n" +
+      sigB64 +
+      "\n" +
+      "trusted comment: timestamp:0\tfile:rud1-update.bin\n" +
+      sig.toString("base64") +
+      "\n";
+    return Buffer.from(text, "utf8");
+  }
+
+  function mkUpdateAvailable(extra: Record<string, unknown> = {}): VersionCheckState {
+    return {
+      kind: "update-available",
+      current: "1.4.0",
+      latest: "1.5.0",
+      downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+      releaseNotesUrl: null,
+      checkedAt: FIXED_AT,
+      ...extra,
+    };
+  }
+
+  // 15. verify-on but fetch fails first → stops at fetch (signature-unreachable).
+  it("verify-on + network error during fetch → blocked at fetch stage (signature-unreachable, NOT signature-invalid)", async () => {
+    let parseCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: rawPubkeyFrom(publicKey),
+      verifySignedData: Buffer.from("anything"),
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-unreachable");
+    }
+    expect(parseCalls).toBe(0); // never reached
+  });
+
+  // 16. verify-on + parse fails → signature-invalid.
+  it("verify-on + fetched body is not a valid minisign sidecar → signature-invalid", async () => {
+    // Body >= 16 bytes (clears the iter-48 empty check) but is not a
+    // parseable sidecar. Must fall into the iter-49 parse branch.
+    const garbage = Buffer.from("xxxxxxxxxxxxxxxxxxxxxxxx", "utf8"); // 24 bytes
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(garbage, { status: 200 });
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: rawPubkeyFrom(publicKey),
+      verifySignedData: Buffer.from("anything"),
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-invalid");
+      expect(out.signatureUrl).toBe(GOOD_SIG_URL);
+    }
+  });
+
+  // 17. verify-on + verify passes → original verdict UNCHANGED.
+  it("verify-on + signature verifies → original update-available verdict passes through unchanged", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const signedData = Buffer.from(
+      "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd", // 64-char hex
+      "utf8",
+    );
+    const sigBytes = cryptoSign(null, signedData, privateKey);
+    const sidecar = buildSidecar(Buffer.alloc(8, 0xab), sigBytes);
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(sidecar, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: rawPubkeyFrom(publicKey),
+      verifySignedData: signedData,
+    });
+    expect(out.kind).toBe("update-available");
+    if (out.kind === "update-available") {
+      expect(out.signatureUrl).toBe(GOOD_SIG_URL);
+      expect(out.current).toBe("1.4.0");
+      expect(out.latest).toBe("1.5.0");
+    }
+  });
+
+  // 18. verify-on + missing pubkey → signature-pubkey-misconfigured.
+  it("verify-on + null pubkey → signature-pubkey-misconfigured (fail closed before parse)", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(Buffer.alloc(64, 0), { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: null,
+      verifySignedData: Buffer.from("anything"),
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-pubkey-misconfigured");
+      expect(out.signatureUrl).toBe(GOOD_SIG_URL);
+    }
+  });
+
+  // 18b. verify-on + wrong-length pubkey → signature-pubkey-misconfigured.
+  it("verify-on + wrong-length pubkey → signature-pubkey-misconfigured (the parser would reject downstream too, but we fail fast)", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(Buffer.alloc(64, 0), { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: Buffer.alloc(16), // wrong length
+      verifySignedData: Buffer.from("anything"),
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-pubkey-misconfigured");
+    }
+  });
+
+  // 19. verify-on + good shape but wrong sig → signature-invalid.
+  it("verify-on + valid sidecar parse but signature was made by a DIFFERENT key → signature-invalid", async () => {
+    const a = generateKeyPairSync("ed25519");
+    const b = generateKeyPairSync("ed25519");
+    const signedData = Buffer.from("manifest-sha256", "utf8");
+    const sigBytesByA = cryptoSign(null, signedData, a.privateKey);
+    const sidecar = buildSidecar(Buffer.alloc(8, 0xab), sigBytesByA);
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(sidecar, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      // Verifying against B's pubkey — must reject.
+      verifyPubkey: rawPubkeyFrom(b.publicKey),
+      verifySignedData: signedData,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-invalid");
+    }
+  });
+
+  // 19b. verify-on + tampered signedData → signature-invalid.
+  it("verify-on + signature is for ORIGINAL data but caller passed tampered data → signature-invalid", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const original = Buffer.from("real-manifest-sha256", "utf8");
+    const sigBytes = cryptoSign(null, original, privateKey);
+    const sidecar = buildSidecar(Buffer.alloc(8, 0xab), sigBytes);
+    const tampered = Buffer.from("FAKE-manifest-sha256", "utf8");
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(sidecar, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: rawPubkeyFrom(publicKey),
+      verifySignedData: tampered,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-invalid");
+    }
+  });
+
+  // 20. verify-OFF + fetch passes → byte-identical iter-48 passthrough.
+  //     Pinning the regression: a caller without verifyEnabled must see
+  //     the EXACT iter-48 behaviour (original verdict, not even a parse
+  //     attempt on the body). This is the iter-48 byte-stability contract.
+  it("verify-OFF + fetch passes → original verdict identity-equal (iter-48 byte-stability pin)", async () => {
+    // Body that is NOT a valid sidecar. Under verify-on this would
+    // surface signature-invalid; under verify-off it must passthrough.
+    const garbage = Buffer.alloc(32, 0); // 32 bytes of zero
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(garbage, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      // verifyEnabled is undefined / not passed — must be byte-identical
+      // to iter-48 behaviour.
+    });
+    expect(out).toBe(state); // identity-equal
+  });
+
+  // 20b. verify-OFF (explicit false) + fetch passes → identity-equal.
+  it("verify-OFF (explicit false) + fetch passes → original verdict identity-equal", async () => {
+    const garbage = Buffer.alloc(32, 0);
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(garbage, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: false,
+      // pubkey + signedData even passed but ignored when verifyEnabled is false.
+      verifyPubkey: Buffer.alloc(32),
+      verifySignedData: Buffer.from("ignored"),
+    });
+    expect(out).toBe(state);
+  });
+});
+
+// ─── Iter 49 — env helpers (parseSigPubkey + isSigVerifyEnabled) ───────────
+//
+// Mirrors the iter-48 isSigStrictEnabled / parseSigFetchTimeoutMs test
+// patterns from auto-updater.test.ts but for the new verify gate. Pinning
+// the truthiness contract (literal "1" only) and the base64 parse contract
+// (raw 42 bytes → algo strip → 8-byte keyId + 32-byte pubkey).
+describe("parseSigPubkey + isSigVerifyEnabled — iter 49 env helpers", () => {
+  it("parseSigPubkey: returns null when env var is missing", () => {
+    expect(parseSigPubkey({})).toBeNull();
+  });
+
+  it("parseSigPubkey: returns null on empty / whitespace-only env var", () => {
+    expect(parseSigPubkey({ RUD1_DESKTOP_SIG_PUBKEY: "" })).toBeNull();
+    expect(parseSigPubkey({ RUD1_DESKTOP_SIG_PUBKEY: "   " })).toBeNull();
+  });
+
+  it("parseSigPubkey: returns null on non-base64 chars", () => {
+    expect(parseSigPubkey({ RUD1_DESKTOP_SIG_PUBKEY: "not!base64@" })).toBeNull();
+  });
+
+  it("parseSigPubkey: returns null on wrong decoded length", () => {
+    // 12 bytes of zero → 16 base64 chars, but minisign envelope is 42 bytes.
+    const wrong = Buffer.alloc(12, 0).toString("base64");
+    expect(parseSigPubkey({ RUD1_DESKTOP_SIG_PUBKEY: wrong })).toBeNull();
+  });
+
+  it("parseSigPubkey: returns null on wrong algo prefix", () => {
+    // 42 bytes total, but first two bytes are 0x44 0x44 not 0x45 0x64.
+    const wrongAlgo = Buffer.concat([Buffer.from([0x44, 0x44]), Buffer.alloc(40, 0)]);
+    expect(
+      parseSigPubkey({
+        RUD1_DESKTOP_SIG_PUBKEY: wrongAlgo.toString("base64"),
+      }),
+    ).toBeNull();
+  });
+
+  it("parseSigPubkey: returns { keyId, pubkey } on a well-formed envelope", () => {
+    const keyId = Buffer.alloc(8, 0xab);
+    const pubkey = Buffer.alloc(32, 0xcd);
+    const env = Buffer.concat([Buffer.from([0x45, 0x64]), keyId, pubkey]);
+    const out = parseSigPubkey({
+      RUD1_DESKTOP_SIG_PUBKEY: env.toString("base64"),
+    });
+    expect(out).not.toBeNull();
+    expect(out!.keyId.equals(keyId)).toBe(true);
+    expect(out!.pubkey.equals(pubkey)).toBe(true);
+  });
+
+  it("isSigVerifyEnabled: literal '1' enables; truthy strings DO NOT (mirrors iter-48 contract)", () => {
+    const fakeFs = {
+      readFileSync: () => { throw new Error("ENOENT"); },
+    } as unknown as typeof import("fs");
+    for (const v of ["true", "yes", "on", "0", "", "TRUE", "1 "]) {
+      expect(
+        isSigVerifyEnabled({
+          env: { RUD1_DESKTOP_SIG_VERIFY: v },
+          appOverride: { getPath: () => "/tmp" },
+          fileSystem: fakeFs,
+        }),
+      ).toBe(false);
+    }
+    expect(
+      isSigVerifyEnabled({
+        env: { RUD1_DESKTOP_SIG_VERIFY: "1" },
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+
+  it("isSigVerifyEnabled: env var unset + no persisted flag → false (off-by-default)", () => {
+    const fakeFs = {
+      readFileSync: () => { throw new Error("ENOENT"); },
+    } as unknown as typeof import("fs");
+    expect(
+      isSigVerifyEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+  });
+
+  it("isSigVerifyEnabled: respects persisted-config sigVerify flag when env unset", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ sigVerify: true }),
+    } as unknown as typeof import("fs");
+    expect(
+      isSigVerifyEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
   });
 });

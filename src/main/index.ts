@@ -59,7 +59,9 @@ import {
   isAutoUpdateEnabled,
   isRolloutForceEnabled,
   isSigStrictEnabled,
+  isSigVerifyEnabled,
   parseSigFetchTimeoutMs,
+  parseSigPubkey,
   startBackgroundDownload,
   applyAndRestart,
   configureAutoUpdaterRuntime,
@@ -236,9 +238,25 @@ function rebuildTrayMenu(): void {
           return;
         }
         void (async () => {
+          // Iter 49 — sig-VERIFY (independent of iter-48 sig-strict).
+          // When SIG_VERIFY=1 we additionally crypto-verify the
+          // sidecar bytes against the publisher's ed25519 pubkey.
+          // The signed-data is the manifest's pinned sha256 hex
+          // string (from iter-31). When SIG_VERIFY is OFF this
+          // collapses to a byte-identical iter-48 fetch-only
+          // gate invocation.
+          const verifyEnabled = isSigVerifyEnabled();
+          const parsedPub = verifyEnabled ? parseSigPubkey() : null;
+          const signedData =
+            typeof lastManifestSha256 === "string" && lastManifestSha256.length > 0
+              ? Buffer.from(lastManifestSha256, "utf8")
+              : null;
           const gated = await applySignatureFetchGate(lastVersionCheckState, {
             manifestUrl: VERSION_MANIFEST_URL,
             fetchTimeoutMs: parseSigFetchTimeoutMs(),
+            verifyEnabled,
+            verifyPubkey: parsedPub != null ? parsedPub.pubkey : null,
+            verifySignedData: signedData,
           });
           if (gated.kind === "update-blocked-by-signature-fetch") {
             lastVersionCheckState = gated;
