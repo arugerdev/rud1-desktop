@@ -65,6 +65,25 @@ export function notifyVpnConnected(deviceName?: string) {
 }
 
 /**
+ * Variant of {@link notifyVpnConnected} fired when the agent's reported
+ * endpoint sits inside RFC 6598 (100.64.0.0/10). The tunnel installs but
+ * the WireGuard handshake is statistically certain to fail because the
+ * Pi's ISP is performing carrier-grade NAT — telling the user up-front
+ * saves a 30 s "tunnel installed but no handshake" debugging session.
+ *
+ * Title-cased "Tunnel installed (CGNAT detected)" so it's visually
+ * distinct from the success path even when the body wraps off-screen.
+ */
+export function notifyVpnCgnatWarning(deviceName?: string) {
+  show(
+    "Tunnel installed (CGNAT detected)",
+    deviceName
+      ? `${deviceName} sits behind carrier-grade NAT — handshake is unlikely to complete.`
+      : "Device sits behind carrier-grade NAT — handshake is unlikely to complete.",
+  );
+}
+
+/**
  * Fired after a successful disconnect. The user typically sees the
  * panel switch to "VPN Disconnected" already; this is for when they
  * triggered disconnect from a device's Connect tab and immediately

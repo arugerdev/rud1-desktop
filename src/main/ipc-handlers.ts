@@ -54,6 +54,7 @@ import {
 } from "./usb-manager";
 import {
   notifyVpnConnected,
+  notifyVpnCgnatWarning,
   notifyVpnDisconnected,
   notifyUsbAttached,
   notifyUsbDetached,
@@ -378,9 +379,17 @@ export function registerIpcHandlers(opts: {
     const preflight = inspectConfig(typeof wgConfig === "string" ? wgConfig : "");
     try {
       await vpnConnect(wgConfig);
-      // Fire-and-forget toast. The deviceName isn't available at this
-      // layer; the renderer-side panel still shows the rich state.
-      notifyVpnConnected();
+      // CGNAT path: fire the dedicated warning toast INSTEAD of the
+      // generic success one. The tunnel is technically installed, but
+      // calling it "Connected" would mislead the user into thinking
+      // their handshake will succeed when the ISP-side CGNAT will
+      // almost certainly drop the inbound UDP. Either path is exactly
+      // one notification — we don't double-fire.
+      if (preflight.cgnat) {
+        notifyVpnCgnatWarning();
+      } else {
+        notifyVpnConnected();
+      }
       return {
         ok: true,
         endpoint: preflight.endpoint,
