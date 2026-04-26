@@ -129,11 +129,76 @@ describe("isOriginAllowed — accepted origins (packaged build)", () => {
     expect(isOriginAllowed("https://rud1.es/app?x=1", PACKAGED)).toBe(true);
   });
 
+  it("accepts the www. host alongside the apex by default (PIN)", () => {
+    // Vercel canonicalises one of the two hosts and 308s the other; the
+    // BrowserWindow follows the redirect, so by the time IPC fires the
+    // sender frame is on whichever the canonical happens to be. We
+    // accept both up front so this isn't fragile to a Vercel domain
+    // re-config.
+    expect(isOriginAllowed("https://www.rud1.es/", PACKAGED)).toBe(true);
+    expect(
+      isOriginAllowed("https://www.rud1.es/dashboard/devices/abc/connect", PACKAGED),
+    ).toBe(true);
+  });
+
   it("accepts a custom allowedOrigin when provided", () => {
     expect(
       isOriginAllowed("https://staging.rud1.es/", {
         isPackaged: true,
         allowedOrigin: "https://staging.rud1.es",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts a custom allowedOrigins list (comma-separated env var shape)", () => {
+    const list = ["https://staging.rud1.es", "https://preview.rud1.es"];
+    expect(
+      isOriginAllowed("https://staging.rud1.es/", {
+        isPackaged: true,
+        allowedOrigins: list,
+      }),
+    ).toBe(true);
+    expect(
+      isOriginAllowed("https://preview.rud1.es/x", {
+        isPackaged: true,
+        allowedOrigins: list,
+      }),
+    ).toBe(true);
+    // An origin NOT in the list still fails — the list does NOT widen
+    // the check beyond what's enumerated.
+    expect(
+      isOriginAllowed("https://other.rud1.es/", {
+        isPackaged: true,
+        allowedOrigins: list,
+      }),
+    ).toBe(false);
+  });
+
+  it("allowedOrigins wins when both allowedOrigin and allowedOrigins are set", () => {
+    expect(
+      isOriginAllowed("https://b.example/", {
+        isPackaged: true,
+        allowedOrigin: "https://a.example",
+        allowedOrigins: ["https://b.example"],
+      }),
+    ).toBe(true);
+    expect(
+      isOriginAllowed("https://a.example/", {
+        isPackaged: true,
+        allowedOrigin: "https://a.example",
+        allowedOrigins: ["https://b.example"],
+      }),
+    ).toBe(false);
+  });
+
+  it("an empty allowedOrigins array falls back to defaults (does NOT lock everyone out)", () => {
+    // Defensive: a misconfigured caller passing `[]` mustn't accidentally
+    // brick IPC. We treat empty as "no override" and let the singular
+    // `allowedOrigin` (or the default list) decide.
+    expect(
+      isOriginAllowed("https://rud1.es/", {
+        isPackaged: true,
+        allowedOrigins: [],
       }),
     ).toBe(true);
   });

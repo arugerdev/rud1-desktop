@@ -6,8 +6,9 @@
  * in Electron via window.electronAPI and enables native controls.
  *
  * Configuration (env vars or defaults):
- *   RUD1_APP_URL      — URL to load (default: https://rud1.es)
- *   RUD1_APP_ORIGIN   — allowed origin for IPC (default: https://rud1.es)
+ *   RUD1_APP_URL      — URL to load (default: https://www.rud1.es)
+ *   RUD1_APP_ORIGIN   — allowed origin(s) for IPC, comma-separated
+ *                       (default: https://rud1.es,https://www.rud1.es)
  *   RUD1_DEV_TOOLS    — open DevTools on start (set to "1" for debugging)
  */
 
@@ -70,7 +71,7 @@ import {
   resetAutoUpdateState,
 } from "./auto-updater";
 
-const APP_URL = process.env.RUD1_APP_URL ?? "https://rud1.es";
+const APP_URL = process.env.RUD1_APP_URL ?? "https://www.rud1.es";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 // Iter 29 — manifest URL for the lightweight desktop version check.
 // Defaults to a stable path under the same domain as the app; can be

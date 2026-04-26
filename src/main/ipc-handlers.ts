@@ -121,7 +121,32 @@ export interface VersionCheckAccessor {
   recheck: () => void;
 }
 
-const ALLOWED_ORIGIN = process.env.RUD1_APP_ORIGIN ?? "https://rud1.es";
+// Allowlist of origins the renderer frame can present and still be trusted
+// for IPC. Comma-separated `RUD1_APP_ORIGIN` lets ops pin a single origin
+// per environment (staging, dev, on-prem) without code changes.
+//
+// The default covers the two production hosts Vercel serves the app under:
+// the apex (`https://rud1.es`) and the `www.` host (`https://www.rud1.es`).
+// Whichever one the project's Vercel domain config marks as primary, the
+// other becomes a 308 redirect — and the BrowserWindow follows the redirect,
+// so by the time IPC fires the sender frame is on the canonical host. We
+// accept both up front so the bridge doesn't fight the redirect.
+//
+// Each entry is still exact-matched at the URL.origin level (scheme + host
+// + port). Adding `www.` to the allowlist does NOT loosen the
+// subdomain-smuggling defenses for arbitrary subdomains like
+// `https://evil.rud1.es/` — those still fail.
+const ALLOWED_ORIGINS: readonly string[] = (() => {
+  const raw = process.env.RUD1_APP_ORIGIN;
+  if (raw && raw.trim().length > 0) {
+    const parts = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (parts.length > 0) return parts;
+  }
+  return ["https://rud1.es", "https://www.rud1.es"];
+})();
 
 // Control-character + whitespace + quote rejection list, applied against the
 // RAW sender URL BEFORE any URL parsing. WHATWG URL happily canonicalises
@@ -188,7 +213,13 @@ export function isOpenExternalUrlAllowed(rawUrl: unknown): boolean {
  */
 export function isOriginAllowed(
   rawUrl: unknown,
-  opts: { isPackaged: boolean; allowedOrigin?: string } = { isPackaged: true },
+  opts: {
+    isPackaged: boolean;
+    /** Single allowed origin (back-compat). Mutually exclusive with `allowedOrigins`. */
+    allowedOrigin?: string;
+    /** Multiple allowed origins. Each is exact-matched at URL.origin level. */
+    allowedOrigins?: readonly string[];
+  } = { isPackaged: true },
 ): boolean {
   if (typeof rawUrl !== "string") return false;
   if (rawUrl.length === 0 || rawUrl.length > MAX_SENDER_URL_LENGTH) return false;
@@ -219,17 +250,34 @@ export function isOriginAllowed(
     // a real origin (via RUD1_APP_ORIGIN) still works.
   }
 
-  const allowedOrigin = opts.allowedOrigin ?? ALLOWED_ORIGIN;
-  let allowed: URL;
-  try {
-    allowed = new URL(allowedOrigin);
-  } catch {
-    return false;
+  // Resolve the candidate list. `allowedOrigin` (singular) is honoured for
+  // back-compat; `allowedOrigins` wins when both are present. Empty array
+  // is treated as "no override" so a misconfigured caller passing `[]`
+  // doesn't accidentally allowlist nothing AND fall back to nothing.
+  const candidates: readonly string[] = (() => {
+    if (opts.allowedOrigins && opts.allowedOrigins.length > 0) return opts.allowedOrigins;
+    if (opts.allowedOrigin) return [opts.allowedOrigin];
+    return ALLOWED_ORIGINS;
+  })();
+
+  for (const candidate of candidates) {
+    let allowed: URL;
+    try {
+      allowed = new URL(candidate);
+    } catch {
+      // A malformed entry in the allowlist must NOT silently widen the
+      // check — skip it and let the others (if any) decide. If every
+      // entry is malformed we fall through to the final `return false`,
+      // which is fail-closed.
+      continue;
+    }
+    // `URL.origin` normalises scheme + host + port; it omits path/query/hash.
+    // Equality here forbids prefix smuggling like `https://rud1.es.evil.com/`
+    // AND subdomain smuggling like `https://evil.rud1.es/` for any host that
+    // isn't in the allowlist verbatim.
+    if (parsed.origin === allowed.origin) return true;
   }
-  // `URL.origin` normalises scheme + host + port; it omits path/query/hash.
-  // Equality here forbids prefix smuggling like `https://rud1.es.evil.com/`
-  // AND subdomain smuggling like `https://evil.rud1.es/`.
-  return parsed.origin === allowed.origin;
+  return false;
 }
 
 /**
@@ -279,7 +327,7 @@ export const __test = {
   checkSender,
   UNSAFE_URL_CHARS,
   MAX_SENDER_URL_LENGTH,
-  ALLOWED_ORIGIN,
+  ALLOWED_ORIGINS,
   trustedWebContentsIds,
   // Iter 37 — clipboard / shell allowlists.
   isOpenExternalUrlAllowed,
