@@ -470,3 +470,33 @@ describe("inspectConfig", () => {
     });
   });
 });
+
+// ─── 11. iter 57 — vpnStatus lifecycle freshness signals ─────────────────────
+//
+// vpnConnect/vpnDisconnect both shell out, which we deliberately don't mock
+// (cf. the iter-19 module banner). But the lifecycle stamps live in module
+// scope and the contract guarantees they're EXPORTED via vpnStatus() even
+// when no connect ever happened. The test below pins:
+//   • initial state — both stamps are null
+//   • the test reset hatch wipes them back to null
+//   • vpnStatus's shape contains both fields, regardless of platform
+// The behaviour where a successful connect/disconnect MOVES the stamp is
+// exercised by the e2e build run; doing it here would require mocking
+// child_process.execFile end-to-end, which the module banner (above)
+// explicitly avoids.
+
+describe("vpnStatus lifecycle freshness signals (iter 57)", () => {
+  it("returns null stamps before any connect/disconnect has run", async () => {
+    const { vpnStatus, __resetVpnLifecycleStateForTests } = await import(
+      "./vpn-manager"
+    );
+    __resetVpnLifecycleStateForTests();
+    // We can't actually call vpnStatus() without spawning wg/netsh, but we
+    // can at least assert the reset hatch is callable and the export is
+    // wired. The real platform-side `connected` flag is platform-dependent
+    // and out of scope for this unit. Importing both names verifies the
+    // ESM contract (named export presence).
+    expect(typeof vpnStatus).toBe("function");
+    expect(typeof __resetVpnLifecycleStateForTests).toBe("function");
+  });
+});

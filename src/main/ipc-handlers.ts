@@ -419,11 +419,24 @@ export function registerIpcHandlers(opts: {
   });
 
   ipcMain.handle("vpn:status", async (event) => {
-    if (!checkSender(event)) return { connected: false };
+    // Iter 57: error / unauthorized paths must still satisfy the renderer's
+    // VpnStatusResult shape (lifecycle stamps are part of the contract now);
+    // returning a bare `{connected:false}` would break a strict consumer.
+    if (!checkSender(event)) {
+      return {
+        connected: false,
+        lastConnectedAt: null,
+        lastDisconnectedAt: null,
+      };
+    }
     try {
       return await vpnStatus();
     } catch {
-      return { connected: false };
+      return {
+        connected: false,
+        lastConnectedAt: null,
+        lastDisconnectedAt: null,
+      };
     }
   });
 

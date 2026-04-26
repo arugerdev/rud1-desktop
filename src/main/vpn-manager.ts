@@ -237,6 +237,26 @@ async function statusUnix(): Promise<{ connected: boolean; ip?: string }> {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+// Iter 57: lifecycle freshness signals. The renderer surfaces these next to
+// the cloud's lan.lastAppliedAt chip so the operator gets symmetric
+// "synced Xs ago" feedback on both sides of the tunnel — the Pi side
+// (when LAN routing was re-applied) and the user side (when the desktop
+// last installed/uninstalled the WG tunnel service). Module-scoped state
+// is sufficient: there is exactly one rud1 tunnel per desktop instance
+// and the renderer pulls via `vpn:status`.
+let lastConnectedAt: number | null = null;
+let lastDisconnectedAt: number | null = null;
+
+/**
+ * Test-only helper: reset the lifecycle freshness signals back to their
+ * initial nulls. The module's only mutable state is two timestamps; vitest
+ * `beforeEach`s use this to avoid one test bleeding state into the next.
+ */
+export function __resetVpnLifecycleStateForTests(): void {
+  lastConnectedAt = null;
+  lastDisconnectedAt = null;
+}
+
 export async function vpnConnect(wgConfig: string): Promise<void> {
   ensureWireguardAvailable();
   // Idempotent connect. Three reasons to tear down whatever's currently
@@ -252,19 +272,54 @@ export async function vpnConnect(wgConfig: string): Promise<void> {
   //   3. The peer config could have been re-issued by the cloud (e.g.
   //      device endpoint changed); rolling the service picks it up.
   await teardownIfPresent();
-  if (process.platform === "win32") return connectWindows(wgConfig);
-  return connectUnix(wgConfig);
+  if (process.platform === "win32") {
+    await connectWindows(wgConfig);
+  } else {
+    await connectUnix(wgConfig);
+  }
+  // Stamp AFTER the platform-specific install resolves cleanly. Failure
+  // paths must not move the freshness signal — the operator should see
+  // "no successful install yet" rather than a misleading "synced 12s ago".
+  lastConnectedAt = Date.now();
 }
 
 export async function vpnDisconnect(): Promise<void> {
   ensureWireguardAvailable();
-  if (process.platform === "win32") return disconnectWindows();
-  return disconnectUnix();
+  if (process.platform === "win32") {
+    await disconnectWindows();
+  } else {
+    await disconnectUnix();
+  }
+  lastDisconnectedAt = Date.now();
 }
 
-export async function vpnStatus(): Promise<{ connected: boolean; ip?: string }> {
-  if (process.platform === "win32") return statusWindows();
-  return statusUnix();
+/**
+ * Result of `vpnStatus()`. The lifecycle stamps are exported as ISO 8601
+ * strings (UTC) so the renderer can format them with the same Date helpers
+ * it uses for `lan.lastAppliedAt` from the cloud — keeps "synced Xs ago"
+ * formatting consistent across the desktop UI.
+ */
+export interface VpnStatusResult {
+  connected: boolean;
+  ip?: string;
+  /** ISO timestamp of the last successful `vpnConnect` (null until first run). */
+  lastConnectedAt: string | null;
+  /** ISO timestamp of the last successful `vpnDisconnect` (null until first run). */
+  lastDisconnectedAt: string | null;
+}
+
+export async function vpnStatus(): Promise<VpnStatusResult> {
+  const platformStatus =
+    process.platform === "win32" ? await statusWindows() : await statusUnix();
+  return {
+    ...platformStatus,
+    lastConnectedAt: lastConnectedAt
+      ? new Date(lastConnectedAt).toISOString()
+      : null,
+    lastDisconnectedAt: lastDisconnectedAt
+      ? new Date(lastDisconnectedAt).toISOString()
+      : null,
+  };
 }
 
 export function generateKeyPairInstructions(): string {

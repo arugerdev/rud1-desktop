@@ -18,7 +18,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("vpn:disconnect") as Promise<{ ok: boolean; error?: string }>,
 
     status: () =>
-      ipcRenderer.invoke("vpn:status") as Promise<{ connected: boolean; ip?: string }>,
+      ipcRenderer.invoke("vpn:status") as Promise<{
+        connected: boolean;
+        ip?: string;
+        // Iter 57: lifecycle freshness signals. ISO 8601 (UTC) so the
+        // renderer can format them the same way it formats the cloud's
+        // lan.lastAppliedAt chip. Null until the corresponding action
+        // (connect/disconnect) has succeeded at least once this session.
+        lastConnectedAt: string | null;
+        lastDisconnectedAt: string | null;
+      }>,
   },
 
   usb: {
