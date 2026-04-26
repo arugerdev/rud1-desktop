@@ -343,6 +343,104 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
     }
   }
 
+  function renderBlockedBySignatureFetch(state) {
+    // Iter 48 — sig-strict gate fired. Mirrors renderBlocked's overall
+    // shape (banner + summary rows + actions) but the operator-facing
+    // copy is pinned to the iter-48 reason vocabulary. The "Copy
+    // diagnostics" button's envelope key ordering MUST match
+    // buildBlockedBySignatureFetchDiagnosticsBlob in
+    // version-check-manager.ts byte-for-byte — the iter-48 helper test
+    // is the ground truth.
+    var reason = String(state.reason || '');
+    var banner = 'Update blocked: signature could not be verified (' + escape(reason) + ')';
+    var sigRow = state.signatureUrl
+      ? '<div class="row"><span class="k">Signature URL</span>' +
+          '<span class="v"><code>' + escape(state.signatureUrl) + '</code></span></div>'
+      : '';
+    var statusRow = (typeof state.httpStatus === 'number')
+      ? '<div class="row"><span class="k">HTTP status</span><span class="v">' + escape(state.httpStatus) + '</span></div>'
+      : '';
+    var notes = state.releaseNotesUrl
+      ? '<p><a id="rn-link">What\\'s new — view release notes</a></p>'
+      : '';
+    updatesEl.innerHTML =
+      '<div class="banner">' + banner + '</div>' +
+      '<div class="summary">' +
+        '<div class="row"><span class="k">Currently installed</span><span class="v">v' + escape(state.currentVersion) + '</span></div>' +
+        '<div class="row"><span class="k">Target version</span><span class="v">v' + escape(state.targetVersion) + '</span></div>' +
+        '<div class="row"><span class="k">Reason</span><span class="v">' + escape(reason) + '</span></div>' +
+        sigRow +
+        statusRow +
+      '</div>' +
+      notes +
+      '<div class="actions">' +
+        '<button id="copy-diagnostics">Copy diagnostics</button>' +
+        '<button id="recheck">Check for updates now</button>' +
+      '</div>';
+
+    document.getElementById('copy-diagnostics').addEventListener('click', function() {
+      // Mirrors buildBlockedBySignatureFetchDiagnosticsBlob in
+      // version-check-manager.ts byte-for-byte. Key order:
+      //   capturedAt → kind → currentVersion → targetVersion → reason
+      //   → signatureUrl → httpStatus? → downloadUrl → releaseNotesUrl
+      //   → manifestVersion
+      // httpStatus is OMITTED (not null) when not present — the iter-48
+      // helper test pins the byte shape.
+      function isSigUrlAllowed(u) {
+        if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
+        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+        try {
+          var p = new URL(u);
+          var pr = (p.protocol || '').toLowerCase();
+          if (pr === 'javascript:' || pr === 'data:') return false;
+          if (pr !== 'http:' && pr !== 'https:') return false;
+          if (p.username !== '' || p.password !== '') return false;
+          return /\.(sig|minisig|asc)$/i.test(p.pathname);
+        } catch (e) { return false; }
+      }
+      var validatedSig = (state.signatureUrl != null && isSigUrlAllowed(state.signatureUrl))
+        ? state.signatureUrl
+        : null;
+      // Iter 48 — currentVersion sourced from APP_VERSION (threaded
+      // through from app.getVersion() at HTML build time) when
+      // available, falling back to state.currentVersion. Same
+      // rationale as iter-44/45: state.currentVersion is what the
+      // version-check stored at fetch time, which can drift from
+      // the running app's actual version.
+      var currentVersion4 = (typeof APP_VERSION === 'string' && APP_VERSION.length > 0)
+        ? APP_VERSION
+        : state.currentVersion;
+      var envelope = {
+        capturedAt: new Date().toISOString(),
+        kind: 'update-blocked-by-signature-fetch',
+        currentVersion: currentVersion4,
+        targetVersion: state.targetVersion,
+        reason: state.reason,
+        signatureUrl: validatedSig,
+      };
+      if (typeof state.httpStatus === 'number' && isFinite(state.httpStatus)) {
+        envelope.httpStatus = state.httpStatus;
+      }
+      envelope.downloadUrl = state.downloadUrl != null ? state.downloadUrl : null;
+      envelope.releaseNotesUrl = state.releaseNotesUrl != null ? state.releaseNotesUrl : null;
+      envelope.manifestVersion = state.manifestVersion != null ? state.manifestVersion : null;
+      var blob = JSON.stringify(envelope, null, 2);
+      window.electronAPI.clipboard.writeText(blob).then(function(res) {
+        if (res && res.ok) toast('Copied diagnostics to clipboard');
+        else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+      });
+    });
+    document.getElementById('recheck').addEventListener('click', function() {
+      window.electronAPI.versionCheck.recheck();
+      toast('Re-checking for updates…');
+    });
+    if (state.releaseNotesUrl) {
+      document.getElementById('rn-link').addEventListener('click', function() {
+        window.electronAPI.shell.openExternal(state.releaseNotesUrl);
+      });
+    }
+  }
+
   function renderState(state) {
     if (!state) {
       updatesEl.innerHTML = '<p class="muted">Update status unavailable.</p>';
@@ -350,6 +448,10 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
     }
     if (state.kind === 'update-blocked-by-min-bootstrap') {
       renderBlocked(state);
+      return;
+    }
+    if (state.kind === 'update-blocked-by-signature-fetch') {
+      renderBlockedBySignatureFetch(state);
       return;
     }
     var summary = '';

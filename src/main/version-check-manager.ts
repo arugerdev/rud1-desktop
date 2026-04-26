@@ -153,6 +153,50 @@ export type VersionCheckState =
       signatureUrl?: string;
       checkedAt: number;
     }
+  | {
+      // Iter 48 — sig-strict pre-install gate. The operator opted into
+      // `RUD1_DESKTOP_SIG_STRICT=1` and the manifest's signatureUrl
+      // could not be confirmed: either the fetch failed (network
+      // error / timeout / non-2xx), the body was too small to be a
+      // real sidecar (< 16 bytes), OR the manifest is < v3 and so
+      // CANNOT carry a signatureUrl by design (sig-strict is a
+      // refuse-to-install-without-verification stance; a pre-v3
+      // manifest is incompatible with that contract). The downstream
+      // install path (`startBackgroundDownload` → `applyAndRestart`)
+      // is short-circuited; the operator sees a banner explaining
+      // which gate fired and can fall back to the manual download
+      // path (the bridge URL precedence chain still applies via the
+      // copy-URL button).
+      //
+      // NO actual cryptographic verification is performed in iter 48;
+      // the gate only confirms reachability + minimum-size. Iter 49+
+      // will layer minisign / GPG verification on top with no further
+      // plumbing changes — the verdict envelope, key ordering, and
+      // renderer mirror are stable as of this iter.
+      kind: "update-blocked-by-signature-fetch";
+      reason:
+        | "signature-unreachable"
+        | "signature-empty"
+        | "signature-http-status"
+        | "signature-not-supported-by-manifest-version";
+      // Always populated when the manifest carried a signatureUrl
+      // (reasons 1/2/3); `null` when the gate fired because the
+      // manifest is < v3 (reason 4 — there's no URL to report).
+      signatureUrl: string | null;
+      // Populated only when the fetch returned a response (reason 3).
+      // `undefined` for network errors, timeouts, < v3 blocks, and
+      // empty-body rejects.
+      httpStatus?: number;
+      // Echoed from the underlying `update-available` verdict so the
+      // panel can surface the same context (current/target/etc.) the
+      // operator would have seen had the gate not fired.
+      currentVersion: string;
+      targetVersion: string;
+      downloadUrl: string | null;
+      releaseNotesUrl: string | null;
+      manifestVersion: number | null;
+      checkedAt: number;
+    }
   | { kind: "error"; message: string; checkedAt: number };
 
 export interface VersionCheckOptions {
@@ -1139,6 +1183,40 @@ export function buildVersionCheckMenuItems(
     });
     return items;
   }
+  // Iter 48 — sig-strict gate fired. The download row is replaced by a
+  // disabled label naming the reason; the operator can still re-check
+  // (a transient CDN outage may resolve on the next tick) or copy the
+  // diagnostics blob for support. No download CTA — the whole point of
+  // sig-strict is "refuse to install without verification".
+  if (state.kind === "update-blocked-by-signature-fetch") {
+    const items: MenuItemShape[] = [
+      {
+        label: `Update blocked: signature could not be verified (${state.reason})`,
+        enabled: false,
+      },
+      {
+        label: `Currently installed: v${state.currentVersion}`,
+        enabled: false,
+      },
+      {
+        label: `Target version: v${state.targetVersion}`,
+        enabled: false,
+      },
+    ];
+    if (state.releaseNotesUrl) {
+      items.push({
+        label: "What's new — view release notes",
+        click: () => {
+          handlers.openExternal?.(state.releaseNotesUrl as string);
+        },
+      });
+    }
+    items.push({
+      label: "Check for updates now",
+      click: () => { handlers.recheck?.(); },
+    });
+    return items;
+  }
   // error
   return [
     {
@@ -1233,6 +1311,11 @@ export function formatVersionCheckSummary(state: VersionCheckState): string {
       // Headline summary; the full blocked-state UI is rendered from
       // `formatBlockedStateMessage` and a dedicated banner.
       return `Update blocked: install v${state.requiredMinVersion} manually first.`;
+    case "update-blocked-by-signature-fetch":
+      // Iter 48 — sig-strict gate fired. Headline names the reason in
+      // operator-readable form so the panel banner is self-explanatory
+      // without expanding the diagnostics envelope.
+      return `Update blocked by sig-strict: ${state.reason}.`;
     case "error":
       return `Couldn't check for updates: ${state.message}`;
   }
@@ -1265,6 +1348,226 @@ export function formatVersionCheckSummary(state: VersionCheckState): string {
 
 const BRIDGE_DOWNLOAD_URL_UNSAFE_CHARS = /[\x00-\x1f\x7f\s"<>\\^`{|}]/;
 const BRIDGE_DOWNLOAD_URL_MAX_LENGTH = 2048;
+
+// ─── Iter 48 — signature-fetch gate ────────────────────────────────────────
+//
+// `applySignatureFetchGate` is the pre-install seam the index.ts tray
+// click handler calls BEFORE handing the verdict off to
+// `startBackgroundDownload` → `applyAndRestart`. When sig-strict is OFF
+// (the iter-47 default) the gate is a no-op passthrough — every verdict
+// flows through unchanged, byte-for-byte. When sig-strict is ON the gate
+// inspects the verdict + the source manifest version:
+//
+//   • If verdict is anything other than `update-available` → passthrough.
+//     The blocked / up-to-date / error verdicts already short-circuit the
+//     install path; there's nothing to gate.
+//   • If verdict is `update-available` AND manifestVersion < 3 OR the
+//     verdict has no signatureUrl → blocked with reason
+//     `signature-not-supported-by-manifest-version`. The contract is
+//     strict: an operator who opted into sig-strict refuses to install
+//     anything they can't sig-verify, and a pre-v3 manifest cannot
+//     carry the sidecar URL.
+//   • Otherwise the gate fetches the signatureUrl with a tight timeout
+//     (5s default; configurable via env). On non-2xx status, network
+//     error, or body < 16 bytes, the verdict is replaced with the
+//     blocked-by-signature-fetch shape carrying the appropriate reason.
+//     On success (200, ≥ 16 bytes) the original verdict passes through
+//     UNCHANGED — no rewriting, no envelope mutation, so the iter-47
+//     update-available rendering continues to apply byte-for-byte.
+//
+// SECURITY: same-origin redirect policy. The gate refuses to follow a
+// redirect that lands on a different origin than the manifest URL. The
+// signature MUST be served by the same publisher that served the
+// manifest — a manifest publisher who hands you a sidecar URL on a
+// third-party CDN is sidestepping the trust anchor. Iter 49 may relax
+// this to "same registrable domain" (so `releases.rud1.es` and
+// `cdn.rud1.es` can pair up); iter 48 takes the strict stance.
+//
+// FUTURE (iter 49): add minisign / GPG verification on top of the
+// fetched bytes. The verdict envelope, key ordering, and renderer
+// mirror are stable as of iter 48; the only delta will be a new
+// reason kind (e.g. `signature-mismatch`) appended to the union.
+
+const SIG_FETCH_MIN_BYTES = 16;
+
+export interface SignatureFetchGateOptions {
+  /** Source manifest version. Used to short-circuit the v1/v2 blocks. */
+  manifestVersion?: number | null;
+  /**
+   * Manifest URL — used for the same-origin redirect check. The .sig
+   * URL must resolve to the same `URL.origin` as the manifest. When
+   * not provided the same-origin check is skipped (kept for tests
+   * that don't care to thread the manifest URL through).
+   */
+  manifestUrl?: string;
+  /** Per-fetch timeout. Defaults to `parseSigFetchTimeoutMs(env)`. */
+  fetchTimeoutMs?: number;
+  /** Override fetch (test seam). Defaults to `globalThis.fetch`. */
+  fetch?: typeof globalThis.fetch;
+  /** Wall clock at gate-time. Defaults to `Date.now()`. */
+  now?: number;
+}
+
+/**
+ * Iter 48 — runtime gate. Async (it may HTTP-fetch). Caller MUST
+ * `await` before passing the result onward.
+ */
+export async function applySignatureFetchGate(
+  state: VersionCheckState,
+  options: SignatureFetchGateOptions = {},
+): Promise<VersionCheckState> {
+  // Passthrough for non-update-available verdicts — the install path
+  // is already short-circuited for blocked / up-to-date / error / idle.
+  if (state.kind !== "update-available") return state;
+
+  const now = options.now ?? Date.now();
+  const manifestVersion = options.manifestVersion ?? null;
+
+  // v1/v2 manifests OR a v3 manifest whose signatureUrl was rejected
+  // at parse time (validateSignatureUrl returned null) → block. The
+  // operator opted into "I refuse to install without sig verification"
+  // and a pre-v3 manifest cannot satisfy that contract.
+  if ((manifestVersion ?? 0) < 3 || state.signatureUrl == null) {
+    return {
+      kind: "update-blocked-by-signature-fetch",
+      reason: "signature-not-supported-by-manifest-version",
+      signatureUrl: null,
+      currentVersion: state.current,
+      targetVersion: state.latest,
+      downloadUrl: state.downloadUrl,
+      releaseNotesUrl: state.releaseNotesUrl,
+      manifestVersion,
+      checkedAt: now,
+    };
+  }
+
+  // Defensive re-validation. A future caller hand-constructing the
+  // state cannot bypass parse-time validation by stashing an
+  // unsafe URL.
+  const validated = validateSignatureUrl(state.signatureUrl);
+  if (validated == null) {
+    return {
+      kind: "update-blocked-by-signature-fetch",
+      reason: "signature-not-supported-by-manifest-version",
+      signatureUrl: null,
+      currentVersion: state.current,
+      targetVersion: state.latest,
+      downloadUrl: state.downloadUrl,
+      releaseNotesUrl: state.releaseNotesUrl,
+      manifestVersion,
+      checkedAt: now,
+    };
+  }
+
+  // Same-origin check (defence-in-depth — the manifest publisher
+  // promised the sidecar; a redirect to a different origin would
+  // sidestep the trust anchor). Skipped when manifestUrl is not
+  // provided (tests).
+  if (typeof options.manifestUrl === "string" && options.manifestUrl.length > 0) {
+    try {
+      const manifestOrigin = new URL(options.manifestUrl).origin;
+      const sigOrigin = new URL(validated).origin;
+      if (manifestOrigin !== sigOrigin) {
+        return {
+          kind: "update-blocked-by-signature-fetch",
+          reason: "signature-unreachable",
+          signatureUrl: validated,
+          currentVersion: state.current,
+          targetVersion: state.latest,
+          downloadUrl: state.downloadUrl,
+          releaseNotesUrl: state.releaseNotesUrl,
+          manifestVersion,
+          checkedAt: now,
+        };
+      }
+    } catch {
+      // Either URL failed to parse — already validated above, so this
+      // is unreachable in practice. Fall through to the fetch.
+    }
+  }
+
+  const timeoutMs = options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+  const fetchImpl =
+    options.fetch ?? (globalThis.fetch?.bind(globalThis) as typeof globalThis.fetch);
+  if (typeof fetchImpl !== "function") {
+    return {
+      kind: "update-blocked-by-signature-fetch",
+      reason: "signature-unreachable",
+      signatureUrl: validated,
+      currentVersion: state.current,
+      targetVersion: state.latest,
+      downloadUrl: state.downloadUrl,
+      releaseNotesUrl: state.releaseNotesUrl,
+      manifestVersion,
+      checkedAt: now,
+    };
+  }
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(validated, {
+      method: "GET",
+      signal: ctrl.signal,
+      // We DON'T follow redirects to a different origin. `redirect:
+      // "manual"` would surface the redirect as a 3xx response which
+      // we then reject as non-2xx. `redirect: "error"` is cleaner —
+      // any redirect throws synchronously and lands in the catch
+      // below as `signature-unreachable`. Iter 49 may relax this
+      // to `redirect: "follow"` + post-fetch origin check once
+      // `same-registrable-domain` is the policy.
+      redirect: "error",
+      headers: { Accept: "application/octet-stream" },
+    });
+    if (!res.ok) {
+      return {
+        kind: "update-blocked-by-signature-fetch",
+        reason: "signature-http-status",
+        signatureUrl: validated,
+        httpStatus: res.status,
+        currentVersion: state.current,
+        targetVersion: state.latest,
+        downloadUrl: state.downloadUrl,
+        releaseNotesUrl: state.releaseNotesUrl,
+        manifestVersion,
+        checkedAt: now,
+      };
+    }
+    // Read the body — even on a successful 200, we require >= 16 bytes
+    // so a publisher who accidentally serves an empty file is loud-
+    // failed rather than silently allowed past the gate.
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < SIG_FETCH_MIN_BYTES) {
+      return {
+        kind: "update-blocked-by-signature-fetch",
+        reason: "signature-empty",
+        signatureUrl: validated,
+        currentVersion: state.current,
+        targetVersion: state.latest,
+        downloadUrl: state.downloadUrl,
+        releaseNotesUrl: state.releaseNotesUrl,
+        manifestVersion,
+        checkedAt: now,
+      };
+    }
+    // Pass — return the original verdict UNCHANGED.
+    return state;
+  } catch {
+    return {
+      kind: "update-blocked-by-signature-fetch",
+      reason: "signature-unreachable",
+      signatureUrl: validated,
+      currentVersion: state.current,
+      targetVersion: state.latest,
+      downloadUrl: state.downloadUrl,
+      releaseNotesUrl: state.releaseNotesUrl,
+      manifestVersion,
+      checkedAt: now,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ─── Iter 47 — signatureUrl validation ─────────────────────────────────────
 //
@@ -1727,6 +2030,76 @@ export function buildErrorDiagnosticsBlob(
   return JSON.stringify(envelope, null, 2);
 }
 
+// ─── Iter 48 — sig-fetch blocked diagnostics envelope ──────────────────────
+//
+// Mirrors the iter-42/43 envelope contracts for the blocked-by-min-bootstrap
+// and update-available verdicts. Append-only key set; key ordering pinned
+// by the iter-48 tests so a future contributor refactoring the envelope
+// can't silently shuffle the layout (which would invalidate any external
+// regex-based scrapers run on past tickets).
+//
+// Key ordering (stable):
+//   { capturedAt, kind, currentVersion, targetVersion, reason,
+//     signatureUrl, httpStatus?, downloadUrl, releaseNotesUrl,
+//     manifestVersion }
+//
+// `httpStatus` is OMITTED (not null) when the gate fired for any reason
+// other than `signature-http-status` — keeps the byte-stable shape clean
+// for the unreachable / empty / not-supported branches.
+//
+// `signatureUrl` is null (and rendered as such, not omitted) when the
+// reason is `signature-not-supported-by-manifest-version` — the gate
+// didn't have a URL to fetch, and the support reader needs to see that
+// distinction explicitly.
+
+export interface BlockedBySignatureFetchDiagnosticsState {
+  reason:
+    | "signature-unreachable"
+    | "signature-empty"
+    | "signature-http-status"
+    | "signature-not-supported-by-manifest-version";
+  signatureUrl: string | null;
+  httpStatus?: number;
+  currentVersion: string;
+  targetVersion: string;
+  downloadUrl?: string | null;
+  releaseNotesUrl?: string | null;
+  manifestVersion?: number | null;
+}
+
+export function buildBlockedBySignatureFetchDiagnosticsBlob(
+  state: BlockedBySignatureFetchDiagnosticsState,
+  capturedAtMs: number,
+  runtimeAppVersion?: string | null,
+): string {
+  const currentVersion =
+    typeof runtimeAppVersion === "string" && runtimeAppVersion.length > 0
+      ? runtimeAppVersion
+      : state.currentVersion;
+  // Defensive re-validation of the signatureUrl. A future caller hand-
+  // constructing the state cannot leak an unsafe URL through the support
+  // blob. Mirrors the iter-47 pattern in the blocked / update-available
+  // envelope builders. `null` (the v1/v2 not-supported branch) bypasses
+  // validation entirely.
+  const validatedSig =
+    state.signatureUrl != null ? validateSignatureUrl(state.signatureUrl) : null;
+  const envelope: Record<string, unknown> = {
+    capturedAt: new Date(capturedAtMs).toISOString(),
+    kind: "update-blocked-by-signature-fetch" as const,
+    currentVersion,
+    targetVersion: state.targetVersion,
+    reason: state.reason,
+    signatureUrl: validatedSig,
+  };
+  if (typeof state.httpStatus === "number" && Number.isFinite(state.httpStatus)) {
+    envelope.httpStatus = state.httpStatus;
+  }
+  envelope.downloadUrl = state.downloadUrl ?? null;
+  envelope.releaseNotesUrl = state.releaseNotesUrl ?? null;
+  envelope.manifestVersion = state.manifestVersion ?? null;
+  return JSON.stringify(envelope, null, 2);
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -1772,4 +2145,12 @@ export const __test = {
   buildUpToDateDiagnosticsBlob,
   buildUpdateAvailableDiagnosticsBlob,
   buildErrorDiagnosticsBlob,
+  // Iter 48 — sig-fetch gate + diagnostics envelope. The runtime gate
+  // sits at the seam between `classifyManifest` and the install path
+  // (index.ts wires it in via `applySignatureFetchGate`); the
+  // diagnostics envelope mirrors the iter-42/43 contracts byte-for-byte
+  // for the new verdict KIND.
+  applySignatureFetchGate,
+  buildBlockedBySignatureFetchDiagnosticsBlob,
+  SIG_FETCH_MIN_BYTES,
 };

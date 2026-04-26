@@ -280,6 +280,36 @@ const AUTO_UPDATE_STRICT_ENV = "RUD1_DESKTOP_AUTO_UPDATE_STRICT";
 // the key `rolloutForce` so MDM-style deployments can pin the override
 // without exporting an env var.
 const AUTO_UPDATE_ROLLOUT_FORCE_ENV = "RUD1_DESKTOP_ROLLOUT_FORCE";
+// Iter 48 — signature-strict mode. When `RUD1_DESKTOP_SIG_STRICT=1` the
+// pre-install gate REFUSES to launch any update whose manifest's
+// `signatureUrl` (.sig sidecar) cannot be fetched, is empty (< 16
+// bytes), or returns non-2xx. v1 / v2 manifests have NO signatureUrl
+// field by design — under sig-strict they are blocked with reason
+// `signature-not-supported-by-manifest-version` (the operator opted
+// into "I refuse to install anything I can't sig-verify", and a
+// pre-v3 manifest cannot satisfy that contract). NO actual crypto
+// is performed this iter — the gate is just "the publisher claimed
+// a sidecar exists at this URL; can we fetch it?". Iter 49+ will
+// layer minisign / GPG verification on top with no plumbing change.
+//
+// Off by default. The flag is independent of strict mode (iter 31)
+// AND of the regular auto-update opt-in (iter 30): both can be on
+// simultaneously without interaction (the iter-31 sha256 gate runs
+// at apply-artifact-bytes time on the downloaded payload, the iter-48
+// sig gate runs at decide-to-install time on the verdict's signatureUrl).
+//
+// Persisted-config equivalent lives in the same JSON file under the
+// key `sigStrict` so MDM-style deployments can pin the setting without
+// exporting an env var. Truthiness contract MIRRORS strict mode: only
+// the literal "1" enables; "true", "yes", "on", "0", "", undefined all
+// fall through to the persisted-config read.
+const SIG_STRICT_ENV = "RUD1_DESKTOP_SIG_STRICT";
+// Iter 48 — per-fetch timeout for the .sig HEAD/GET. Short enough that
+// a stuck CDN doesn't block the operator's "Restart to install" click
+// for more than a few seconds; long enough that a slow phone tether
+// still completes. Configurable via env so an operator on a
+// known-slow link can extend it without rebuilding the binary.
+const SIG_FETCH_TIMEOUT_ENV = "RUD1_DESKTOP_SIG_FETCH_TIMEOUT_MS";
 const AUTO_UPDATE_CONFIG_FILE = "auto-update-config.json";
 const DOWNLOAD_FILE_DEFAULT = "rud1-update.bin";
 // Hard cap on the downloaded artifact. A real DMG / NSIS / AppImage is
@@ -460,6 +490,78 @@ export function isRolloutForceEnabled(opts: {
   if (!a) return false;
   const cfg = readPersistedConfigRolloutForce(() => a.getPath("userData"), fileSystem);
   return cfg.rolloutForce === true;
+}
+
+/**
+ * Iter 48 — sig-strict gate (mirrors strict-mode + rollout-force).
+ *
+ * Off by default. Truthiness contract: env var must be the LITERAL
+ * "1" — no truthy coercion of "true" / "yes" / "on" / etc. The
+ * intent is the same as the iter-31 strict gate: an operator opting
+ * into stricter behaviour should be unambiguous in their shell
+ * history, audit logs, and MDM config exports.
+ *
+ * Independent of every other auto-update flag: a developer on
+ * `npm run dev` may want to toggle it without flipping the
+ * dev-time auto-update disable, so we DO NOT require
+ * `app.isPackaged` here.
+ */
+export function isSigStrictEnabled(opts: {
+  env?: NodeJS.ProcessEnv;
+  appOverride?: { getPath: (n: string) => string };
+  fileSystem?: typeof fs;
+} = {}): boolean {
+  const env = opts.env ?? process.env;
+  const a = opts.appOverride ?? deps.app ?? electronApp;
+  const fileSystem = opts.fileSystem ?? deps.fileSystem ?? fs;
+  if (env[SIG_STRICT_ENV] === "1") return true;
+  if (!a) return false;
+  const cfg = readPersistedConfigSigStrict(() => a.getPath("userData"), fileSystem);
+  return cfg.sigStrict === true;
+}
+
+/**
+ * Read the `sigStrict` flag from the persisted config file. Sibling of
+ * `readPersistedConfigStrict` / `readPersistedConfigRolloutForce` for
+ * the same reason: a hand-edited file with one valid and one typo'd
+ * field stays half-functional rather than collapsing the whole loader.
+ */
+function readPersistedConfigSigStrict(
+  getUserData: () => string,
+  fileSystem: typeof fs,
+): { sigStrict?: boolean } {
+  try {
+    const p = path.join(getUserData(), AUTO_UPDATE_CONFIG_FILE);
+    const raw = fileSystem.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && typeof parsed.sigStrict === "boolean") {
+      return { sigStrict: parsed.sigStrict };
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Iter 48 — parse the .sig fetch timeout from the env var. Returns
+ * the default (5000 ms) when the env var is unset, empty, or
+ * malformed (non-finite, negative, > 60s upper cap to defend against
+ * a fat-fingered "60000000" stalling the install click for a minute).
+ *
+ * Exposed via the test hatch so the truthiness / clamping contract
+ * is pinned without going through the gate function.
+ */
+const SIG_FETCH_TIMEOUT_DEFAULT_MS = 5_000;
+const SIG_FETCH_TIMEOUT_MAX_MS = 60_000;
+export function parseSigFetchTimeoutMs(env?: NodeJS.ProcessEnv): number {
+  const e = env ?? process.env;
+  const raw = e[SIG_FETCH_TIMEOUT_ENV];
+  if (typeof raw !== "string" || raw.length === 0) return SIG_FETCH_TIMEOUT_DEFAULT_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return SIG_FETCH_TIMEOUT_DEFAULT_MS;
+  if (n > SIG_FETCH_TIMEOUT_MAX_MS) return SIG_FETCH_TIMEOUT_MAX_MS;
+  return Math.floor(n);
 }
 
 /**
@@ -694,6 +796,15 @@ export const __test = {
   AUTO_UPDATE_ROLLOUT_FORCE_ENV,
   isRolloutForceEnabled,
   readPersistedConfigRolloutForce,
+  // Iter 48 — sig-strict gate + sibling persisted-config reader,
+  // plus the .sig fetch-timeout env parser.
+  SIG_STRICT_ENV,
+  SIG_FETCH_TIMEOUT_ENV,
+  SIG_FETCH_TIMEOUT_DEFAULT_MS,
+  SIG_FETCH_TIMEOUT_MAX_MS,
+  isSigStrictEnabled,
+  readPersistedConfigSigStrict,
+  parseSigFetchTimeoutMs,
   setStateForTesting: (s: AutoUpdateState) => { state = s; },
   resetStateForTesting: () => { state = { kind: "idle" }; listeners = []; deps = {}; },
 };

@@ -49,6 +49,7 @@ import {
   buildVersionCheckMenuItems,
   formatBlockedStateMessage,
   formatVersionCheckSummary,
+  applySignatureFetchGate,
   type VersionCheckState,
 } from "./version-check-manager";
 import {
@@ -57,6 +58,8 @@ import {
 import {
   isAutoUpdateEnabled,
   isRolloutForceEnabled,
+  isSigStrictEnabled,
+  parseSigFetchTimeoutMs,
   startBackgroundDownload,
   applyAndRestart,
   configureAutoUpdaterRuntime,
@@ -220,7 +223,32 @@ function rebuildTrayMenu(): void {
     {
       openExternal: (u) => { void shell.openExternal(u); },
       recheck: () => { void versionCheckManager?.checkOnce(); },
-      startDownload: (u, sha) => { void startBackgroundDownload(u, { sha256: sha }); },
+      // Iter 48 — sig-strict gate. When `RUD1_DESKTOP_SIG_STRICT=1` is
+      // set we run `applySignatureFetchGate` against the current
+      // verdict before kicking off the download. If the gate blocks,
+      // we publish the new verdict to `lastVersionCheckState` so the
+      // tray + Settings/About panel surface the block; the download
+      // never starts. When sig-strict is OFF the gate is a no-op
+      // passthrough — iter-30/31 behaviour is byte-identical.
+      startDownload: (u, sha) => {
+        if (!isSigStrictEnabled()) {
+          void startBackgroundDownload(u, { sha256: sha });
+          return;
+        }
+        void (async () => {
+          const gated = await applySignatureFetchGate(lastVersionCheckState, {
+            manifestUrl: VERSION_MANIFEST_URL,
+            fetchTimeoutMs: parseSigFetchTimeoutMs(),
+          });
+          if (gated.kind === "update-blocked-by-signature-fetch") {
+            lastVersionCheckState = gated;
+            rebuildTrayMenu();
+            broadcastVersionCheckUpdate(gated);
+            return;
+          }
+          void startBackgroundDownload(u, { sha256: sha });
+        })();
+      },
       applyAndRestart: () => { void applyAndRestart(); },
       resetAutoUpdate: () => { resetAutoUpdateState(); },
     },

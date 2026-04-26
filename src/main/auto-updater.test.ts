@@ -61,6 +61,13 @@ const {
   AUTO_UPDATE_ROLLOUT_FORCE_ENV,
   isRolloutForceEnabled,
   readPersistedConfigRolloutForce,
+  // Iter 48 — sig-strict gate + timeout parser hatches.
+  SIG_STRICT_ENV,
+  SIG_FETCH_TIMEOUT_ENV,
+  SIG_FETCH_TIMEOUT_DEFAULT_MS,
+  SIG_FETCH_TIMEOUT_MAX_MS,
+  isSigStrictEnabled,
+  parseSigFetchTimeoutMs,
   setStateForTesting,
   resetStateForTesting,
 } = __test;
@@ -885,5 +892,126 @@ describe("readPersistedConfigRolloutForce", () => {
     // The reader only accepts records; arrays slip through `typeof === "object"`
     // but lack the `rolloutForce` key, so the loader yields {}.
     expect(readPersistedConfigRolloutForce(() => "/tmp", fakeFs)).toEqual({});
+  });
+});
+
+// ─── Iter 48 — sig-strict env-var truthiness contract ──────────────────────
+//
+// Pins that ONLY the literal "1" enables. Mirrors the iter-31 strict and
+// iter-35 rollout-force shape. The intent: an operator opting into stricter
+// behaviour should be unambiguous in their shell history, audit logs, and
+// MDM exports.
+
+describe("isSigStrictEnabled (iter 48)", () => {
+  it("env values other than '1' do NOT enable the flag (no truthy coercion)", () => {
+    const fakeFs = {
+      readFileSync: () => { throw new Error("ENOENT"); },
+    } as unknown as typeof import("fs");
+    for (const v of ["true", "yes", "on", "0", "", "TRUE", "1 "]) {
+      expect(
+        isSigStrictEnabled({
+          env: { [SIG_STRICT_ENV]: v },
+          appOverride: { getPath: () => "/tmp" },
+          fileSystem: fakeFs,
+        }),
+      ).toBe(false);
+    }
+    // …and the literal "1" enables.
+    expect(
+      isSigStrictEnabled({
+        env: { [SIG_STRICT_ENV]: "1" },
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when env is unset / undefined (env-var truthiness contract)", () => {
+    const fakeFs = {
+      readFileSync: () => { throw new Error("ENOENT"); },
+    } as unknown as typeof import("fs");
+    expect(
+      isSigStrictEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+  });
+
+  it("respects the persisted-config sigStrict flag when env is unset", () => {
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ sigStrict: true }),
+    } as unknown as typeof import("fs");
+    expect(
+      isSigStrictEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not interact with strict / rolloutForce flags (independent toggles)", () => {
+    // A persisted config with strict=true MUST NOT enable sigStrict
+    // (and vice versa). Pins the per-flag isolation contract — an
+    // MDM operator pinning one flag shouldn't accidentally enable the
+    // others.
+    const fakeFs = {
+      readFileSync: () => JSON.stringify({ strict: true, rolloutForce: true, sigStrict: false }),
+    } as unknown as typeof import("fs");
+    expect(
+      isSigStrictEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(false);
+    // strict and rolloutForce remain readable independently.
+    expect(
+      isStrictAutoUpdateEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+    expect(
+      isRolloutForceEnabled({
+        env: {},
+        appOverride: { getPath: () => "/tmp" },
+        fileSystem: fakeFs,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("parseSigFetchTimeoutMs (iter 48)", () => {
+  it("returns the default (5000) when env is unset / empty / malformed", () => {
+    expect(parseSigFetchTimeoutMs({})).toBe(SIG_FETCH_TIMEOUT_DEFAULT_MS);
+    expect(parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "" })).toBe(
+      SIG_FETCH_TIMEOUT_DEFAULT_MS,
+    );
+    expect(parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "abc" })).toBe(
+      SIG_FETCH_TIMEOUT_DEFAULT_MS,
+    );
+    expect(parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "-1" })).toBe(
+      SIG_FETCH_TIMEOUT_DEFAULT_MS,
+    );
+    expect(parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "0" })).toBe(
+      SIG_FETCH_TIMEOUT_DEFAULT_MS,
+    );
+  });
+
+  it("clamps the upper bound to defend against absurd values stalling the click", () => {
+    expect(
+      parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "999999999" }),
+    ).toBe(SIG_FETCH_TIMEOUT_MAX_MS);
+  });
+
+  it("accepts a finite positive value within range", () => {
+    expect(parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "2500" })).toBe(2500);
+    expect(parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "60000" })).toBe(
+      SIG_FETCH_TIMEOUT_MAX_MS,
+    );
   });
 });

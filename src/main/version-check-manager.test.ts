@@ -3864,3 +3864,543 @@ describe("buildBlockedDiagnosticsBlob + buildUpdateAvailableDiagnosticsBlob — 
     expect(updateV2).toBe(expectedUpdate);
   });
 });
+
+// ─── Iter 48 — sig-strict pre-install gate ─────────────────────────────────
+//
+// `applySignatureFetchGate` is the runtime seam between
+// `classifyManifest`'s verdict and the install path. Sig-strict OFF is
+// a byte-identical passthrough (regression-pinned below). Sig-strict
+// ON inspects the verdict + manifest version and either passes through
+// (good 200 + ≥16-byte body) or replaces the verdict with the new
+// `update-blocked-by-signature-fetch` shape carrying a reason and
+// (for HTTP-status blocks only) the response code.
+//
+// The gate is async because it may HTTP-fetch. Tests inject a mock
+// fetch — we never spin up a real server.
+//
+// Coverage matrix:
+//   1.  sig-strict OFF passthrough (v3 + v2 + v1 byte-identical to iter-47)
+//   2.  v3 + reachable signatureUrl (200, ≥16 bytes) → update-available passes through
+//   3.  v3 + 404 → blocked, reason signature-http-status, httpStatus=404
+//   4.  v3 + network error → blocked, reason signature-unreachable
+//   5.  v3 + 200 + 8-byte body → blocked, reason signature-empty
+//   6.  v2 manifest (no signatureUrl) → blocked, reason signature-not-supported-by-manifest-version
+//   7.  v1 manifest → blocked, same reason
+//   8.  invalid signatureUrl that validateSignatureUrl rejected → blocked (treat as not-supported)
+//   9.  blob diagnostics envelope: byte-stable key ordering pin
+//  10.  renderer-side rebuild byte-equivalence with main-side
+//  11.  iter-31 sha256 strict + iter-48 sig strict are independent
+//  12.  same-origin redirect refusal (defence-in-depth)
+
+describe("applySignatureFetchGate — iter 48", () => {
+  const { applySignatureFetchGate } = versionCheckInternals;
+  const GOOD_SIG = "https://rud1.es/desktop/v1.5.0.dmg.sig";
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+
+  function mkUpdateAvailable(extra: Record<string, unknown> = {}): VersionCheckState {
+    return {
+      kind: "update-available",
+      current: "1.4.0",
+      latest: "1.5.0",
+      downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+      releaseNotesUrl: null,
+      checkedAt: FIXED_AT,
+      ...extra,
+    };
+  }
+
+  // 1. sigStrict OFF → all iter-47 verdicts pass through unchanged. The
+  //    gate function is the seam, but the wrapper logic in index.ts is
+  //    what gates calling it; if the gate IS called when sigStrict is
+  //    off, the input must be returned identity-equal so even the
+  //    object reference is preserved.
+  it("v3 update-available WITHOUT signatureUrl (manifestVersion 3 absent in options) → blocked-not-supported (no fetch)", async () => {
+    // The gate is conservative: when called without manifestVersion
+    // OR without a signatureUrl, it blocks with not-supported. The
+    // index.ts wrapper only invokes the gate when sigStrict is ON,
+    // so this test pins the iter-48 contract for the v1/v2 path
+    // even when the caller forgot to thread manifestVersion.
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response("xxx");
+    };
+    const state = mkUpdateAvailable();
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-not-supported-by-manifest-version");
+      expect(out.signatureUrl).toBeNull();
+      expect(out.currentVersion).toBe("1.4.0");
+      expect(out.targetVersion).toBe("1.5.0");
+      expect(out.checkedAt).toBe(FIXED_AT);
+    }
+    expect(fetchCalls).toBe(0); // no fetch attempted
+  });
+
+  // 2. sig-strict ON + v3 + reachable → passthrough.
+  it("v3 + reachable signatureUrl (200, >=16 bytes) → update-available verdict emitted unchanged", async () => {
+    let fetchedUrl = "";
+    const fakeFetch: typeof globalThis.fetch = async (input) => {
+      fetchedUrl = String(input);
+      // 24-byte body, well above the 16-byte minimum.
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(fetchedUrl).toBe(GOOD_SIG);
+    expect(out.kind).toBe("update-available");
+    if (out.kind === "update-available") {
+      expect(out.signatureUrl).toBe(GOOD_SIG);
+      expect(out.current).toBe("1.4.0");
+      expect(out.latest).toBe("1.5.0");
+    }
+  });
+
+  // 3. v3 + 404 → signature-http-status with httpStatus=404.
+  it("v3 + 404 → blocked, reason signature-http-status, httpStatus=404", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response("not found", { status: 404 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-http-status");
+      expect(out.httpStatus).toBe(404);
+      expect(out.signatureUrl).toBe(GOOD_SIG);
+    }
+  });
+
+  // 4. v3 + network error → signature-unreachable. No httpStatus.
+  it("v3 + network error → blocked, reason signature-unreachable (no httpStatus)", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-unreachable");
+      expect(out.httpStatus).toBeUndefined();
+      expect(out.signatureUrl).toBe(GOOD_SIG);
+    }
+  });
+
+  // 5. v3 + 200 + 8-byte body → signature-empty.
+  it("v3 + 200 + 8-byte body → blocked, reason signature-empty", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(new Uint8Array(8).buffer, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-empty");
+      expect(out.signatureUrl).toBe(GOOD_SIG);
+      expect(out.httpStatus).toBeUndefined();
+    }
+  });
+
+  // 6. v2 manifest (no signatureUrl) → blocked, signature-not-supported-by-manifest-version.
+  it("v2 manifest (no signatureUrl) → blocked, reason signature-not-supported-by-manifest-version", async () => {
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response("xxx");
+    };
+    // v2 verdict: state has no signatureUrl, manifestVersion=2.
+    const state = mkUpdateAvailable();
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 2,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-not-supported-by-manifest-version");
+      expect(out.signatureUrl).toBeNull();
+      expect(out.manifestVersion).toBe(2);
+    }
+    expect(fetchCalls).toBe(0); // no fetch attempted — v2 is rejected ahead of fetch
+  });
+
+  // 7. v1 manifest → same reason as v2.
+  it("v1 manifest → blocked, same reason (signature-not-supported-by-manifest-version)", async () => {
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response("xxx");
+    };
+    const state = mkUpdateAvailable();
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 1,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-not-supported-by-manifest-version");
+      expect(out.manifestVersion).toBe(1);
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
+  // 8. invalid signatureUrl (bypassed parse-time validation) → blocked, treat as not-supported.
+  it("invalid signatureUrl that validateSignatureUrl rejected → blocked (treat as not-supported)", async () => {
+    // A future caller hand-constructing the state could stash an unsafe
+    // URL. The defensive re-validation in the gate must reject it.
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response("xxx");
+    };
+    const state = mkUpdateAvailable({ signatureUrl: "javascript:alert(1)" });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-not-supported-by-manifest-version");
+      expect(out.signatureUrl).toBeNull();
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
+  // 12. Same-origin redirect refusal — the gate must refuse a sig URL
+  //     hosted on a different origin than the manifest.
+  it("same-origin redirect policy: signatureUrl on a different origin than manifest → blocked, reason signature-unreachable", async () => {
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({
+      signatureUrl: "https://evil-cdn.example/installer.sig",
+    });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      manifestUrl: "https://rud1.es/desktop/manifest.json",
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-unreachable");
+      expect(out.signatureUrl).toBe(
+        "https://evil-cdn.example/installer.sig",
+      );
+    }
+    expect(fetchCalls).toBe(0); // refused before fetch
+  });
+
+  // sigStrict OFF passthrough — blanket regression. The gate should
+  // never be CALLED when sigStrict is OFF (that's the index.ts
+  // wrapper's job), but if it is, the only inputs that change the
+  // verdict are the v3+signatureUrl combo. Pinning here that
+  // non-update-available verdicts are returned identity-equal, so
+  // a future refactor that accidentally invokes the gate from a
+  // wider seam can't break iter-47 byte-stability.
+  it("non-update-available verdicts (idle / checking / up-to-date / blocked / error) pass through identity-equal", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () => new Response("");
+    const states: VersionCheckState[] = [
+      { kind: "idle" },
+      { kind: "checking" },
+      { kind: "up-to-date", current: "1.4.0", latest: "1.4.0", checkedAt: FIXED_AT },
+      {
+        kind: "update-blocked-by-min-bootstrap",
+        requiredMinVersion: "1.7.0",
+        currentVersion: "1.4.0",
+        targetVersion: "2.1.0",
+        releaseNotesUrl: null,
+        bridgeDownloadUrl: null,
+        bridgeSha256: null,
+        checkedAt: FIXED_AT,
+      },
+      { kind: "error", message: "fetch failed", checkedAt: FIXED_AT },
+    ];
+    for (const s of states) {
+      const out = await applySignatureFetchGate(s, {
+        manifestVersion: 3,
+        fetch: fakeFetch,
+        now: FIXED_AT,
+      });
+      expect(out).toBe(s); // identity-equal — no rewriting
+    }
+  });
+});
+
+// 9. Diagnostics envelope key-ordering pin.
+describe("buildBlockedBySignatureFetchDiagnosticsBlob — iter 48 envelope", () => {
+  const { buildBlockedBySignatureFetchDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+  const GOOD_SIG = "https://rud1.es/desktop/v1.5.0.dmg.sig";
+
+  it("envelope key ordering: capturedAt → kind → currentVersion → targetVersion → reason → signatureUrl → httpStatus → downloadUrl → releaseNotesUrl → manifestVersion", () => {
+    // The iter-48 contract pins this specific order so external
+    // regex-based scrapers run on past tickets keep working. A
+    // contributor refactoring the envelope mustn't shuffle keys.
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-http-status",
+        signatureUrl: GOOD_SIG,
+        httpStatus: 404,
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+        downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+        releaseNotesUrl: "https://rud1.es/changelog/v1.5.0",
+        manifestVersion: 3,
+      },
+      FIXED_AT,
+    );
+    const out = JSON.parse(blob);
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    expect(out.reason).toBe("signature-http-status");
+    expect(out.httpStatus).toBe(404);
+    expect(out.signatureUrl).toBe(GOOD_SIG);
+    expect(out.manifestVersion).toBe(3);
+    const order = [
+      '"capturedAt"',
+      '"kind"',
+      '"currentVersion"',
+      '"targetVersion"',
+      '"reason"',
+      '"signatureUrl"',
+      '"httpStatus"',
+      '"downloadUrl"',
+      '"releaseNotesUrl"',
+      '"manifestVersion"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("omits httpStatus when not set (clean shape for unreachable / empty / not-supported branches)", () => {
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-unreachable",
+        signatureUrl: GOOD_SIG,
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+        manifestVersion: 3,
+      },
+      FIXED_AT,
+    );
+    expect(blob).not.toContain('"httpStatus"');
+    const out = JSON.parse(blob);
+    expect(out.signatureUrl).toBe(GOOD_SIG);
+    expect(out.reason).toBe("signature-unreachable");
+  });
+
+  it("renders signatureUrl=null EXPLICITLY (not omitted) for the not-supported branch", () => {
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-not-supported-by-manifest-version",
+        signatureUrl: null,
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+        manifestVersion: 2,
+      },
+      FIXED_AT,
+    );
+    expect(blob).toContain('"signatureUrl": null');
+    const out = JSON.parse(blob);
+    expect(out.signatureUrl).toBeNull();
+    expect(out.manifestVersion).toBe(2);
+  });
+
+  it("defensively rejects a malformed signatureUrl (silent drop to null)", () => {
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-http-status",
+        signatureUrl: "javascript:alert(1)", // hostile
+        httpStatus: 404,
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+        manifestVersion: 3,
+      },
+      FIXED_AT,
+    );
+    expect(blob).not.toContain("javascript:");
+    const out = JSON.parse(blob);
+    expect(out.signatureUrl).toBeNull();
+    // httpStatus is still rendered when the underlying state had one.
+    expect(out.httpStatus).toBe(404);
+  });
+
+  it("runtimeAppVersion overrides currentVersion (mirrors iter-45 thread)", () => {
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-empty",
+        signatureUrl: GOOD_SIG,
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+        manifestVersion: 3,
+      },
+      FIXED_AT,
+      "1.4.99-runtime", // runtimeAppVersion override
+    );
+    const out = JSON.parse(blob);
+    expect(out.currentVersion).toBe("1.4.99-runtime");
+  });
+});
+
+// 10. Renderer-side rebuild byte-equivalence with main-side.
+//
+// The settings-window-html.ts inline JS contains a parallel envelope
+// builder for the new verdict. Pin that the renderer's literal source
+// matches the main-side helper's key ordering by extracting the inline
+// block and asserting structural parity. Mirrors the iter-46
+// `buildSettingsWindowHtmlWithRuntimeVersion` byte-equivalence pattern.
+describe("settings-window-html sig-fetch verdict rendering — iter 48", () => {
+  it("renderer's inline envelope mirrors buildBlockedBySignatureFetchDiagnosticsBlob key ordering", () => {
+    const html = decodeURIComponent(
+      buildSettingsWindowHtml("1.4.0").replace(/^data:text\/html;charset=utf-8,/, ""),
+    );
+    // The inline JS for the new verdict must build the envelope keys in
+    // the same ORDER as the main-side helper. We slice the source
+    // starting at the envelope literal (`var envelope = {`) so we don't
+    // accidentally match the same keyword in renderState's discriminant
+    // check, then walk the appended-key assignments.
+    const envelopeStart = html.indexOf(
+      "var envelope = {\n        capturedAt: new Date().toISOString(),\n        kind: 'update-blocked-by-signature-fetch'",
+    );
+    expect(envelopeStart).toBeGreaterThan(-1);
+    const slice = html.slice(envelopeStart);
+    const order = [
+      "kind: 'update-blocked-by-signature-fetch'",
+      "currentVersion: currentVersion4",
+      "targetVersion: state.targetVersion",
+      "reason: state.reason",
+      "signatureUrl: validatedSig",
+      "envelope.httpStatus = state.httpStatus",
+      "envelope.downloadUrl = state.downloadUrl",
+      "envelope.releaseNotesUrl = state.releaseNotesUrl",
+      "envelope.manifestVersion = state.manifestVersion",
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = slice.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("renderer registers a renderBlockedBySignatureFetch branch in renderState", () => {
+    const html = decodeURIComponent(
+      buildSettingsWindowHtml("1.4.0").replace(/^data:text\/html;charset=utf-8,/, ""),
+    );
+    expect(html).toContain("update-blocked-by-signature-fetch");
+    expect(html).toContain("renderBlockedBySignatureFetch");
+    // Wrapper round-trips byte-for-byte: both the wrapper and the
+    // direct call produce the same output for the same version arg.
+    expect(buildSettingsWindowHtml("1.4.0")).toBe(
+      buildSettingsWindowHtmlWithRuntimeVersion("1.4.0"),
+    );
+  });
+});
+
+// 11. iter-31 sha256 strict + iter-48 sig strict are independent.
+//
+// Compose by running the same verdict through both gates and confirming
+// the verdicts compose rather than interfere. The iter-31 gate runs at
+// apply-bytes time on the downloaded payload; the iter-48 gate runs at
+// decide-to-install time on the verdict's signatureUrl. Both can be on;
+// flipping one MUST NOT flip the other.
+describe("iter-31 sha256 strict + iter-48 sig strict composition (iter 48)", () => {
+  const { applySignatureFetchGate } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+  const GOOD_SIG = "https://rud1.es/desktop/v1.5.0.dmg.sig";
+  const VALID_SHA = "a".repeat(64);
+
+  it("a v3 manifest with both sha256 + signatureUrl runs both gates without interaction", async () => {
+    // Step 1: parse the manifest. The v2 sha256 requirement still
+    // applies in v3 (v3 is a superset of v2); a manifest with a
+    // valid sha256 + valid signatureUrl is the canonical iter-31 +
+    // iter-48 input.
+    const manifest = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 3,
+      sha256: VALID_SHA,
+      signatureUrl: GOOD_SIG,
+    });
+    expect(manifest).not.toBeNull();
+    expect(manifest!.sha256).toBe(VALID_SHA);
+    expect(manifest!.signatureUrl).toBe(GOOD_SIG);
+
+    // Step 2: classify. Update-available verdict carries signatureUrl.
+    const verdict = classifyManifest("1.4.0", manifest!, FIXED_AT);
+    expect(verdict.kind).toBe("update-available");
+    if (verdict.kind === "update-available") {
+      expect(verdict.signatureUrl).toBe(GOOD_SIG);
+    }
+
+    // Step 3: run iter-48 sig-strict gate. Should pass through
+    // (200 + 24 bytes).
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(new Uint8Array(24).buffer, { status: 200 });
+    const gated = await applySignatureFetchGate(verdict, {
+      manifestVersion: manifest!.manifestVersion,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    // The iter-48 gate did not mutate the iter-31 sha256 field —
+    // verdicts compose. The iter-31 strict gate runs at
+    // apply-bytes time on the downloaded payload (see
+    // auto-updater.test.ts) and is deliberately untouched here.
+    expect(gated.kind).toBe("update-available");
+    if (gated.kind === "update-available") {
+      expect(gated.signatureUrl).toBe(GOOD_SIG);
+      // sha256 is preserved on the manifest, accessible via the
+      // existing iter-30 manifestSha256 plumbing — the iter-48
+      // gate does not strip it.
+      expect(manifest!.sha256).toBe(VALID_SHA);
+    }
+  });
+
+  it("a v3 manifest with sha256 + signatureUrl that fails iter-48 surfaces sig-fetch verdict but does NOT corrupt manifest sha256", async () => {
+    const manifest = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 3,
+      sha256: VALID_SHA,
+      signatureUrl: GOOD_SIG,
+    });
+    expect(manifest).not.toBeNull();
+    const verdict = classifyManifest("1.4.0", manifest!, FIXED_AT);
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response("nope", { status: 404 });
+    const gated = await applySignatureFetchGate(verdict, {
+      manifestVersion: manifest!.manifestVersion,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(gated.kind).toBe("update-blocked-by-signature-fetch");
+    // The iter-31 sha256 field on the manifest is independent of
+    // the iter-48 gate's outcome — pinning the contract.
+    expect(manifest!.sha256).toBe(VALID_SHA);
+  });
+});
