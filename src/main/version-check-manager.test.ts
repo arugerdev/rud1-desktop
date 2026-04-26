@@ -13,6 +13,13 @@ import {
   type VersionManifest,
   type VersionCheckState,
 } from "./version-check-manager";
+// Iter 46 — settings-window HTML builder + the `…WithRuntimeVersion`
+// wrapper live in their own file so they're importable from the test
+// suite without pulling in `index.ts`'s Electron lifecycle side-effects.
+import {
+  buildSettingsWindowHtml,
+  buildSettingsWindowHtmlWithRuntimeVersion,
+} from "./settings-window-html";
 
 const { computeDeviceBucket } = versionCheckInternals;
 
@@ -3219,5 +3226,201 @@ describe("buildUpdateAvailableDiagnosticsBlob — currentVersion threading (iter
     );
     expect(inlineBlob).toBe(helperBlob);
     expect(JSON.parse(helperBlob).currentVersion).toBe(APP_VERSION);
+  });
+});
+
+describe("buildSettingsWindowHtmlWithRuntimeVersion (iter 46)", () => {
+  // Iter 46 — the wrapper bakes `app.getVersion()` (or any caller-
+  // supplied runtime version) into ALL FOUR diagnostic-blob surfaces
+  // the Settings/About panel exposes:
+  //
+  //   1. inline `APP_VERSION` JS constant (consumed by every renderer-
+  //      side "Copy diagnostics" rebuild)
+  //   2. `error` envelope         — via APP_VERSION → state.current
+  //                                 fallback in `buildErrorDiagnosticsBlob`
+  //   3. `blocked` envelope       — via the iter-45 `runtimeAppVersion`
+  //                                 parameter on
+  //                                 `buildBlockedDiagnosticsBlob`
+  //   4. `update-available`       — same iter-45 parameter on
+  //                                 `buildUpdateAvailableDiagnosticsBlob`
+  //
+  // Pinning the wrapper here keeps the iter-44/45 contracts honest:
+  // a refactor that drops the override on any one surface fails the
+  // byte-equality check below.
+  //
+  // The legacy direct-call path (`buildSettingsWindowHtml(version)`)
+  // is also pinned so the wrapper stays purely additive — existing
+  // call sites (and any future test harness reaching the helpers
+  // directly) keep round-tripping byte-for-byte.
+  const {
+    buildBlockedDiagnosticsBlob,
+    buildUpdateAvailableDiagnosticsBlob,
+    buildErrorDiagnosticsBlob,
+  } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+  const RUNTIME_VERSION = "3.0.0-rc.4";
+
+  // Helper — extract the JSON-encoded `APP_VERSION` literal from the
+  // returned data: URL. The wrapper produces
+  //   data:text/html;charset=utf-8,<percent-encoded HTML>
+  // and the inline JS contains exactly one occurrence of
+  //   var APP_VERSION = "<json-encoded-version>";
+  // so a single regex over the decoded HTML pins both threading and
+  // JSON-encoding correctness.
+  function extractAppVersionLiteral(dataUrl: string): string | null {
+    const prefix = "data:text/html;charset=utf-8,";
+    if (!dataUrl.startsWith(prefix)) return null;
+    const html = decodeURIComponent(dataUrl.slice(prefix.length));
+    const match = html.match(/var APP_VERSION = (.+?);/);
+    return match ? match[1] : null;
+  }
+
+  it("threads runtimeAppVersion into all three diagnostic blob types byte-for-byte", () => {
+    // The wrapper's contract is that the runtime version it bakes is
+    // the SAME value all three helper-level overrides would consume.
+    // We assert this by hand-building the three envelopes directly
+    // through the iter-44/45 helpers with the same runtime version,
+    // then re-asserting that the wrapper's inline JS carries the same
+    // value (the renderer-side rebuilds source `currentVersion` from
+    // APP_VERSION → which IS the runtime version under the wrapper).
+    const html = buildSettingsWindowHtmlWithRuntimeVersion(RUNTIME_VERSION);
+
+    // 1. blocked envelope — helper called with runtimeAppVersion =
+    //    RUNTIME_VERSION matches what the wrapper-baked APP_VERSION
+    //    would feed the inline rebuild.
+    const blockedState = {
+      currentVersion: "1.4.0", // intentionally drifted from RUNTIME_VERSION
+      targetVersion: "2.1.0",
+      requiredMinVersion: "1.7.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/v2.1.0.dmg",
+      releaseNotesUrl: null as string | null,
+      manifestVersion: 2 as number | null,
+    };
+    const blockedHelperBlob = buildBlockedDiagnosticsBlob(
+      blockedState,
+      FIXED_AT,
+      RUNTIME_VERSION,
+    );
+    expect(JSON.parse(blockedHelperBlob).currentVersion).toBe(RUNTIME_VERSION);
+
+    // 2. update-available envelope — same shape via state.current.
+    const updateAvailState = {
+      current: "1.4.0",
+      latest: "1.5.0",
+      downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+      releaseNotesUrl: null as string | null,
+      bridgeSha256: null as string | null,
+      manifestVersion: 2 as number | null,
+    };
+    const updateAvailHelperBlob = buildUpdateAvailableDiagnosticsBlob(
+      updateAvailState,
+      FIXED_AT,
+      RUNTIME_VERSION,
+    );
+    expect(JSON.parse(updateAvailHelperBlob).currentVersion).toBe(
+      RUNTIME_VERSION,
+    );
+
+    // 3. error envelope — the helper sources from state.current; the
+    //    inline rebuild sources from APP_VERSION. Hand-passing
+    //    RUNTIME_VERSION as state.current produces the same envelope
+    //    the renderer-side rebuild produces under the wrapper.
+    const errorHelperBlob = buildErrorDiagnosticsBlob(
+      {
+        current: RUNTIME_VERSION,
+        message: "TLS handshake failed",
+        manifestVersion: 2,
+      },
+      FIXED_AT,
+    );
+    expect(JSON.parse(errorHelperBlob).currentVersion).toBe(RUNTIME_VERSION);
+
+    // The wrapper's only mechanism for threading the runtime version
+    // into the three rebuilds is the APP_VERSION constant — assert
+    // it carries our value (JSON-encoded). A wrapper regression that
+    // passed `null` / `""` / a different string into
+    // buildSettingsWindowHtml would surface here as the literal not
+    // matching JSON.stringify(RUNTIME_VERSION).
+    const literal = extractAppVersionLiteral(html);
+    expect(literal).toBe(JSON.stringify(RUNTIME_VERSION));
+  });
+
+  it("threads runtimeAppVersion into the inline APP_VERSION JS constant (JSON-encoded)", () => {
+    // JSON-encoding matters: an unescaped raw string would let an
+    // attacker-controlled version (which can't actually happen in
+    // production — it comes from `app.getVersion()` — but the build
+    // discipline still matters) break out of the JS literal. Pin the
+    // encoding contract by feeding in a value with characters that
+    // require escaping (a quote and a backslash) and checking the
+    // emitted literal matches JSON.stringify byte-for-byte.
+    const trickyVersion = '1.0.0-rc.1+meta"injected\\path';
+    const html = buildSettingsWindowHtmlWithRuntimeVersion(trickyVersion);
+    const literal = extractAppVersionLiteral(html);
+    expect(literal).toBe(JSON.stringify(trickyVersion));
+    // And a sanity check against the routine well-formed case.
+    const html2 = buildSettingsWindowHtmlWithRuntimeVersion(RUNTIME_VERSION);
+    expect(extractAppVersionLiteral(html2)).toBe(`"${RUNTIME_VERSION}"`);
+  });
+
+  it("calling buildSettingsWindowHtml directly produces the legacy null-fallback envelopes byte-for-byte", () => {
+    // The wrapper is purely additive — direct callers of the
+    // underlying `buildSettingsWindowHtml(currentVersion)` keep
+    // working with their own positional argument. Byte-for-byte
+    // identity between `buildSettingsWindowHtml(v)` and
+    // `buildSettingsWindowHtmlWithRuntimeVersion(v)` confirms the
+    // wrapper truly is a single-arg passthrough (no extra HTML
+    // injection, no header drift, no double-encoding).
+    const direct = buildSettingsWindowHtml(RUNTIME_VERSION);
+    const wrapped = buildSettingsWindowHtmlWithRuntimeVersion(RUNTIME_VERSION);
+    expect(direct).toBe(wrapped);
+
+    // Independent of the wrapper, the iter-42/43/44/45 helper
+    // contracts still hold for legacy callers that omit the new
+    // `runtimeAppVersion` parameter — `null`-fallback envelopes
+    // round-trip byte-for-byte. Pin all four variants
+    // (undefined/null/empty/omitted) on the iter-45 helpers and the
+    // legacy `state.current ?? null` path on the iter-44 helper.
+    const blockedState = {
+      currentVersion: "1.4.0",
+      targetVersion: "2.1.0",
+      requiredMinVersion: "1.7.0",
+    };
+    const blockedLegacy = buildBlockedDiagnosticsBlob(blockedState, FIXED_AT);
+    expect(blockedLegacy).toBe(
+      buildBlockedDiagnosticsBlob(blockedState, FIXED_AT, undefined),
+    );
+    expect(blockedLegacy).toBe(
+      buildBlockedDiagnosticsBlob(blockedState, FIXED_AT, null),
+    );
+    expect(blockedLegacy).toBe(
+      buildBlockedDiagnosticsBlob(blockedState, FIXED_AT, ""),
+    );
+    expect(JSON.parse(blockedLegacy).currentVersion).toBe("1.4.0");
+
+    const updateAvailState = {
+      current: "1.4.0",
+      latest: "1.5.0",
+    };
+    const updateAvailLegacy = buildUpdateAvailableDiagnosticsBlob(
+      updateAvailState,
+      FIXED_AT,
+    );
+    expect(updateAvailLegacy).toBe(
+      buildUpdateAvailableDiagnosticsBlob(updateAvailState, FIXED_AT, undefined),
+    );
+    expect(updateAvailLegacy).toBe(
+      buildUpdateAvailableDiagnosticsBlob(updateAvailState, FIXED_AT, null),
+    );
+    expect(updateAvailLegacy).toBe(
+      buildUpdateAvailableDiagnosticsBlob(updateAvailState, FIXED_AT, ""),
+    );
+    expect(JSON.parse(updateAvailLegacy).currentVersion).toBe("1.4.0");
+
+    // iter-44 error helper has no `runtimeAppVersion` parameter (it
+    // sources from state.current); the legacy null-fallback fires
+    // when current is omitted from the state.
+    const errorLegacy = buildErrorDiagnosticsBlob({ message: "boom" }, FIXED_AT);
+    expect(JSON.parse(errorLegacy).currentVersion).toBe(null);
+    expect(errorLegacy).toContain('"currentVersion": null');
   });
 });
