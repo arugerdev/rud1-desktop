@@ -47,7 +47,16 @@ const MAX_MANIFEST_BYTES = 16 * 1024;
 // "unsupported future schema" — failing closed beats silently treating an
 // unknown shape as if it were the latest known one. Bumping the cap is a
 // deliberate gate for future schema work.
-const MAX_SUPPORTED_MANIFEST_VERSION = 2;
+//
+// Iter 47 — bumped to 3 to accept the new `signatureUrl` optional field
+// (.sig sidecar URL for detached signature verification — pairs with
+// iter-31 strict-mode + iter-32 sha256 checksums). v3 is intentionally
+// a SUPERSET of v2: every v2 manifest is a valid v3 manifest, and v3
+// only adds an OPTIONAL `signatureUrl`. The v2 sha256 requirement
+// continues to apply (a v3 manifest without sha256 is still rejected).
+// v2 remains the canonical floor — we don't bump the manifest writer's
+// default emission, only the parser ceiling.
+const MAX_SUPPORTED_MANIFEST_VERSION = 3;
 
 // Iter 32 — sha256 hex shape: exactly 64 chars of [0-9a-f] (case-insensitive
 // input is accepted; we lowercase before storing). Anything else is
@@ -88,6 +97,13 @@ export type VersionCheckState =
       // same allowlist as `downloadUrl` at parse time so unsafe URLs
       // never reach the state.
       releaseNotesUrl: string | null;
+      // Iter 47 — optional v3 `.sig` sidecar URL surfaced into the
+      // verdict so the diagnostics envelope can carry it. `undefined`
+      // when the manifest didn't carry one (v1/v2 manifests, or v3
+      // manifests where validation rejected the value, or the field
+      // was simply absent). Not yet wired to actual signature
+      // verification — that needs key infra (see iter-47 commit).
+      signatureUrl?: string;
       checkedAt: number;
     }
   | {
@@ -130,6 +146,11 @@ export type VersionCheckState =
       // strict bridge mode can refuse to apply a bridge whose hash
       // doesn't match.
       bridgeSha256: string | null;
+      // Iter 47 — optional v3 `.sig` sidecar URL on the blocked verdict
+      // (mirrors the same field on `update-available`). Surfaced into
+      // the diagnostics envelope when present. `undefined` when the
+      // manifest didn't carry one. Not yet wired to actual verification.
+      signatureUrl?: string;
       checkedAt: number;
     }
   | { kind: "error"; message: string; checkedAt: number };
@@ -306,6 +327,38 @@ export interface VersionManifest {
    * we want to enforce presence whenever any bridge URL is published.
    */
   bridgeSha256: string | null;
+  /**
+   * Iter 47 — `.sig` / `.minisig` / `.asc` sidecar URL for detached
+   * signature verification. Pairs with iter-31 strict-mode + iter-32
+   * sha256 checksums to anchor the v3 schema's eventual signed-update
+   * path. Today (iter 47) the field is parsed and surfaced into the
+   * diagnostics envelope but NOT actually consumed for verification —
+   * that needs key infrastructure (publisher keypair, key rotation
+   * policy, etc.) deferred to a future iter.
+   *
+   * Allowed only when `manifestVersion >= 3`. v1 / v2 manifests that
+   * carry a `signatureUrl` field have it silently dropped (mirrors the
+   * iter-33 lenient stance: a forward-compat field on a backward
+   * manifest is ignored, not loud-fail). When `manifestVersion >= 3`
+   * AND the field is present, validation runs through
+   * `validateSignatureUrl`:
+   *   • must be `http(s):`
+   *   • must end in `.sig`, `.minisig`, or `.asc`
+   *   • must NOT be `javascript:` / `data:`
+   *   • length capped at 2048 chars
+   * Rejection is silent (returns null for the field, not the whole
+   * manifest) — same defensive contract as `releaseNotesUrl` /
+   * `bridgeDownloadUrl`: the signature URL is a convenience until the
+   * key infra lands, and a malformed sidecar URL shouldn't suppress
+   * an otherwise-valid update notification.
+   *
+   * Field is `undefined` (omitted from the parsed object) when the
+   * manifest didn't carry one OR when validation rejected it OR when
+   * the manifest is < v3. This keeps the iter-32 toEqual fixtures
+   * round-tripping byte-for-byte (an `undefined`-valued property is
+   * `toEqual`-equivalent to a missing property in Vitest).
+   */
+  signatureUrl?: string;
 }
 
 /**
@@ -509,6 +562,27 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     bridgeSha256 = obj.bridgeSha256.toLowerCase();
   }
 
+  // Iter 47 — optional v3 `signatureUrl` (.sig sidecar). Allowed only
+  // when `manifestVersion >= 3`. Validation is silent-reject (the field
+  // is dropped to undefined; the manifest still parses) — same defensive
+  // contract as the iter-33 releaseNotesUrl. v1 / v2 manifests that
+  // smuggle a `signatureUrl` get it silently dropped (a forward-compat
+  // field on a backward manifest is ignored, not loud-fail). This keeps
+  // the iter-32 toEqual fixtures round-tripping byte-for-byte:
+  // `signatureUrl` stays `undefined` (omitted from the parsed object)
+  // unless it survives v3 parsing AND validation.
+  let signatureUrl: string | undefined;
+  if (
+    manifestVersion >= 3 &&
+    Object.prototype.hasOwnProperty.call(obj, "signatureUrl") &&
+    obj.signatureUrl != null
+  ) {
+    const validated = validateSignatureUrl(obj.signatureUrl);
+    if (validated != null) {
+      signatureUrl = validated;
+    }
+  }
+
   return {
     version: obj.version,
     downloadUrl,
@@ -520,6 +594,7 @@ export function parseManifest(raw: unknown): VersionManifest | null {
     bridgeDownloadUrl,
     bridgeDownloadUrls,
     bridgeSha256,
+    signatureUrl,
   };
 }
 
@@ -603,7 +678,13 @@ export function classifyManifest(
       const cur = parseSemver(current);
       const min = parseSemver(manifest.minBootstrapVersion);
       if (cur != null && min != null && compareSemver(cur, min) < 0) {
-        return {
+        // Iter 47 — only thread `signatureUrl` into the verdict when
+        // the parser captured one (v3 manifests with a valid sidecar).
+        // Conditional spread keeps the verdict object byte-identical
+        // to iter-46 fixtures when no signatureUrl is in play, so the
+        // iter-42/43/44/45/46 envelope key-ordering pins continue to
+        // hold for v2-passthrough callers.
+        const blocked: VersionCheckState & { kind: "update-blocked-by-min-bootstrap" } = {
           kind: "update-blocked-by-min-bootstrap",
           requiredMinVersion: manifest.minBootstrapVersion,
           currentVersion: current,
@@ -614,9 +695,13 @@ export function classifyManifest(
           bridgeSha256: manifest.bridgeSha256,
           checkedAt: now,
         };
+        if (manifest.signatureUrl != null) {
+          blocked.signatureUrl = manifest.signatureUrl;
+        }
+        return blocked;
       }
     }
-    return {
+    const updateAvail: VersionCheckState & { kind: "update-available" } = {
       kind: "update-available",
       current,
       latest: manifest.version,
@@ -624,6 +709,10 @@ export function classifyManifest(
       releaseNotesUrl: manifest.releaseNotesUrl,
       checkedAt: now,
     };
+    if (manifest.signatureUrl != null) {
+      updateAvail.signatureUrl = manifest.signatureUrl;
+    }
+    return updateAvail;
   }
   return {
     kind: "up-to-date",
@@ -1177,6 +1266,70 @@ export function formatVersionCheckSummary(state: VersionCheckState): string {
 const BRIDGE_DOWNLOAD_URL_UNSAFE_CHARS = /[\x00-\x1f\x7f\s"<>\\^`{|}]/;
 const BRIDGE_DOWNLOAD_URL_MAX_LENGTH = 2048;
 
+// ─── Iter 47 — signatureUrl validation ─────────────────────────────────────
+//
+// Accepts the .sig sidecar URL forms used by the three signing toolchains
+// we expect to integrate against in the (deferred) v3 signed-update path:
+//   • .sig      — minisign's default extension (also used by GPG --detach-sign)
+//   • .minisig  — minisign's alternate "v2" sidecar extension
+//   • .asc      — GPG ASCII-armoured detached signature
+//
+// Stricter than the bridge-download allowlist on TWO axes:
+//   1. Suffix gate — must end in one of the three known sidecar extensions.
+//      Today this is a defensive filter (we don't fetch the URL yet); when
+//      the verification path lands, it ensures we only point operators at
+//      files that are syntactically signed sidecars rather than raw
+//      installer payloads they might mistake for a key.
+//   2. Scheme — `http(s):` allowed (vs https-only for bridge downloads).
+//      The .sig file is a public artifact whose integrity is verified by
+//      its OWN cryptographic signature against the publisher's key, so a
+//      plain-http fetch is already implicitly tamper-detected. We still
+//      reject `javascript:` / `data:` / `file:` / etc. — those bypass
+//      the URL semantic entirely.
+//
+// Same length cap as the bridge URL (2048) to mirror the operational
+// envelope and keep the path-traversal / DoS surface symmetric.
+//
+// Returns the validated URL (lowercased scheme/host left as-is — the
+// path/query may be case-sensitive on some publishers' CDNs) or null on
+// any failure. The contract is "reject silently": the helper never throws
+// and never logs, so a caller can pipeline it through `?? null` without
+// special-casing.
+const SIGNATURE_URL_MAX_LENGTH = 2048;
+const SIGNATURE_URL_SUFFIX_REGEX = /\.(sig|minisig|asc)$/i;
+
+export function validateSignatureUrl(rawUrl: unknown): string | null {
+  if (typeof rawUrl !== "string") return null;
+  if (rawUrl.length === 0 || rawUrl.length > SIGNATURE_URL_MAX_LENGTH) return null;
+  // Same control-char / whitespace gate as the bridge URL — a real
+  // .sig URL never contains any of these, and they're a common
+  // smuggling vector (CRLF injection, fragment confusion, etc.).
+  if (BRIDGE_DOWNLOAD_URL_UNSAFE_CHARS.test(rawUrl)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  // Explicit deny-list check ahead of the allow-list so a mistakenly
+  // permissive URL parser couldn't flip the decision via a unicode
+  // edge case. `javascript:` and `data:` are the two schemes that
+  // could bypass the suffix gate (`data:application/octet-stream;...`
+  // technically can end in `.sig` if the operator base64-encodes it
+  // with a literal `.sig` trailing — that's not a real signature
+  // sidecar and we want it explicitly rejected).
+  const proto = parsed.protocol.toLowerCase();
+  if (proto === "javascript:" || proto === "data:") return null;
+  if (proto !== "http:" && proto !== "https:") return null;
+  if (parsed.username !== "" || parsed.password !== "") return null;
+  // Suffix gate runs against the path (excluding any query / fragment)
+  // so a CDN that appends e.g. `?signature=v4` doesn't mask the
+  // underlying file extension. URL.pathname is decoded enough that the
+  // case-insensitive regex above catches `.SIG` / `.MiniSig` etc.
+  if (!SIGNATURE_URL_SUFFIX_REGEX.test(parsed.pathname)) return null;
+  return rawUrl;
+}
+
 export function isBridgeDownloadUrlAllowed(rawUrl: unknown): boolean {
   if (typeof rawUrl !== "string") return false;
   if (rawUrl.length === 0 || rawUrl.length > BRIDGE_DOWNLOAD_URL_MAX_LENGTH) return false;
@@ -1372,6 +1525,14 @@ export interface BlockedDiagnosticsState {
   releaseNotesUrl?: string | null;
   bridgeSha256?: string | null;
   manifestVersion?: number | null;
+  // Iter 47 — optional v3 .sig sidecar URL. Defensively re-validated
+  // through `validateSignatureUrl` at envelope-build time so a state
+  // object that bypassed parse-time validation cannot leak a malformed
+  // URL into the support blob. When present, appended AFTER
+  // `manifestVersion` so the iter-42 key-ordering pin
+  // (capturedAt → kind → versions → url → sha → notes → manifestVersion)
+  // continues to hold byte-for-byte for callers without a signatureUrl.
+  signatureUrl?: string | null;
 }
 
 export function buildBlockedDiagnosticsBlob(
@@ -1393,7 +1554,16 @@ export function buildBlockedDiagnosticsBlob(
     typeof runtimeAppVersion === "string" && runtimeAppVersion.length > 0
       ? runtimeAppVersion
       : state.currentVersion;
-  const envelope = {
+  // Iter 47 — defensively re-validate signatureUrl. Same rationale as
+  // pickDownloadUrl re-running isBridgeDownloadUrlAllowed: a future
+  // caller hand-constructing the state cannot bypass parse-time
+  // validation. Appended at the END of the envelope so the iter-42
+  // key-ordering pin (capturedAt → kind → versions → url → sha →
+  // notes → manifestVersion) holds for v2-passthrough callers — the
+  // new key only appears after manifestVersion, never before it.
+  const validatedSig =
+    state.signatureUrl != null ? validateSignatureUrl(state.signatureUrl) : null;
+  const envelope: Record<string, unknown> = {
     capturedAt: new Date(capturedAtMs).toISOString(),
     kind: "update-blocked-by-min-bootstrap" as const,
     currentVersion,
@@ -1404,6 +1574,9 @@ export function buildBlockedDiagnosticsBlob(
     releaseNotesUrl: state.releaseNotesUrl ?? null,
     manifestVersion: state.manifestVersion ?? null,
   };
+  if (validatedSig != null) {
+    envelope.signatureUrl = validatedSig;
+  }
   return JSON.stringify(envelope, null, 2);
 }
 
@@ -1467,6 +1640,9 @@ export interface UpdateAvailableDiagnosticsState {
   releaseNotesUrl?: string | null;
   bridgeSha256?: string | null;
   manifestVersion?: number | null;
+  // Iter 47 — optional v3 .sig sidecar URL. Same defensive
+  // re-validation contract as `BlockedDiagnosticsState.signatureUrl`.
+  signatureUrl?: string | null;
 }
 
 export interface ErrorDiagnosticsState {
@@ -1509,7 +1685,10 @@ export function buildUpdateAvailableDiagnosticsBlob(
     typeof runtimeAppVersion === "string" && runtimeAppVersion.length > 0
       ? runtimeAppVersion
       : state.current;
-  const envelope = {
+  // Iter 47 — defensive re-validation mirrors the blocked-state helper.
+  const validatedSig =
+    state.signatureUrl != null ? validateSignatureUrl(state.signatureUrl) : null;
+  const envelope: Record<string, unknown> = {
     capturedAt: new Date(capturedAtMs).toISOString(),
     kind: "update-available" as const,
     currentVersion,
@@ -1528,6 +1707,9 @@ export function buildUpdateAvailableDiagnosticsBlob(
     releaseNotesUrl: state.releaseNotesUrl ?? null,
     manifestVersion: state.manifestVersion ?? null,
   };
+  if (validatedSig != null) {
+    envelope.signatureUrl = validatedSig;
+  }
   return JSON.stringify(envelope, null, 2);
 }
 
@@ -1579,6 +1761,8 @@ export const __test = {
   // Iter 38 — bridge download URL precedence helpers.
   pickDownloadUrl,
   isBridgeDownloadUrlAllowed,
+  // Iter 47 — .sig sidecar URL validator (v3 manifest schema scaffold).
+  validateSignatureUrl,
   // Iter 41 — bridgeSha256 panel hint formatter + HTML fragment builder.
   formatBlockedHashHint,
   buildBlockedPanelHashFragment,

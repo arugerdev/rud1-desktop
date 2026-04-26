@@ -292,6 +292,26 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
       var currentVersion2 = (typeof APP_VERSION === 'string' && APP_VERSION.length > 0)
         ? APP_VERSION
         : state.currentVersion;
+      // Iter 47 — defensively re-validate state.signatureUrl mirroring
+      // validateSignatureUrl in version-check-manager.ts. Only append
+      // when the URL passes the same allow-list (http(s)://, ends in
+      // .sig/.minisig/.asc, length-capped, no js:/data:). When absent
+      // / rejected the field is OMITTED from the envelope so the
+      // iter-42 byte-for-byte key-ordering pin holds for v2-passthrough
+      // operators (no new key appears in the JSON).
+      function isSigUrlAllowed(u) {
+        if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
+        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+        try {
+          var p = new URL(u);
+          var pr = (p.protocol || '').toLowerCase();
+          if (pr === 'javascript:' || pr === 'data:') return false;
+          if (pr !== 'http:' && pr !== 'https:') return false;
+          if (p.username !== '' || p.password !== '') return false;
+          return /\.(sig|minisig|asc)$/i.test(p.pathname);
+        } catch (e) { return false; }
+      }
+      var sigUrl2 = isSigUrlAllowed(state.signatureUrl) ? state.signatureUrl : null;
       var envelope = {
         capturedAt: new Date().toISOString(),
         kind: 'update-blocked-by-min-bootstrap',
@@ -303,6 +323,9 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
         releaseNotesUrl: state.releaseNotesUrl || null,
         manifestVersion: state.manifestVersion != null ? state.manifestVersion : null,
       };
+      if (sigUrl2 != null) {
+        envelope.signatureUrl = sigUrl2;
+      }
       var blob = JSON.stringify(envelope, null, 2);
       window.electronAPI.clipboard.writeText(blob).then(function(res) {
         if (res && res.ok) toast('Copied diagnostics to clipboard');
@@ -419,6 +442,23 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
           var currentVersion3 = (typeof APP_VERSION === 'string' && APP_VERSION.length > 0)
             ? APP_VERSION
             : state.current;
+          // Iter 47 — defensive .sig URL re-validation; same contract as
+          // the blocked-state path. Append-only key (omitted when
+          // absent / rejected) so iter-43 update-available key ordering
+          // holds byte-for-byte when no signatureUrl is in play.
+          function isSigUrlAllowed3(u) {
+            if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
+            if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+            try {
+              var p = new URL(u);
+              var pr = (p.protocol || '').toLowerCase();
+              if (pr === 'javascript:' || pr === 'data:') return false;
+              if (pr !== 'http:' && pr !== 'https:') return false;
+              if (p.username !== '' || p.password !== '') return false;
+              return /\.(sig|minisig|asc)$/i.test(p.pathname);
+            } catch (e) { return false; }
+          }
+          var sigUrl3 = isSigUrlAllowed3(state.signatureUrl) ? state.signatureUrl : null;
           envelope = {
             capturedAt: new Date().toISOString(),
             kind: 'update-available',
@@ -429,6 +469,9 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
             releaseNotesUrl: state.releaseNotesUrl != null ? state.releaseNotesUrl : null,
             manifestVersion: state.manifestVersion != null ? state.manifestVersion : null,
           };
+          if (sigUrl3 != null) {
+            envelope.signatureUrl = sigUrl3;
+          }
         } else {
           // error
           // Iter 44 — currentVersion sourced from APP_VERSION (threaded

@@ -312,8 +312,13 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
 
   it("manifestVersion as 999 (future) → rejected as unsupported (fail-closed)", () => {
     // We pick "rejected as unsupported" over "treat as latest known"
-    // because v3+ may add NEW required fields whose absence from this
+    // because vN+ may add NEW required fields whose absence from this
     // code path would otherwise be silently ignored.
+    //
+    // Iter 47 — cap bumped to 3 to accept the new optional `signatureUrl`
+    // v3 field. The "first unsupported value above the cap" probe
+    // accordingly shifted from `3` → `4`. v3 itself is now exercised
+    // by the iter-47 describe block below.
     expect(
       parseManifest({
         version: "1.2.3",
@@ -324,7 +329,7 @@ describe("parseManifest — manifestVersion + sha256 (iter 32)", () => {
     expect(
       parseManifest({
         version: "1.2.3",
-        manifestVersion: 3, // first unsupported value above the cap
+        manifestVersion: 4, // first unsupported value above the cap (post-iter-47)
         sha256: VALID_SHA,
       }),
     ).toBeNull();
@@ -3422,5 +3427,440 @@ describe("buildSettingsWindowHtmlWithRuntimeVersion (iter 46)", () => {
     const errorLegacy = buildErrorDiagnosticsBlob({ message: "boom" }, FIXED_AT);
     expect(JSON.parse(errorLegacy).currentVersion).toBe(null);
     expect(errorLegacy).toContain('"currentVersion": null');
+  });
+});
+
+// ─── Iter 47 — manifestVersion v3 + signatureUrl scaffold ─────────────────
+//
+// The v3 schema bump introduces an optional `signatureUrl` field (the
+// .sig sidecar URL for detached signature verification — pairs with
+// iter-31 strict-mode + iter-32 sha256 checksums). This iter wires up
+// the parser, validator helper, and diagnostics envelope plumbing only;
+// it does NOT actually fetch or verify signatures (that needs publisher
+// key infra deferred to a future iter).
+//
+// Coverage:
+//   • validateSignatureUrl pure helper — scheme + suffix + length
+//     + javascript:/data: rejection.
+//   • parseManifest accepts v3 with a good signatureUrl.
+//   • parseManifest accepts v3 with a bad signatureUrl (silently dropped,
+//     manifest still parses — defensive contract).
+//   • parseManifest v2-passthrough preserves byte-for-byte iter-46 shape
+//     even when a v2 manifest carries a `signatureUrl` field (forward-
+//     compat field on backward manifest is silently ignored).
+//   • Diagnostics envelopes carry signatureUrl when present, omit it
+//     when absent — preserving iter-42/43 key-ordering byte-for-byte
+//     for callers without a signatureUrl.
+
+describe("validateSignatureUrl (iter 47)", () => {
+  const { validateSignatureUrl } = versionCheckInternals;
+
+  it("accepts well-formed https URLs ending in .sig / .minisig / .asc", () => {
+    expect(validateSignatureUrl("https://rud1.es/desktop/v1.5.0.dmg.sig")).toBe(
+      "https://rud1.es/desktop/v1.5.0.dmg.sig",
+    );
+    expect(
+      validateSignatureUrl("https://rud1.es/desktop/v1.5.0.dmg.minisig"),
+    ).toBe("https://rud1.es/desktop/v1.5.0.dmg.minisig");
+    expect(validateSignatureUrl("https://rud1.es/desktop/v1.5.0.dmg.asc")).toBe(
+      "https://rud1.es/desktop/v1.5.0.dmg.asc",
+    );
+    // Case-insensitive suffix gate — `.SIG` / `.MiniSig` accepted.
+    expect(validateSignatureUrl("https://rud1.es/installer.SIG")).toBe(
+      "https://rud1.es/installer.SIG",
+    );
+  });
+
+  it("accepts http:// URLs (the .sig file is itself signed; plain http is fine)", () => {
+    // Stricter than the bridge-download allowlist on the suffix gate
+    // but more lenient on the scheme: a plain-http fetch of a .sig
+    // file is implicitly tamper-detected by the signature itself.
+    expect(validateSignatureUrl("http://mirror.local/rud1/v1.5.0.dmg.sig")).toBe(
+      "http://mirror.local/rud1/v1.5.0.dmg.sig",
+    );
+  });
+
+  it("rejects javascript: and data: schemes (silent — returns null)", () => {
+    // Defensive deny-list ahead of the allow-list. data: URLs CAN end
+    // in `.sig` if the operator base64-encodes a payload with a
+    // trailing literal `.sig` — that's not a real sidecar.
+    expect(validateSignatureUrl("javascript:alert(1)")).toBeNull();
+    expect(
+      validateSignatureUrl("javascript:fetch('/exfil').sig"),
+    ).toBeNull();
+    expect(
+      validateSignatureUrl("data:application/octet-stream;base64,AAAA.sig"),
+    ).toBeNull();
+    // file: / ftp: also rejected (not in the allow-list).
+    expect(
+      validateSignatureUrl("file:///etc/passwd.sig"),
+    ).toBeNull();
+    expect(
+      validateSignatureUrl("ftp://example.com/installer.sig"),
+    ).toBeNull();
+  });
+
+  it("rejects URLs missing the .sig / .minisig / .asc suffix", () => {
+    // The suffix gate runs against the URL pathname, so a query
+    // string that pretends to be the extension doesn't help.
+    expect(validateSignatureUrl("https://rud1.es/installer.dmg")).toBeNull();
+    expect(
+      validateSignatureUrl("https://rud1.es/installer?ext=.sig"),
+    ).toBeNull();
+    expect(
+      validateSignatureUrl("https://rud1.es/installer.dmg#fragment.sig"),
+    ).toBeNull();
+    // Empty path with no extension at all.
+    expect(validateSignatureUrl("https://rud1.es/")).toBeNull();
+  });
+
+  it("enforces the 2048-char length cap", () => {
+    const path = "a".repeat(2030); // 2030 + "https://x/" (10) + ".sig" (4) = 2044 chars
+    const ok = `https://x/${path}.sig`;
+    expect(ok.length).toBeLessThanOrEqual(2048);
+    expect(validateSignatureUrl(ok)).toBe(ok);
+    // One byte over → reject.
+    const tooLong = `https://x/${"a".repeat(2035)}.sig`;
+    expect(tooLong.length).toBeGreaterThan(2048);
+    expect(validateSignatureUrl(tooLong)).toBeNull();
+  });
+
+  it("rejects non-string inputs and empty strings (defensive contract)", () => {
+    expect(validateSignatureUrl(null)).toBeNull();
+    expect(validateSignatureUrl(undefined)).toBeNull();
+    expect(validateSignatureUrl(123)).toBeNull();
+    expect(validateSignatureUrl({ url: "https://x.sig" })).toBeNull();
+    expect(validateSignatureUrl("")).toBeNull();
+    // Control chars / whitespace — same gate as the bridge URL.
+    expect(validateSignatureUrl("https://rud1.es/x .sig")).toBeNull();
+    expect(validateSignatureUrl("https://rud1.es/x\n.sig")).toBeNull();
+  });
+
+  it("rejects URLs with userinfo (no embedded credentials)", () => {
+    expect(
+      validateSignatureUrl("https://user:pass@rud1.es/installer.sig"),
+    ).toBeNull();
+    expect(
+      validateSignatureUrl("https://user@rud1.es/installer.sig"),
+    ).toBeNull();
+  });
+});
+
+describe("parseManifest — manifestVersion v3 + signatureUrl (iter 47)", () => {
+  const VALID_SHA = "a".repeat(64);
+  const GOOD_SIG = "https://rud1.es/desktop/v1.5.0.dmg.sig";
+
+  it("accepts a v3 manifest with a good signatureUrl (captured into parsed shape)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 3,
+      sha256: VALID_SHA,
+      signatureUrl: GOOD_SIG,
+    });
+    expect(m).not.toBeNull();
+    expect(m?.manifestVersion).toBe(3);
+    expect(m?.signatureUrl).toBe(GOOD_SIG);
+    // The v2 sha256 requirement still applies in v3 (v3 is a superset
+    // of v2). Drop the sha256 here and the manifest must reject.
+    expect(
+      parseManifest({
+        version: "1.5.0",
+        manifestVersion: 3,
+        signatureUrl: GOOD_SIG,
+      }),
+    ).toBeNull();
+  });
+
+  it("v3 manifest with a bad signatureUrl → manifest still parses, signatureUrl dropped", () => {
+    // Mirrors the iter-33 releaseNotesUrl lenient stance: bad
+    // optional convenience data degrades gracefully (silent reject)
+    // rather than rejecting the whole manifest. The defensive
+    // contract — `validateSignatureUrl` returns null on rejection —
+    // means a manifest with a malformed sidecar URL still surfaces
+    // the update notification.
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 3,
+      sha256: VALID_SHA,
+      signatureUrl: "javascript:alert(1)", // hostile scheme
+    });
+    expect(m).not.toBeNull();
+    expect(m?.signatureUrl).toBeUndefined();
+
+    const m2 = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 3,
+      sha256: VALID_SHA,
+      signatureUrl: "https://rud1.es/installer.dmg", // wrong suffix
+    });
+    expect(m2).not.toBeNull();
+    expect(m2?.signatureUrl).toBeUndefined();
+  });
+
+  it("v2-passthrough: a v2 manifest with no signatureUrl preserves iter-46 shape byte-for-byte", () => {
+    // The iter-32 toEqual fixtures pinned the parsed VersionManifest
+    // shape; iter-47 adds an OPTIONAL `signatureUrl` field. When the
+    // manifest is v2 and the field is absent, the parsed object's
+    // `signatureUrl` stays `undefined` (omitted under Vitest toEqual
+    // semantics), so the legacy fixtures still round-trip. Pin it
+    // here directly so a future contributor refactoring the parser
+    // can't silently start emitting `signatureUrl: null`.
+    const m = parseManifest({
+      version: "1.2.3",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+    });
+    expect(m).toEqual({
+      version: "1.2.3",
+      downloadUrl: null,
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      releaseNotesUrl: null,
+      rolloutBucket: null,
+      minBootstrapVersion: null,
+      bridgeDownloadUrl: null,
+      bridgeSha256: null,
+    });
+    expect(m?.signatureUrl).toBeUndefined();
+
+    // A v2 manifest that smuggles a `signatureUrl` field has it
+    // SILENTLY DROPPED — forward-compat field on a backward manifest
+    // is ignored, not loud-fail.
+    const m2 = parseManifest({
+      version: "1.2.3",
+      manifestVersion: 2,
+      sha256: VALID_SHA,
+      signatureUrl: GOOD_SIG,
+    });
+    expect(m2?.signatureUrl).toBeUndefined();
+  });
+
+  it("v3 manifest without a signatureUrl is accepted (the field is OPTIONAL in v3)", () => {
+    const m = parseManifest({
+      version: "1.5.0",
+      manifestVersion: 3,
+      sha256: VALID_SHA,
+    });
+    expect(m).not.toBeNull();
+    expect(m?.manifestVersion).toBe(3);
+    expect(m?.signatureUrl).toBeUndefined();
+  });
+});
+
+describe("buildBlockedDiagnosticsBlob + buildUpdateAvailableDiagnosticsBlob — signatureUrl envelope (iter 47)", () => {
+  const {
+    buildBlockedDiagnosticsBlob,
+    buildUpdateAvailableDiagnosticsBlob,
+  } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 25, 12, 0, 0);
+  const GOOD_SIG = "https://rud1.es/desktop/v1.5.0.dmg.sig";
+
+  it("blocked envelope appends signatureUrl AFTER manifestVersion when present (key ordering pin)", () => {
+    const blob = buildBlockedDiagnosticsBlob(
+      {
+        currentVersion: "1.4.0",
+        targetVersion: "2.1.0",
+        requiredMinVersion: "1.7.0",
+        manifestVersion: 3,
+        signatureUrl: GOOD_SIG,
+      },
+      FIXED_AT,
+    );
+    const out = JSON.parse(blob);
+    expect(out.signatureUrl).toBe(GOOD_SIG);
+    // Key ordering: the iter-42 pin still holds (capturedAt → kind →
+    // versions → url → sha → notes → manifestVersion) AND the new
+    // signatureUrl key sits AFTER manifestVersion. A regression that
+    // shuffled the new key earlier would silently break external
+    // regex-based scrapers run on past tickets.
+    const order = [
+      '"capturedAt"',
+      '"kind"',
+      '"currentVersion"',
+      '"targetVersion"',
+      '"requiredMinVersion"',
+      '"downloadUrl"',
+      '"bridgeSha256"',
+      '"releaseNotesUrl"',
+      '"manifestVersion"',
+      '"signatureUrl"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = blob.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+  });
+
+  it("blocked envelope WITHOUT signatureUrl matches iter-46 byte-for-byte (no new key leaks in)", () => {
+    // The whole point of the conditional spread: the iter-42/43/44/45/46
+    // contracts must hold byte-for-byte for v2-passthrough callers.
+    // Build the same envelope with and without the iter-47 field on
+    // the input state and assert byte-equality + absent signatureUrl
+    // key in the output.
+    const baseState = {
+      currentVersion: "1.4.0",
+      targetVersion: "2.1.0",
+      requiredMinVersion: "1.7.0",
+      bridgeDownloadUrl: "https://rud1.es/desktop/v2.1.0.dmg",
+      releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+      manifestVersion: 2,
+    };
+    const without = buildBlockedDiagnosticsBlob(baseState, FIXED_AT);
+    expect(without).not.toContain('"signatureUrl"');
+    // Same state with signatureUrl explicitly null → still byte-equal.
+    const withNull = buildBlockedDiagnosticsBlob(
+      { ...baseState, signatureUrl: null },
+      FIXED_AT,
+    );
+    expect(withNull).toBe(without);
+    // And undefined.
+    const withUndefined = buildBlockedDiagnosticsBlob(
+      { ...baseState, signatureUrl: undefined },
+      FIXED_AT,
+    );
+    expect(withUndefined).toBe(without);
+  });
+
+  it("blocked envelope DEFENSIVELY rejects a malformed signatureUrl in state (silent drop)", () => {
+    // Mirrors the iter-38/39 defensive re-validation pattern. A
+    // future caller hand-constructing the state object cannot
+    // bypass parse-time validation by stashing an unsafe URL on
+    // the diagnostics input.
+    const blob = buildBlockedDiagnosticsBlob(
+      {
+        currentVersion: "1.4.0",
+        targetVersion: "2.1.0",
+        requiredMinVersion: "1.7.0",
+        manifestVersion: 3,
+        signatureUrl: "javascript:alert(1)", // hostile
+      },
+      FIXED_AT,
+    );
+    expect(blob).not.toContain('"signatureUrl"');
+    expect(blob).not.toContain("javascript:");
+  });
+
+  it("update-available envelope mirrors the blocked-state contract (append + drop + defensive)", () => {
+    // The same key-ordering pin and v2-passthrough contract apply on
+    // the update-available helper. Pin all three behaviours in one
+    // spec to keep the suite compact.
+    const VALID_BRIDGE_SHA = "f".repeat(64);
+    const baseState = {
+      current: "1.4.0",
+      latest: "2.1.0",
+      downloadUrl: "https://rud1.es/desktop/v2.1.0",
+      releaseNotesUrl: "https://rud1.es/changelog/v2.1.0",
+      bridgeSha256: VALID_BRIDGE_SHA,
+      manifestVersion: 2,
+    };
+
+    // 1. With a good signatureUrl → key appended after manifestVersion.
+    const withSig = buildUpdateAvailableDiagnosticsBlob(
+      { ...baseState, manifestVersion: 3, signatureUrl: GOOD_SIG },
+      FIXED_AT,
+    );
+    const outWith = JSON.parse(withSig);
+    expect(outWith.signatureUrl).toBe(GOOD_SIG);
+    const order = [
+      '"capturedAt"',
+      '"kind"',
+      '"currentVersion"',
+      '"targetVersion"',
+      '"downloadUrl"',
+      '"bridgeSha256"',
+      '"releaseNotesUrl"',
+      '"manifestVersion"',
+      '"signatureUrl"',
+    ];
+    let prev = -1;
+    for (const k of order) {
+      const idx = withSig.indexOf(k);
+      expect(idx).toBeGreaterThan(prev);
+      prev = idx;
+    }
+
+    // 2. Without (null / undefined / absent) → byte-equal to iter-43 envelope.
+    const without = buildUpdateAvailableDiagnosticsBlob(baseState, FIXED_AT);
+    expect(without).not.toContain('"signatureUrl"');
+    expect(
+      buildUpdateAvailableDiagnosticsBlob(
+        { ...baseState, signatureUrl: null },
+        FIXED_AT,
+      ),
+    ).toBe(without);
+    expect(
+      buildUpdateAvailableDiagnosticsBlob(
+        { ...baseState, signatureUrl: undefined },
+        FIXED_AT,
+      ),
+    ).toBe(without);
+
+    // 3. Defensive — malformed URL silently dropped.
+    const malformed = buildUpdateAvailableDiagnosticsBlob(
+      { ...baseState, signatureUrl: "https://rud1.es/installer.dmg" },
+      FIXED_AT,
+    );
+    expect(malformed).not.toContain('"signatureUrl"');
+  });
+
+  it("envelope key-ordering byte-for-byte parity vs iter-46 contracts (no signatureUrl input)", () => {
+    // Iter-47 appended a NEW optional key. The iter-46
+    // `buildSettingsWindowHtmlWithRuntimeVersion` wrapper test pins
+    // the helper output byte-for-byte; this test reasserts that
+    // parity for v2-passthrough callers (the signatureUrl field is
+    // genuinely append-only). A regression that always emitted
+    // `signatureUrl: null` would surface here as a non-equal blob.
+    const blockedV2 = buildBlockedDiagnosticsBlob(
+      {
+        currentVersion: "1.4.0",
+        targetVersion: "2.1.0",
+        requiredMinVersion: "1.7.0",
+        manifestVersion: 2,
+      },
+      FIXED_AT,
+    );
+    // Hand-recompose the expected iter-46 envelope JSON (verbatim).
+    const expected = JSON.stringify(
+      {
+        capturedAt: new Date(FIXED_AT).toISOString(),
+        kind: "update-blocked-by-min-bootstrap",
+        currentVersion: "1.4.0",
+        targetVersion: "2.1.0",
+        requiredMinVersion: "1.7.0",
+        downloadUrl: "https://rud1.es/desktop/download?version=1.7.0",
+        bridgeSha256: null,
+        releaseNotesUrl: null,
+        manifestVersion: 2,
+      },
+      null,
+      2,
+    );
+    expect(blockedV2).toBe(expected);
+
+    const updateV2 = buildUpdateAvailableDiagnosticsBlob(
+      {
+        current: "1.4.0",
+        latest: "2.1.0",
+        manifestVersion: 2,
+      },
+      FIXED_AT,
+    );
+    const expectedUpdate = JSON.stringify(
+      {
+        capturedAt: new Date(FIXED_AT).toISOString(),
+        kind: "update-available",
+        currentVersion: "1.4.0",
+        targetVersion: "2.1.0",
+        downloadUrl: "https://rud1.es/desktop/download?version=2.1.0",
+        bridgeSha256: null,
+        releaseNotesUrl: null,
+        manifestVersion: 2,
+      },
+      null,
+      2,
+    );
+    expect(updateV2).toBe(expectedUpdate);
   });
 });
