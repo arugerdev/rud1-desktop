@@ -43,6 +43,7 @@ import {
   isCGNATEndpoint,
   inspectConfig,
   computeTunnelUptimeMs,
+  formatUptimeMs,
   __test,
 } from "./vpn-manager";
 
@@ -539,5 +540,46 @@ describe("computeTunnelUptimeMs", () => {
   it("returns 0 when nowMs == lastConnectedAtMs (boundary)", () => {
     const now = 1_700_000_000_000;
     expect(computeTunnelUptimeMs(true, now, now)).toBe(0);
+  });
+});
+
+// ─── 13. iter 59 — formatUptimeMs (pure formatter) ──────────────────────────
+//
+// Mirrors the rud1-es helper in connect-panel.tsx. The notification toast
+// path uses this to render "Tunnel dropped after 2h 14m" — we want the
+// edge cases (null/negative/non-finite) to suppress the trailing segment
+// instead of printing "after NaNs".
+
+describe("formatUptimeMs", () => {
+  it("returns null for unrecoverable inputs", () => {
+    expect(formatUptimeMs(null)).toBeNull();
+    expect(formatUptimeMs(undefined)).toBeNull();
+    expect(formatUptimeMs(NaN)).toBeNull();
+    expect(formatUptimeMs(Infinity)).toBeNull();
+    expect(formatUptimeMs(-1)).toBeNull();
+  });
+
+  it("renders sub-minute durations as bare seconds", () => {
+    expect(formatUptimeMs(0)).toBe("0s");
+    expect(formatUptimeMs(999)).toBe("0s"); // < 1s rounds down
+    expect(formatUptimeMs(12_345)).toBe("12s");
+    expect(formatUptimeMs(59_999)).toBe("59s");
+  });
+
+  it("renders sub-hour durations as `m s` (60s tipping point)", () => {
+    expect(formatUptimeMs(60_000)).toBe("1m 0s");
+    expect(formatUptimeMs(125_000)).toBe("2m 5s");
+    expect(formatUptimeMs(3_599_000)).toBe("59m 59s");
+  });
+
+  it("renders hour-scale durations as `h m`", () => {
+    expect(formatUptimeMs(3_600_000)).toBe("1h 0m");
+    expect(formatUptimeMs(2 * 3_600_000 + 14 * 60_000)).toBe("2h 14m");
+    expect(formatUptimeMs(47 * 3_600_000 + 30 * 60_000)).toBe("47h 30m");
+  });
+
+  it("renders multi-day durations as `d h` (48h tipping point)", () => {
+    expect(formatUptimeMs(48 * 3_600_000)).toBe("2d 0h");
+    expect(formatUptimeMs(3 * 24 * 3_600_000 + 4 * 3_600_000)).toBe("3d 4h");
   });
 });

@@ -283,14 +283,54 @@ export async function vpnConnect(wgConfig: string): Promise<void> {
   lastConnectedAt = Date.now();
 }
 
-export async function vpnDisconnect(): Promise<void> {
+/**
+ * Iter 59: result envelope for `vpnDisconnect`. Carries the captured
+ * tunnel uptime (in ms) so the IPC layer can render a "Tunnel dropped
+ * after 2h 14m" toast — gives the user a satisfying confirmation that
+ * the tunnel was actually doing useful work, not just a generic "Tunnel
+ * is down" message that's indistinguishable from a never-connected
+ * fall-through. Null when there was no live connect stamp from this
+ * session (e.g. teardown of a leftover service from a previous run).
+ */
+export interface VpnDisconnectResult {
+  /** ms the tunnel was up before the disconnect succeeded, or null when
+   *  we don't have a live connect stamp from this session. */
+  uptimeMs: number | null;
+}
+
+export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
   ensureWireguardAvailable();
+  // Capture uptime BEFORE clearing state — we measure against the prior
+  // connect stamp, then stomp the disconnect stamp afterwards. The
+  // computation reuses the same pure helper as `vpnStatus` so the
+  // semantics stay identical (null on missing/negative delta).
+  const uptimeMs = computeTunnelUptimeMs(true, lastConnectedAt, Date.now());
   if (process.platform === "win32") {
     await disconnectWindows();
   } else {
     await disconnectUnix();
   }
   lastDisconnectedAt = Date.now();
+  return { uptimeMs };
+}
+
+/**
+ * Iter 59: compact uptime formatter. Mirrors the rud1-es `formatUptimeMs`
+ * in connect-panel.tsx so the desktop's notification toast and the
+ * renderer's chip read identically. Returns null for unrecoverable
+ * inputs so callers can suppress the trailing "after ..." segment
+ * rather than print "after NaNs".
+ */
+export function formatUptimeMs(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  if (min < 60) return `${min}m ${totalSec % 60}s`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h ${min % 60}m`;
+  const days = Math.floor(hr / 24);
+  return `${days}d ${hr % 24}h`;
 }
 
 /**

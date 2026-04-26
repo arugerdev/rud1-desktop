@@ -88,11 +88,22 @@ export function notifyVpnCgnatWarning(deviceName?: string) {
  * panel switch to "VPN Disconnected" already; this is for when they
  * triggered disconnect from a device's Connect tab and immediately
  * navigated away.
+ *
+ * Iter 59: optional `uptimeLabel` — pre-formatted via vpn-manager's
+ * `formatUptimeMs` (e.g. "2h 14m"). When supplied we append "after X"
+ * so the user gets a satisfying confirmation that the tunnel was
+ * actually live, distinguishable from a "tear down a leftover service"
+ * fall-through path.
  */
-export function notifyVpnDisconnected(deviceName?: string) {
+export function notifyVpnDisconnected(
+  deviceName?: string,
+  uptimeLabel?: string | null,
+) {
+  const target = deviceName ? `Tunnel to ${deviceName} dropped` : "Tunnel is down";
+  const suffix = uptimeLabel && uptimeLabel.trim() ? ` after ${uptimeLabel.trim()}` : "";
   show(
     "VPN Disconnected",
-    deviceName ? `Tunnel to ${deviceName} dropped.` : "Tunnel is down.",
+    `${target}${suffix}.`,
     { silent: true },
   );
 }

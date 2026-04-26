@@ -43,7 +43,7 @@
  */
 
 import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
-import { vpnConnect, vpnDisconnect, vpnStatus, inspectConfig } from "./vpn-manager";
+import { vpnConnect, vpnDisconnect, vpnStatus, inspectConfig, formatUptimeMs } from "./vpn-manager";
 import {
   usbAttach,
   usbDetach,
@@ -410,9 +410,12 @@ export function registerIpcHandlers(opts: {
   ipcMain.handle("vpn:disconnect", async (event) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     try {
-      await vpnDisconnect();
-      notifyVpnDisconnected();
-      return { ok: true };
+      // Iter 59: capture uptime via the result envelope so the
+      // notification toast can render "Tunnel dropped after 2h 14m".
+      // Preserves the prior `{ok:true}` shape — `uptimeMs` is additive.
+      const result = await vpnDisconnect();
+      notifyVpnDisconnected(undefined, formatUptimeMs(result.uptimeMs));
+      return { ok: true, uptimeMs: result.uptimeMs };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }

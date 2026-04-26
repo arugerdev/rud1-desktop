@@ -86,8 +86,15 @@ vi.mock("electron", () => {
 // not about the managers' behavior (each has its own *.test.ts file).
 vi.mock("./vpn-manager", () => ({
   vpnConnect: vi.fn(async () => undefined),
-  vpnDisconnect: vi.fn(async () => undefined),
+  // Iter 59: vpnDisconnect now returns { uptimeMs }. The IPC handler
+  // surfaces this on the response envelope so the renderer can show
+  // "Tunnel dropped after 2h 14m" toasts. Keep the mock minimal — null
+  // exercises the "no live connect stamp" branch without breaking the
+  // "did the IPC fire?" coverage that this file actually owns.
+  vpnDisconnect: vi.fn(async () => ({ uptimeMs: null })),
   vpnStatus: vi.fn(async () => ({ connected: false })),
+  formatUptimeMs: (ms: number | null | undefined) =>
+    ms == null || !Number.isFinite(ms) || ms < 0 ? null : `${Math.floor(ms / 1000)}s`,
 }));
 vi.mock("./usb-manager", () => ({
   usbAttach: vi.fn(async () => 1),
