@@ -27,6 +27,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
         // (connect/disconnect) has succeeded at least once this session.
         lastConnectedAt: string | null;
         lastDisconnectedAt: string | null;
+        // Iter 58: derived convenience field — `Date.now() - lastConnectedAt`
+        // when the tunnel is up AND we have a connect stamp from this
+        // session. Null otherwise (disconnected, no stamp, or clock skew).
+        // Lets the renderer paint "Tunnel up 12m" without re-parsing the
+        // ISO stamps. Older desktop builds (< iter 58) omit this field;
+        // renderers should feature-detect with `??`.
+        tunnelUptimeMs: number | null;
       }>,
   },
 

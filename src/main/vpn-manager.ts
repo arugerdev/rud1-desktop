@@ -306,6 +306,44 @@ export interface VpnStatusResult {
   lastConnectedAt: string | null;
   /** ISO timestamp of the last successful `vpnDisconnect` (null until first run). */
   lastDisconnectedAt: string | null;
+  /**
+   * Iter 58: convenience derived field — `Date.now() - lastConnectedAt`
+   * when the tunnel is currently connected AND we've stamped a connect
+   * this session, otherwise null. Lets the renderer show
+   * "Tunnel up 12m" without parsing the ISO stamps client-side.
+   *
+   * Three null cases:
+   *   - `connected === false` (the disconnect path matters; uptime is moot)
+   *   - `lastConnectedAt === null` (no connect attempted this session, but
+   *     wg/netsh reports the tunnel up — typically a leftover service
+   *     from a previous app run; we don't lie about uptime we can't measure)
+   *   - clock skew makes the delta negative (we coerce to null rather
+   *     than emit a misleading negative number)
+   */
+  tunnelUptimeMs: number | null;
+}
+
+/**
+ * Iter 58: pure computation of the derived `tunnelUptimeMs`. Extracted
+ * so unit tests can pin the contract without spawning wg/netsh — the
+ * real `vpnStatus` uses platform-dependent shell-outs that the iter-19
+ * module banner explicitly chose not to mock.
+ *
+ * Returns null whenever the tunnel is not currently up, when there's no
+ * recorded connect stamp this session, or when the clock has drifted
+ * backwards between the connect stamp and `nowMs` (a desktop machine
+ * recovering from sleep can briefly jump backwards before NTP resyncs).
+ */
+export function computeTunnelUptimeMs(
+  connected: boolean,
+  lastConnectedAtMs: number | null,
+  nowMs: number,
+): number | null {
+  if (!connected) return null;
+  if (lastConnectedAtMs == null) return null;
+  const delta = nowMs - lastConnectedAtMs;
+  if (delta < 0) return null;
+  return delta;
 }
 
 export async function vpnStatus(): Promise<VpnStatusResult> {
@@ -319,6 +357,11 @@ export async function vpnStatus(): Promise<VpnStatusResult> {
     lastDisconnectedAt: lastDisconnectedAt
       ? new Date(lastDisconnectedAt).toISOString()
       : null,
+    tunnelUptimeMs: computeTunnelUptimeMs(
+      platformStatus.connected,
+      lastConnectedAt,
+      Date.now(),
+    ),
   };
 }
 

@@ -42,6 +42,7 @@ import {
   parseEndpointFromConfig,
   isCGNATEndpoint,
   inspectConfig,
+  computeTunnelUptimeMs,
   __test,
 } from "./vpn-manager";
 
@@ -498,5 +499,45 @@ describe("vpnStatus lifecycle freshness signals (iter 57)", () => {
     // ESM contract (named export presence).
     expect(typeof vpnStatus).toBe("function");
     expect(typeof __resetVpnLifecycleStateForTests).toBe("function");
+  });
+});
+
+// ─── 12. iter 58 — computeTunnelUptimeMs (pure derived signal) ───────────────
+//
+// Pure helper carved out of vpnStatus so we can pin the contract without
+// the platform shell-out. The renderer paints "Tunnel up 12m" off this
+// number; getting the null cases right matters more than the happy path.
+
+describe("computeTunnelUptimeMs", () => {
+  it("returns delta when connected and the connect stamp is in the past", () => {
+    const now = 1_700_000_000_000;
+    expect(computeTunnelUptimeMs(true, now - 12_345, now)).toBe(12_345);
+    // 1 second
+    expect(computeTunnelUptimeMs(true, now - 1_000, now)).toBe(1_000);
+  });
+
+  it("returns null when not connected (uptime is moot on the disconnect path)", () => {
+    const now = 1_700_000_000_000;
+    expect(computeTunnelUptimeMs(false, now - 5_000, now)).toBeNull();
+  });
+
+  it("returns null when there is no connect stamp yet", () => {
+    // Tunnel reports up (e.g. leftover service from a prior app run) but
+    // we never ran vpnConnect this session — we don't lie about uptime
+    // we can't measure.
+    expect(computeTunnelUptimeMs(true, null, 1_700_000_000_000)).toBeNull();
+  });
+
+  it("returns null on negative delta (clock skew / wake-from-sleep)", () => {
+    // A laptop coming out of suspend can briefly read a now() that
+    // predates the connect stamp before NTP resyncs. We coerce to null
+    // rather than emit a misleading negative.
+    const now = 1_700_000_000_000;
+    expect(computeTunnelUptimeMs(true, now + 5_000, now)).toBeNull();
+  });
+
+  it("returns 0 when nowMs == lastConnectedAtMs (boundary)", () => {
+    const now = 1_700_000_000_000;
+    expect(computeTunnelUptimeMs(true, now, now)).toBe(0);
   });
 });
