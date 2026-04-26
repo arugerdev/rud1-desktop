@@ -264,6 +264,24 @@ export interface VersionCheckOptions {
    * iter-34 bucket gate stays in force.
    */
   forceRollout?: () => boolean;
+  /**
+   * Iter 51 — fires once per successful `checkOnce` AFTER `parseManifest`
+   * accepts the body but BEFORE the verdict transition runs. Lets the
+   * tray/main process cache manifest-derived primitives that the
+   * VersionCheckState union doesn't carry directly — today specifically
+   * `manifestSha256` (used as the `signed-data` for the iter-49 minisign
+   * verify) and `manifestVersion` (threaded into the iter-48
+   * `applySignatureFetchGate` so the diagnostics envelope's
+   * `signature-not-supported-by-manifest-version` branch reports the
+   * real value instead of `null`).
+   *
+   * Closes the iter-50 follow-up that documented the dangling
+   * `lastManifestSha256` / `lastManifestVersion` state — both are now
+   * sourced from the same callback, on the same manifest, with no risk
+   * of them drifting (iter-49 caveat). Errors thrown by the listener are
+   * swallowed (mirrors `onStateChange`).
+   */
+  onManifestParsed?: (manifest: VersionManifest) => void;
 }
 
 export interface VersionManifest {
@@ -803,6 +821,7 @@ export class VersionCheckManager {
     onStateChange: (s: VersionCheckState) => void;
     installId: string | null;
     forceRollout: () => boolean;
+    onManifestParsed: (m: VersionManifest) => void;
   };
   private readonly deviceBucket: number | null;
 
@@ -833,6 +852,7 @@ export class VersionCheckManager {
       onStateChange: options.onStateChange ?? (() => {}),
       installId: options.installId ?? null,
       forceRollout: options.forceRollout ?? (() => false),
+      onManifestParsed: options.onManifestParsed ?? (() => {}),
     };
     this.deviceBucket =
       this.opts.installId != null ? computeDeviceBucket(this.opts.installId) : null;
@@ -890,6 +910,17 @@ export class VersionCheckManager {
           message: "manifest shape rejected",
           checkedAt: Date.now(),
         });
+      }
+      // Iter 51 — fire the manifest-parsed listener BEFORE the rollout
+      // gate / classify. Subscribers (the tray cache) want the manifest
+      // values regardless of whether the verdict ends up suppressed by
+      // a bucket gate or short-circuited by `update-blocked-by-min-bootstrap`.
+      // A throwing listener must not break the version-check loop.
+      try {
+        this.opts.onManifestParsed(manifest);
+      } catch {
+        // swallow — listener errors are out-of-band telemetry, not a
+        // signal we'd act on here.
       }
       // Iter 34/35 — log the rollout decision once per fetch when the
       // manifest carries a bucket. Eligibility now also reflects the

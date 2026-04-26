@@ -114,11 +114,25 @@ let trayAttentionCount = 0;
 let versionCheckManager: VersionCheckManager | null = null;
 let lastVersionCheckState: VersionCheckState = { kind: "idle" };
 // Iter 30 — captured from the last successful manifest fetch (when present)
-// so `applyAndRestart` can verify the downloaded artifact's SHA-256. The
-// manifest schema doesn't currently advertise this; the field is kept
-// optional and threaded through the menu handlers so a future schema
-// rev can populate it without rewiring the tray.
+// so `applyAndRestart` can verify the downloaded artifact's SHA-256.
+// Iter 51 — both this AND the new `lastManifestVersion` are populated
+// via the version-check manager's `onManifestParsed` callback (added in
+// the same iter). Until iter 51 they were declared but never written —
+// the iter-49 caveat called this out as a known follow-up. Now the
+// iter-49 minisign signed-data, the iter-48 sig-fetch gate, and the
+// signature-not-supported diagnostics envelope all read the real
+// values from the most-recent successful manifest fetch.
 let lastManifestSha256: string | null = null;
+// Iter 51 — manifest schema version (1, 2, or 3). Threaded into
+// `applySignatureFetchGate` as `options.manifestVersion`; the gate uses
+// it to distinguish "v1/v2 manifest can't carry a signatureUrl"
+// (`signature-not-supported-by-manifest-version`) from "v3 manifest
+// signatureUrl unreachable / empty / verification mismatched". Without
+// this, the diagnostics envelope's `manifestVersion` field rendered
+// `null` for every blocked verdict — operators couldn't tell from a
+// support blob whether the publisher needed to upgrade to v3 or fix
+// their existing v3 sidecar.
+let lastManifestVersion: number | null = null;
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -257,6 +271,12 @@ function rebuildTrayMenu(): void {
             verifyEnabled,
             verifyPubkey: parsedPub != null ? parsedPub.pubkey : null,
             verifySignedData: signedData,
+            // Iter 51 — pass the captured manifestVersion through so the
+            // gate's "manifest < v3 ⇒ signature-not-supported" branch
+            // fires when appropriate. The gate's diagnostics envelope
+            // reads back state.manifestVersion which now lands on the
+            // blocked verdict.
+            manifestVersion: lastManifestVersion,
           });
           if (gated.kind === "update-blocked-by-signature-fetch") {
             lastVersionCheckState = gated;
@@ -773,6 +793,17 @@ app.whenReady().then(() => {
       // update-blocked-by-min-bootstrap, etc.) without reopening the
       // window. Best-effort: a closed panel is a no-op.
       broadcastVersionCheckUpdate(state);
+    },
+    // Iter 51 — capture the parsed manifest's sha256 + manifestVersion
+    // on every successful fetch so the iter-49 sig-VERIFY plumbing and
+    // the iter-48 sig-fetch gate can read the live values. Before this
+    // wire-up both module-level vars stayed permanently null (declared
+    // but never assigned), which silently degraded the verifySignedData
+    // path to "empty buffer ⇒ verify rejects" and forced every blocked
+    // verdict's diagnostics envelope to render manifestVersion=null.
+    onManifestParsed: (manifest) => {
+      lastManifestSha256 = manifest.sha256;
+      lastManifestVersion = manifest.manifestVersion;
     },
   });
   versionCheckManager.start();

@@ -5102,3 +5102,166 @@ describe("parseSigPubkey + isSigVerifyEnabled — iter 49 env helpers", () => {
     ).toBe(true);
   });
 });
+
+// ─── Iter 51 — onManifestParsed callback ──────────────────────────────────
+//
+// The tray cache (lastManifestSha256 + lastManifestVersion) reads its
+// values from this callback, which fires once per successful checkOnce
+// AFTER parseManifest accepts the body but BEFORE the verdict
+// transition runs. Pinning the contract:
+//
+//   • The callback fires exactly once per successful fetch.
+//   • The manifest passed in carries the same sha256 + manifestVersion
+//     the verdict pipeline downstream sees — they must NEVER drift.
+//   • A fetch that returns a parse-rejected body does NOT fire the
+//     callback (else the cache would carry over a stale value).
+//   • A throwing listener does NOT break the version-check loop —
+//     errors are swallowed (mirrors onStateChange).
+//   • The callback fires BEFORE rollout-bucket suppression: a manifest
+//     advertising rolloutBucket=0 still informs the cache. Otherwise a
+//     bucketed device couldn't ever populate lastManifestSha256.
+
+describe("VersionCheckManager.onManifestParsed (iter 51)", () => {
+  const VALID_SHA = "a".repeat(64);
+
+  it("fires once with the parsed manifest on a successful update-available fetch", async () => {
+    const seen: Array<{ version: string; manifestVersion: number; sha256: string | null }> =
+      [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () =>
+        jsonResponse({
+          version: "1.5.0",
+          manifestVersion: 2,
+          sha256: VALID_SHA,
+          downloadUrl: "https://rud1.es/dl",
+        }),
+      onManifestParsed: (m) => {
+        seen.push({
+          version: m.version,
+          manifestVersion: m.manifestVersion,
+          sha256: m.sha256,
+        });
+      },
+    });
+    await mgr.checkOnce();
+    expect(seen.length).toBe(1);
+    expect(seen[0].version).toBe("1.5.0");
+    expect(seen[0].manifestVersion).toBe(2);
+    expect(seen[0].sha256).toBe(VALID_SHA);
+  });
+
+  it("fires on up-to-date verdicts too (cache must always reflect the latest fetched manifest)", async () => {
+    const seen: number[] = [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.5.0",
+      fetch: async () =>
+        jsonResponse({
+          version: "1.5.0",
+          manifestVersion: 1,
+        }),
+      onManifestParsed: (m) => seen.push(m.manifestVersion),
+    });
+    await mgr.checkOnce();
+    expect(seen).toEqual([1]);
+    expect(mgr.getState().kind).toBe("up-to-date");
+  });
+
+  it("does NOT fire when the body is not valid JSON", async () => {
+    const seen: number[] = [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () =>
+        new Response("not json", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      onManifestParsed: (m) => seen.push(m.manifestVersion),
+    });
+    await mgr.checkOnce();
+    expect(seen.length).toBe(0);
+    expect(mgr.getState().kind).toBe("error");
+  });
+
+  it("does NOT fire when parseManifest rejects the shape", async () => {
+    const seen: number[] = [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () => jsonResponse({ note: "missing version field" }),
+      onManifestParsed: (m) => seen.push(m.manifestVersion),
+    });
+    await mgr.checkOnce();
+    expect(seen.length).toBe(0);
+    expect(mgr.getState().kind).toBe("error");
+  });
+
+  it("a throwing listener is swallowed and the verdict still transitions", async () => {
+    const states: string[] = [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () =>
+        jsonResponse({
+          version: "1.5.0",
+          manifestVersion: 1,
+        }),
+      onManifestParsed: () => {
+        throw new Error("listener boom");
+      },
+      onStateChange: (s) => states.push(s.kind),
+    });
+    const verdict = await mgr.checkOnce();
+    expect(verdict.kind).toBe("update-available");
+    // checking → update-available, both observed.
+    expect(states).toContain("update-available");
+  });
+
+  it("fires BEFORE rollout-bucket suppression so the cache populates even when the verdict is up-to-date", async () => {
+    // rolloutBucket=1 + a deterministic installId whose computed device
+    // bucket is > 1 produces an `up-to-date` verdict despite the
+    // manifest advertising a newer version. The cache MUST still pick
+    // up the manifest's sha256 + manifestVersion — otherwise the
+    // iter-49 verifySignedData would never have a value during a slow
+    // staged rollout.
+    const seen: number[] = [];
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      installId: "test:device:high-bucket", // computed bucket lands well above 1
+      fetch: async () =>
+        jsonResponse({
+          version: "1.5.0",
+          manifestVersion: 2,
+          sha256: VALID_SHA,
+          rolloutBucket: 1,
+        }),
+      onManifestParsed: (m) => seen.push(m.manifestVersion),
+    });
+    const verdict = await mgr.checkOnce();
+    // Pin the suppression: device is OUTSIDE bucket 1 so the verdict
+    // reads up-to-date despite the manifest advertising 1.5.0.
+    expect(verdict.kind).toBe("up-to-date");
+    expect(seen).toEqual([2]); // populated despite suppression
+  });
+
+  it("fires omitted when constructor receives no listener (defaults to no-op)", async () => {
+    // Omitting onManifestParsed must be valid — older callers that
+    // pre-date iter 51 must continue to work without changes.
+    const mgr = new VersionCheckManager({
+      manifestUrl: "https://rud1.es/manifest.json",
+      currentVersion: "1.0.0",
+      fetch: async () =>
+        jsonResponse({
+          version: "1.5.0",
+          manifestVersion: 1,
+        }),
+      // no onManifestParsed
+    });
+    await expect(mgr.checkOnce()).resolves.toBeDefined();
+    expect(mgr.getState().kind).toBe("update-available");
+  });
+});
