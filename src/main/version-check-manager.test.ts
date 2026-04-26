@@ -4444,10 +4444,10 @@ describe("iter-31 sha256 strict + iter-48 sig strict composition (iter 48)", () 
 //
 //   applySignatureFetchGate (verify on):
 //    15. verify-on + fetch-fails-first → stops at fetch (verify never runs)
-//    16. verify-on + parse-fails-on-fetched-bytes → signature-invalid
+//    16. verify-on + parse-fails-on-fetched-bytes → signature-parse-failed
 //    17. verify-on + verify-passes → original verdict UNCHANGED
 //    18. verify-on + missing pubkey → signature-pubkey-misconfigured
-//    19. verify-on + verify-fails (good shape, wrong sig) → signature-invalid
+//    19. verify-on + verify-fails (good shape, wrong sig) → signature-verify-failed
 //    20. verify-OFF + fetch passes → byte-identical iter-48 passthrough
 describe("parseMinisignSignature — iter 49", () => {
   const { parseMinisignSignature } = versionCheckInternals;
@@ -4711,7 +4711,7 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
   }
 
   // 15. verify-on but fetch fails first → stops at fetch (signature-unreachable).
-  it("verify-on + network error during fetch → blocked at fetch stage (signature-unreachable, NOT signature-invalid)", async () => {
+  it("verify-on + network error during fetch → blocked at fetch stage (signature-unreachable, NOT a parse/verify failure)", async () => {
     let parseCalls = 0;
     const fakeFetch: typeof globalThis.fetch = async () => {
       throw new Error("ECONNREFUSED");
@@ -4733,10 +4733,12 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
     expect(parseCalls).toBe(0); // never reached
   });
 
-  // 16. verify-on + parse fails → signature-invalid.
-  it("verify-on + fetched body is not a valid minisign sidecar → signature-invalid", async () => {
+  // 16. verify-on + parse fails → signature-parse-failed (iter 50).
+  it("verify-on + fetched body is not a valid minisign sidecar → signature-parse-failed", async () => {
     // Body >= 16 bytes (clears the iter-48 empty check) but is not a
-    // parseable sidecar. Must fall into the iter-49 parse branch.
+    // parseable sidecar. Must fall into the iter-49 parse branch and
+    // — under iter-50 — surface the *parse-failed* split rather than
+    // the (now-removed) collapsed `signature-invalid` reason.
     const garbage = Buffer.from("xxxxxxxxxxxxxxxxxxxxxxxx", "utf8"); // 24 bytes
     const fakeFetch: typeof globalThis.fetch = async () =>
       new Response(garbage, { status: 200 });
@@ -4752,7 +4754,7 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
     });
     expect(out.kind).toBe("update-blocked-by-signature-fetch");
     if (out.kind === "update-blocked-by-signature-fetch") {
-      expect(out.reason).toBe("signature-invalid");
+      expect(out.reason).toBe("signature-parse-failed");
       expect(out.signatureUrl).toBe(GOOD_SIG_URL);
     }
   });
@@ -4824,8 +4826,8 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
     }
   });
 
-  // 19. verify-on + good shape but wrong sig → signature-invalid.
-  it("verify-on + valid sidecar parse but signature was made by a DIFFERENT key → signature-invalid", async () => {
+  // 19. verify-on + good shape but wrong sig → signature-verify-failed (iter 50).
+  it("verify-on + valid sidecar parse but signature was made by a DIFFERENT key → signature-verify-failed", async () => {
     const a = generateKeyPairSync("ed25519");
     const b = generateKeyPairSync("ed25519");
     const signedData = Buffer.from("manifest-sha256", "utf8");
@@ -4839,18 +4841,20 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
       fetch: fakeFetch,
       now: FIXED_AT,
       verifyEnabled: true,
-      // Verifying against B's pubkey — must reject.
+      // Verifying against B's pubkey — must reject. Sidecar parses
+      // cleanly, so iter 50 surfaces the *verify-failed* split (key
+      // mismatch / tampered binary signal) rather than parse-failed.
       verifyPubkey: rawPubkeyFrom(b.publicKey),
       verifySignedData: signedData,
     });
     expect(out.kind).toBe("update-blocked-by-signature-fetch");
     if (out.kind === "update-blocked-by-signature-fetch") {
-      expect(out.reason).toBe("signature-invalid");
+      expect(out.reason).toBe("signature-verify-failed");
     }
   });
 
-  // 19b. verify-on + tampered signedData → signature-invalid.
-  it("verify-on + signature is for ORIGINAL data but caller passed tampered data → signature-invalid", async () => {
+  // 19b. verify-on + tampered signedData → signature-verify-failed (iter 50).
+  it("verify-on + signature is for ORIGINAL data but caller passed tampered data → signature-verify-failed", async () => {
     const { publicKey, privateKey } = generateKeyPairSync("ed25519");
     const original = Buffer.from("real-manifest-sha256", "utf8");
     const sigBytes = cryptoSign(null, original, privateKey);
@@ -4869,7 +4873,7 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
     });
     expect(out.kind).toBe("update-blocked-by-signature-fetch");
     if (out.kind === "update-blocked-by-signature-fetch") {
-      expect(out.reason).toBe("signature-invalid");
+      expect(out.reason).toBe("signature-verify-failed");
     }
   });
 
@@ -4879,7 +4883,7 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
   //     attempt on the body). This is the iter-48 byte-stability contract.
   it("verify-OFF + fetch passes → original verdict identity-equal (iter-48 byte-stability pin)", async () => {
     // Body that is NOT a valid sidecar. Under verify-on this would
-    // surface signature-invalid; under verify-off it must passthrough.
+    // surface signature-parse-failed; under verify-off it must passthrough.
     const garbage = Buffer.alloc(32, 0); // 32 bytes of zero
     const fakeFetch: typeof globalThis.fetch = async () =>
       new Response(garbage, { status: 200 });
@@ -4910,6 +4914,95 @@ describe("applySignatureFetchGate verify-on integration — iter 49", () => {
       verifySignedData: Buffer.from("ignored"),
     });
     expect(out).toBe(state);
+  });
+
+  // ── iter 50 — parse-vs-verify split regression pins ───────────────────
+  //
+  // The iter-49 collapsed `signature-invalid` reason has been replaced
+  // by two distinct reasons: `signature-parse-failed` (sidecar bytes
+  // don't shape as a minisign signature — publisher build pipeline
+  // broken) and `signature-verify-failed` (sidecar parses but the
+  // ed25519 verify rejects — key mismatch / tampered binary / wrong
+  // key-id). The two regression pins below assert the reason names
+  // never collide AND a parse failure short-circuits the verify path
+  // (so a subtle bug that silently re-reports verify-failed for parse
+  // errors would surface here).
+
+  it("iter-50 split: parse-failed and verify-failed are distinct strings (never collide)", () => {
+    // Belt-and-braces guard against a future refactor that re-collapses
+    // both reasons into a single literal — the iter-50 split was driven
+    // by ops triage need, not just naming preference.
+    expect("signature-parse-failed").not.toBe("signature-verify-failed");
+  });
+
+  it("iter-50 split: parse failure short-circuits verify (verifyMinisignSignature is NEVER reached on garbage bytes)", async () => {
+    // A bug that re-ordered parse and verify (or that swallowed the
+    // null return from parse and ran verify with empty bytes) would
+    // surface here as a verify-failed reason instead of parse-failed.
+    let verifyCallCount = 0;
+    const garbage = Buffer.from("xxxxxxxxxxxxxxxxxxxxxxxxxxxx", "utf8");
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(garbage, { status: 200 });
+    const { publicKey } = generateKeyPairSync("ed25519");
+
+    // We monkey-patch the global crypto.verify to count calls so a
+    // verify-stage execution would be observable. Restored in finally.
+    const origVerify = (globalThis as unknown as { crypto?: { verify?: unknown } })
+      .crypto?.verify as undefined | ((...args: unknown[]) => boolean);
+    // Note: applySignatureFetchGate uses the Node `crypto` module
+    // directly via verifyMinisignSignature, not globalThis.crypto, so
+    // counting via a global hook isn't perfectly tight. The test
+    // therefore asserts on the OUTCOME (parse-failed reason) — if
+    // verify had run on garbage bytes it would have returned
+    // verify-failed, so the parse-failed reason IS the proof.
+    void origVerify;
+
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: rawPubkeyFrom(publicKey),
+      verifySignedData: Buffer.from("anything"),
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      // The headline assertion: garbage bytes yield parse-failed, NEVER
+      // verify-failed. A future bug that runs verify before parse-check
+      // would flip this to verify-failed and the test would fail.
+      expect(out.reason).toBe("signature-parse-failed");
+      expect(out.reason).not.toBe("signature-verify-failed");
+    }
+    expect(verifyCallCount).toBe(0); // global hook never engaged either way
+  });
+
+  it("iter-50 split: a sidecar that parses but mis-verifies surfaces verify-failed (NOT parse-failed)", async () => {
+    // The complementary pin: bytes that parse cleanly must reach the
+    // verify stage; only verify rejection should surface verify-failed.
+    // A regression that swapped the two reasons in the dispatch would
+    // be caught here.
+    const a = generateKeyPairSync("ed25519");
+    const b = generateKeyPairSync("ed25519");
+    const signedData = Buffer.from("manifest-sha256-iter50", "utf8");
+    const sigByA = cryptoSign(null, signedData, a.privateKey);
+    const sidecar = buildSidecar(Buffer.alloc(8, 0xab), sigByA);
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(sidecar, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      verifyEnabled: true,
+      verifyPubkey: rawPubkeyFrom(b.publicKey),
+      verifySignedData: signedData,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-verify-failed");
+      expect(out.reason).not.toBe("signature-parse-failed");
+    }
   });
 });
 

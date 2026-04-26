@@ -182,12 +182,26 @@ export type VersionCheckState =
         // Iter 49 — sig-VERIFY (independent of iter-48 sig-strict).
         // `signature-pubkey-misconfigured` fires when SIG_VERIFY=1 is
         // set but `RUD1_DESKTOP_SIG_PUBKEY` is missing or malformed.
-        // `signature-invalid` collapses BOTH parse failures (malformed
-        // sidecar bytes — wrong algo prefix, length, base64) AND verify
-        // failures (good shape, but the ed25519 signature doesn't match
-        // the publisher pubkey + signed-data). Iter 50 may split.
         | "signature-pubkey-misconfigured"
-        | "signature-invalid";
+        // Iter 50 — split iter-49's collapsed `signature-invalid` into
+        // two distinct reasons so ops triage can disambiguate a
+        // malformed sidecar (publisher build pipeline broken) from an
+        // ed25519 verify mismatch (key rotation, tampered binary,
+        // wrong-key-id). Iter-49 telemetry collapsed both because the
+        // operator-facing recovery is similar; iter-50 splits because
+        // the publisher-side fix is very different.
+        //
+        //   `signature-parse-failed`  — fetched bytes don't parse as a
+        //                                minisign sidecar (wrong algo
+        //                                prefix, wrong length, base64
+        //                                garbage, comment-only file,
+        //                                missing newlines).
+        //   `signature-verify-failed` — sidecar parses cleanly but the
+        //                                ed25519 signature doesn't
+        //                                match the publisher pubkey +
+        //                                signed-data.
+        | "signature-parse-failed"
+        | "signature-verify-failed";
       // Always populated when the manifest carried a signatureUrl
       // (reasons 1/2/3); `null` when the gate fired because the
       // manifest is < v3 (reason 4 — there's no URL to report).
@@ -1372,9 +1386,11 @@ const BRIDGE_DOWNLOAD_URL_MAX_LENGTH = 2048;
 //   • verifyMinisignSignature({ pubkey, signedData, sigBytes }) → boolean
 //
 // Neither helper throws on malformed input — they return null / false so
-// the gate caller can pipeline through `?? null` and surface the
-// `signature-invalid` reason (which collapses parse + verify failures
-// for now; iter 50 can split if support readers want the distinction).
+// the gate caller can pipeline through `?? null` and surface the right
+// reason. Iter 50 splits parse failure (`signature-parse-failed`) from
+// verify failure (`signature-verify-failed`) so ops triage can
+// distinguish a malformed sidecar (publisher build pipeline broken)
+// from a verify mismatch (key rotation, tampered binary, wrong-key-id).
 
 const MINISIGN_ALGO_BYTE_0 = 0x45; // 'E'
 const MINISIGN_ALGO_BYTE_1 = 0x64; // 'd'  → "Ed" legacy algo prefix
@@ -1722,7 +1738,8 @@ export async function applySignatureFetchGate(
     // misconfiguration (missing / wrong-length / null) fails closed
     // with `signature-pubkey-misconfigured` BEFORE attempting parse —
     // a misconfigured publisher should see a distinct, actionable
-    // reason (rather than the generic `signature-invalid`).
+    // reason (rather than the iter-50 split `signature-parse-failed`
+    // / `signature-verify-failed` reasons that follow).
     if (options.verifyEnabled === true) {
       if (
         options.verifyPubkey == null ||
@@ -1743,9 +1760,12 @@ export async function applySignatureFetchGate(
       }
       const parsed = parseMinisignSignature(Buffer.from(buf));
       if (parsed == null) {
+        // Iter 50: split. Parse failure is a publisher-build-pipeline
+        // signal — the sidecar bytes the publisher served can't be
+        // shaped as a minisign signature.
         return {
           kind: "update-blocked-by-signature-fetch",
-          reason: "signature-invalid",
+          reason: "signature-parse-failed",
           signatureUrl: validated,
           currentVersion: state.current,
           targetVersion: state.latest,
@@ -1764,9 +1784,12 @@ export async function applySignatureFetchGate(
         sigBytes: parsed.signature,
       });
       if (!ok) {
+        // Iter 50: split. Verify failure is a key-mismatch / tampered-
+        // binary / wrong-key-id signal — the sidecar parses cleanly but
+        // the ed25519 verify against this publisher's pubkey rejects.
         return {
           kind: "update-blocked-by-signature-fetch",
-          reason: "signature-invalid",
+          reason: "signature-verify-failed",
           signatureUrl: validated,
           currentVersion: state.current,
           targetVersion: state.latest,
@@ -2285,10 +2308,10 @@ export interface BlockedBySignatureFetchDiagnosticsState {
     | "signature-empty"
     | "signature-http-status"
     | "signature-not-supported-by-manifest-version"
-    // Iter 49 — see VersionCheckState union for rationale on
-    // collapsing parse + verify failures into `signature-invalid`.
     | "signature-pubkey-misconfigured"
-    | "signature-invalid";
+    // Iter 50 — see VersionCheckState union for the parse-vs-verify split.
+    | "signature-parse-failed"
+    | "signature-verify-failed";
   signatureUrl: string | null;
   httpStatus?: number;
   currentVersion: string;
