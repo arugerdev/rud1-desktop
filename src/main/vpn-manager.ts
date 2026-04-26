@@ -22,7 +22,52 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { wgPath, wgQuickPath } from "./binary-helper";
+import { isBinaryAvailable, wgPath, wgQuickPath } from "./binary-helper";
+
+const WIREGUARD_INSTALL_URL = "https://www.wireguard.com/install/";
+
+/**
+ * Stable error class so callers (the IPC handler in particular) can
+ * recognise the "WireGuard isn't installed" failure mode without having
+ * to string-match on the message. The message itself is what we
+ * surface to the user — keep it actionable: name the missing component
+ * AND the URL to install it from.
+ */
+export class WireguardMissingError extends Error {
+  constructor(platform: NodeJS.Platform) {
+    const installer =
+      platform === "win32"
+        ? "WireGuard for Windows"
+        : platform === "darwin"
+        ? "WireGuard for macOS"
+        : "wireguard-tools";
+    super(
+      `${installer} is required but was not found. Install it from ${WIREGUARD_INSTALL_URL} and try again.`,
+    );
+    this.name = "WireguardMissingError";
+  }
+}
+
+/**
+ * Preflight: refuse to spawn anything when the platform's WireGuard
+ * binary is missing. Without this, the spawn fails with the opaque
+ * `spawn wireguard ENOENT` Node default — which is what the operator
+ * was hitting in the first place. We resolve the binary path via the
+ * same lookup the actual spawn uses, so this is the canonical "does
+ * the binary exist" signal.
+ */
+function ensureWireguardAvailable(): void {
+  if (process.platform === "win32") {
+    if (!isBinaryAvailable("wireguard")) {
+      throw new WireguardMissingError(process.platform);
+    }
+    return;
+  }
+  // Unix: wg-quick is the entrypoint for connect/disconnect, wg for status.
+  if (!isBinaryAvailable("wg-quick") || !isBinaryAvailable("wg")) {
+    throw new WireguardMissingError(process.platform);
+  }
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -159,11 +204,13 @@ async function statusUnix(): Promise<{ connected: boolean; ip?: string }> {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function vpnConnect(wgConfig: string): Promise<void> {
+  ensureWireguardAvailable();
   if (process.platform === "win32") return connectWindows(wgConfig);
   return connectUnix(wgConfig);
 }
 
 export async function vpnDisconnect(): Promise<void> {
+  ensureWireguardAvailable();
   if (process.platform === "win32") return disconnectWindows();
   return disconnectUnix();
 }

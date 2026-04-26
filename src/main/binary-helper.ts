@@ -1,8 +1,20 @@
 /**
  * Resolves paths to bundled native binaries.
  *
- * In development: looks in resources/<platform>/
- * In production:  binaries are in process.resourcesPath/bin/ (extraResources in electron-builder)
+ * Lookup order:
+ *   1. Bundled binary (resources/<platform>/<name> in dev,
+ *      process.resourcesPath/bin/<name> in production via extraResources).
+ *   2. Platform-known system install paths — e.g. on Windows the official
+ *      WireGuard installer drops `wireguard.exe` / `wg.exe` into
+ *      `%ProgramFiles%\WireGuard\` but does NOT add that directory to
+ *      PATH. Without an explicit lookup, `spawn wireguard` fails ENOENT
+ *      even when the user has done a clean install.
+ *   3. The bare binary name, letting the OS resolve via PATH.
+ *
+ * Returning the bare name as the last fallback means `execFile` will
+ * surface ENOENT only when the binary is genuinely absent — at that
+ * point callers (`vpn-manager`, `usb-manager`) translate the error
+ * into an actionable "install X from <url>" message for the panel.
  *
  * Required binaries per platform:
  *   Windows: wireguard.exe, wg.exe, usbip.exe
@@ -23,14 +35,40 @@ function resourcesDir(): string {
   return path.join(process.resourcesPath, "bin");
 }
 
+/**
+ * Known system install directories per binary, per platform. Only the
+ * binaries we ship a UI for (WireGuard, usbip) are listed; everything
+ * else falls through to PATH like before.
+ *
+ * Windows uses `process.env.ProgramFiles` / `ProgramFiles(x86)` rather
+ * than hardcoded `C:\Program Files\` so localised installs (Spanish
+ * `Archivos de programa`, locale-overridden drives, etc.) keep working.
+ */
+function systemInstallCandidates(name: string): string[] {
+  if (process.platform !== "win32") return [];
+  const exe = `${name}.exe`;
+  const out: string[] = [];
+  if (name === "wireguard" || name === "wg") {
+    const programFiles = process.env["ProgramFiles"];
+    const programFilesX86 = process.env["ProgramFiles(x86)"];
+    if (programFiles) out.push(path.join(programFiles, "WireGuard", exe));
+    if (programFilesX86) out.push(path.join(programFilesX86, "WireGuard", exe));
+  }
+  return out;
+}
+
 export function binaryPath(name: string): string {
   const base = resourcesDir();
   const exeName = process.platform === "win32" ? `${name}.exe` : name;
-  const full = path.join(base, exeName);
+  const bundled = path.join(base, exeName);
 
-  if (fs.existsSync(full)) return full;
+  if (fs.existsSync(bundled)) return bundled;
 
-  // Fallback: system PATH (useful when the user has WireGuard/usbip installed)
+  for (const candidate of systemInstallCandidates(name)) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // Fallback: bare name, resolved via system PATH at spawn time.
   return name;
 }
 
@@ -49,4 +87,14 @@ export function usbipPath(): string {
 
 export function usbipdPath(): string {
   return binaryPath("usbipd");
+}
+
+/**
+ * Returns true when `binaryPath(name)` resolved to a real file. Useful
+ * for preflight checks that need to give the user an actionable error
+ * ("install WireGuard for Windows from <url>") instead of waiting for
+ * spawn ENOENT to bubble up through the IPC bridge.
+ */
+export function isBinaryAvailable(name: string): boolean {
+  return path.isAbsolute(binaryPath(name));
 }
