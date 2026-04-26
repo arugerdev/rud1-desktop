@@ -5265,3 +5265,222 @@ describe("VersionCheckManager.onManifestParsed (iter 51)", () => {
     expect(mgr.getState().kind).toBe("update-available");
   });
 });
+
+// ─── Iter 52 — registrable-domain same-publisher policy ───────────────────
+//
+// Iter 48 enforced strict same-origin between manifestUrl and the
+// fetched signatureUrl. Iter 52 relaxes the default to "same
+// registrable domain" so a publisher serving the manifest at
+// `releases.rud1.es` and the sidecar at `cdn.rud1.es` works without
+// each pair of subdomains needing a separate manifest config. The
+// strict iter-48 posture is still available via
+// `samePublisherPolicy: "same-origin"`. Pinned here:
+//
+//   • isSameRegistrableDomain edge cases (literal equality, sibling
+//     subdomain, different registrable, IPv4 literal, single-label,
+//     case-insensitive).
+//   • Default policy (registrable-domain) accepts a sibling subdomain
+//     pair that iter 48 would have rejected.
+//   • Default policy still rejects a different registrable domain
+//     (so the iter-48 evil-CDN scenario stays blocked).
+//   • Explicit "same-origin" policy preserves iter-48 strictness.
+//   • Scheme/port mismatch is rejected regardless of policy (no
+//     https→http downgrade, no port-different sidecar).
+
+describe("isSameRegistrableDomain — iter 52", () => {
+  const { isSameRegistrableDomain } = versionCheckInternals;
+
+  it("returns true for literal-equal hostnames (case-insensitive)", () => {
+    expect(isSameRegistrableDomain("rud1.es", "rud1.es")).toBe(true);
+    expect(isSameRegistrableDomain("RUD1.ES", "rud1.es")).toBe(true);
+  });
+
+  it("returns true for sibling subdomains under the same registrable", () => {
+    expect(
+      isSameRegistrableDomain("releases.rud1.es", "cdn.rud1.es"),
+    ).toBe(true);
+    expect(
+      isSameRegistrableDomain("a.b.c.rud1.es", "x.rud1.es"),
+    ).toBe(true);
+  });
+
+  it("returns true when one is the apex and the other is a subdomain", () => {
+    expect(isSameRegistrableDomain("rud1.es", "cdn.rud1.es")).toBe(true);
+    expect(isSameRegistrableDomain("cdn.rud1.es", "rud1.es")).toBe(true);
+  });
+
+  it("returns false for hostnames under different registrable domains", () => {
+    expect(
+      isSameRegistrableDomain("rud1.es", "evil-cdn.example"),
+    ).toBe(false);
+    expect(
+      isSameRegistrableDomain("releases.rud1.es", "rud1.example"),
+    ).toBe(false);
+  });
+
+  it("returns false for IPv4 literals (strict equality only)", () => {
+    expect(isSameRegistrableDomain("10.0.0.1", "10.0.0.2")).toBe(false);
+    expect(isSameRegistrableDomain("10.0.0.1", "10.0.0.1")).toBe(true);
+  });
+
+  it("returns false for IPv6 literals (strict equality only)", () => {
+    expect(isSameRegistrableDomain("[::1]", "[::2]")).toBe(false);
+  });
+
+  it("returns false for single-label hosts (e.g. localhost)", () => {
+    expect(isSameRegistrableDomain("localhost", "localhost")).toBe(true);
+    expect(isSameRegistrableDomain("localhost", "other")).toBe(false);
+  });
+});
+
+describe("applySignatureFetchGate — iter 52 same-publisher policy", () => {
+  const { applySignatureFetchGate } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 26, 12, 0, 0);
+
+  function mkUpdateAvailable(extra: Record<string, unknown> = {}): VersionCheckState {
+    return {
+      kind: "update-available",
+      current: "1.4.0",
+      latest: "1.5.0",
+      downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+      releaseNotesUrl: null,
+      checkedAt: FIXED_AT,
+      ...extra,
+    };
+  }
+
+  it("default policy (registrable-domain): manifest on releases.rud1.es + sidecar on cdn.rud1.es → fetched + passthrough", async () => {
+    let fetchedUrl = "";
+    const fakeFetch: typeof globalThis.fetch = async (input) => {
+      fetchedUrl = String(input);
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({
+      signatureUrl: "https://cdn.rud1.es/desktop/v1.5.0.dmg.sig",
+    });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      manifestUrl: "https://releases.rud1.es/manifest.json",
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    // The verdict passes through unchanged — sibling subdomains under
+    // the same registrable are accepted by the iter-52 default.
+    expect(out.kind).toBe("update-available");
+    expect(fetchedUrl).toBe("https://cdn.rud1.es/desktop/v1.5.0.dmg.sig");
+  });
+
+  it("default policy (registrable-domain): different registrable domain still blocked", async () => {
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({
+      signatureUrl: "https://evil-cdn.example/installer.sig",
+    });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      manifestUrl: "https://rud1.es/desktop/manifest.json",
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-unreachable");
+    }
+    expect(fetchCalls).toBe(0); // refused before fetch
+  });
+
+  it("explicit same-origin policy preserves iter-48 strictness (subdomain mismatch blocked)", async () => {
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({
+      signatureUrl: "https://cdn.rud1.es/desktop/v1.5.0.dmg.sig",
+    });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      manifestUrl: "https://releases.rud1.es/manifest.json",
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      samePublisherPolicy: "same-origin",
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-unreachable");
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("scheme mismatch (https manifest + http sidecar) blocked regardless of policy", async () => {
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({
+      signatureUrl: "http://cdn.rud1.es/desktop/v1.5.0.dmg.sig",
+    });
+    // The .sig URL fails the parse-time validateSignatureUrl allowlist
+    // (http: rejected for sig URLs), so the gate short-circuits to
+    // signature-not-supported before reaching the same-publisher check.
+    // This is fine — the protocol-downgrade refusal happens earlier in
+    // the pipeline. The test pins the end-to-end outcome (block, no
+    // fetch), which is the operator-visible contract.
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      manifestUrl: "https://cdn.rud1.es/manifest.json",
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("port mismatch (https:443 manifest + https:8443 sidecar) blocked regardless of policy", async () => {
+    let fetchCalls = 0;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({
+      signatureUrl: "https://cdn.rud1.es:8443/desktop/v1.5.0.dmg.sig",
+    });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      manifestUrl: "https://releases.rud1.es/manifest.json",
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-unreachable");
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("identical hostname round-trips through both policies (regression)", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      return new Response(new Uint8Array(24).buffer, { status: 200 });
+    };
+    const state = mkUpdateAvailable({
+      signatureUrl: "https://rud1.es/desktop/v1.5.0.dmg.sig",
+    });
+    for (const policy of [
+      "same-origin",
+      "same-registrable-domain",
+    ] as const) {
+      const out = await applySignatureFetchGate(state, {
+        manifestVersion: 3,
+        manifestUrl: "https://rud1.es/manifest.json",
+        fetch: fakeFetch,
+        now: FIXED_AT,
+        samePublisherPolicy: policy,
+      });
+      expect(out.kind).toBe("update-available");
+    }
+  });
+});

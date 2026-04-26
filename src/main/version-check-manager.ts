@@ -1580,6 +1580,46 @@ export function verifyMinisignSignature(args: {
 
 const SIG_FETCH_MIN_BYTES = 16;
 
+// ─── Iter 52 — registrable-domain helper for same-publisher policy ─────────
+//
+// The iter-48 gate enforced strict same-origin. Iter 52 relaxes it to
+// "same registrable domain" so a publisher serving the manifest at
+// `releases.rud1.es` and the sidecar at `cdn.rud1.es` works without
+// each pair of subdomains needing a separate manifest config.
+//
+// We do NOT pull in a Public-Suffix-List dependency: rud1's deployments
+// are on `rud1.es` (a single-segment TLD) so "the registrable domain is
+// the last two dot-segments" is correct for our universe. For a
+// hostname with fewer than two segments (e.g. `localhost`, an IPv4
+// literal, an IPv6 literal) we fall back to strict equality — the
+// loose-domain match would be a footgun there. For PSL-shaped TLDs
+// (`co.uk`, `com.br`) callers can keep the strict `same-origin`
+// policy via the explicit `samePublisherPolicy` option.
+//
+// Returns true when `host` is exactly equal to `expected` OR when both
+// resolve to the same last-two-segments. Case-insensitive (DNS labels
+// are ASCII case-insensitive); IDN-encoded labels round-trip unchanged.
+export function isSameRegistrableDomain(
+  host: string,
+  expected: string,
+): boolean {
+  const h = host.toLowerCase();
+  const e = expected.toLowerCase();
+  if (h === e) return true;
+  // IPv4/IPv6 literal — strict match only. An IPv4 like 10.0.0.1 has
+  // four dot-segments which would otherwise collide with the loose
+  // domain check below; reject the match outright.
+  const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || /^\d{1,3}(\.\d{1,3}){3}$/.test(e);
+  const isIpv6 = h.includes(":") || e.includes(":");
+  if (isIpv4 || isIpv6) return false;
+  const hParts = h.split(".").filter(Boolean);
+  const eParts = e.split(".").filter(Boolean);
+  if (hParts.length < 2 || eParts.length < 2) return false;
+  const hRegistrable = hParts.slice(-2).join(".");
+  const eRegistrable = eParts.slice(-2).join(".");
+  return hRegistrable === eRegistrable;
+}
+
 export interface SignatureFetchGateOptions {
   /** Source manifest version. Used to short-circuit the v1/v2 blocks. */
   manifestVersion?: number | null;
@@ -1619,6 +1659,18 @@ export interface SignatureFetchGateOptions {
    * (the verifier returns false on a mismatched signature).
    */
   verifySignedData?: Buffer | null;
+  /**
+   * Iter 52 — same-publisher policy for the manifestUrl/signatureUrl
+   * origin check. `same-origin` (iter 48 default) requires byte-equal
+   * URL.origin. `same-registrable-domain` (iter 52 default) accepts
+   * any sibling host under the same last-two dot-segments — lets a
+   * publisher serve the manifest at `releases.rud1.es` and the
+   * sidecar at `cdn.rud1.es` without standing up separate hosts.
+   * Both literals are still strictly equal (case-insensitively). The
+   * scheme/port half of the same-origin promise is also enforced —
+   * an https→http downgrade is rejected regardless of policy.
+   */
+  samePublisherPolicy?: "same-origin" | "same-registrable-domain";
 }
 
 /**
@@ -1672,15 +1724,32 @@ export async function applySignatureFetchGate(
     };
   }
 
-  // Same-origin check (defence-in-depth — the manifest publisher
+  // Same-publisher check (defence-in-depth — the manifest publisher
   // promised the sidecar; a redirect to a different origin would
   // sidestep the trust anchor). Skipped when manifestUrl is not
   // provided (tests).
+  //
+  // Iter 52: default policy is `same-registrable-domain` — the
+  // manifest at `releases.rud1.es` and the sidecar at `cdn.rud1.es`
+  // are accepted as the same publisher. The scheme/port half of
+  // same-origin is still enforced, so an https-manifest with an
+  // http-sidecar URL is rejected (no protocol downgrade).
+  // Callers that need the iter-48 strict posture can pass
+  // `samePublisherPolicy: "same-origin"`.
+  const samePublisherPolicy =
+    options.samePublisherPolicy ?? "same-registrable-domain";
   if (typeof options.manifestUrl === "string" && options.manifestUrl.length > 0) {
     try {
-      const manifestOrigin = new URL(options.manifestUrl).origin;
-      const sigOrigin = new URL(validated).origin;
-      if (manifestOrigin !== sigOrigin) {
+      const manifestUrl = new URL(options.manifestUrl);
+      const sigUrl = new URL(validated);
+      const protocolMatches = manifestUrl.protocol === sigUrl.protocol;
+      const portMatches = manifestUrl.port === sigUrl.port;
+      const hostMatches =
+        samePublisherPolicy === "same-origin"
+          ? manifestUrl.host === sigUrl.host
+          : isSameRegistrableDomain(manifestUrl.hostname, sigUrl.hostname);
+      const samePublisher = protocolMatches && portMatches && hostMatches;
+      if (!samePublisher) {
         return {
           kind: "update-blocked-by-signature-fetch",
           reason: "signature-unreachable",
@@ -2438,6 +2507,10 @@ export const __test = {
   applySignatureFetchGate,
   buildBlockedBySignatureFetchDiagnosticsBlob,
   SIG_FETCH_MIN_BYTES,
+  // Iter 52 — registrable-domain helper for the relaxed
+  // same-publisher policy. Exported so the test seam can pin the
+  // edge cases (IPv4 literal, single-label host, sibling subdomain).
+  isSameRegistrableDomain,
   // Iter 49 — minisign sidecar parser + ed25519 signature verifier.
   // Pure functions, no env / fs deps; the iter-49 test suite uses
   // crypto.generateKeyPairSync('ed25519') + crypto.sign to construct
