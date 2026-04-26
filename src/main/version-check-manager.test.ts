@@ -5667,3 +5667,242 @@ describe("buildBlockedBySignatureFetchDiagnosticsBlob iter-53 signedDataMode", (
     expect(parsed.signedDataMode).toBe("manifest-bytes");
   });
 });
+
+// ─── Iter 54 — verifyModeChip on formatBlockedStateMessage / settings panel ──
+//
+// The iter-53 `signedDataMode` label rides every blocked-by-signature-fetch
+// verdict and the JSON envelope, but the renderer-side surfaces (inline
+// blocked banner + settings-window HTML) didn't acknowledge it. Iter 54
+// surfaces it as a small "verify mode: …" chip so operators see the
+// publisher convention without copy/pasting from the support-blob JSON.
+//
+// Tests pin:
+//   • chip text on the signature-fetch verdict for both spelled labels
+//     (manifest-sha256-hex literal, manifest-bytes → "manifest-body" prose)
+//   • chip omitted when the verdict's signedDataMode is missing (legacy
+//     iter ≤52) — defensive: no fabrication
+//   • chip omitted on the min-bootstrap verdict (the chip is a sig-gate
+//     concept; the field doesn't exist on that branch)
+//   • chip rendered into the settings-window HTML for both modes, with
+//     the matching markup string visible in the data-URL
+//   • settings-window HTML drops the chip on a missing label
+//   • round-trip: chip text the renderer surfaces matches the
+//     applySignatureFetchGate's signedDataMode default (back-compat
+//     contract — the renderer reads the gate's verbatim label, no
+//     translation drift between the two paths).
+
+describe("formatBlockedStateMessage — iter 54 verifyModeChip", () => {
+  function mkSigFetchBlocked(
+    overrides: Partial<{
+      signedDataMode: "manifest-sha256-hex" | "manifest-bytes" | undefined;
+      reason:
+        | "signature-unreachable"
+        | "signature-empty"
+        | "signature-http-status"
+        | "signature-not-supported-by-manifest-version"
+        | "signature-pubkey-misconfigured"
+        | "signature-parse-failed"
+        | "signature-verify-failed";
+      releaseNotesUrl: string | null;
+    }> = {},
+  ): VersionCheckState & { kind: "update-blocked-by-signature-fetch" } {
+    return {
+      kind: "update-blocked-by-signature-fetch",
+      reason: overrides.reason ?? "signature-unreachable",
+      signatureUrl: "https://rud1.es/desktop/v1.5.0.dmg.sig",
+      currentVersion: "1.4.0",
+      targetVersion: "1.5.0",
+      downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+      releaseNotesUrl: overrides.releaseNotesUrl ?? null,
+      manifestVersion: 3,
+      ...(overrides.signedDataMode !== undefined
+        ? { signedDataMode: overrides.signedDataMode }
+        : {}),
+      checkedAt: 1_700_000_000_000,
+    };
+  }
+
+  it("includes chip text 'verify mode: manifest-sha256-hex' when signedDataMode is the iter-49 default", () => {
+    const msg = formatBlockedStateMessage(
+      mkSigFetchBlocked({ signedDataMode: "manifest-sha256-hex" }),
+    );
+    expect(msg.verifyModeChip).toBe("verify mode: manifest-sha256-hex");
+  });
+
+  it("includes chip text 'verify mode: manifest-body' when signedDataMode is 'manifest-bytes' (prose translation)", () => {
+    // The iter-53 commit message used "manifest-body" in prose — the
+    // structured label stays "manifest-bytes" but the operator-facing
+    // chip translates it for readability.
+    const msg = formatBlockedStateMessage(
+      mkSigFetchBlocked({ signedDataMode: "manifest-bytes" }),
+    );
+    expect(msg.verifyModeChip).toBe("verify mode: manifest-body");
+  });
+
+  it("omits the chip (verifyModeChip === null) when signedDataMode is missing on the verdict (legacy iter ≤52)", () => {
+    // Defensive: legacy verdicts pre-date iter-53 and don't carry the
+    // label. The renderer must not fabricate a default — that
+    // responsibility lives at the gate (applySignatureFetchGate
+    // populates "manifest-sha256-hex" by default for fresh verdicts).
+    const msg = formatBlockedStateMessage(mkSigFetchBlocked({}));
+    expect(msg.verifyModeChip).toBeNull();
+  });
+
+  it("omits the chip on the min-bootstrap blocked verdict (the field doesn't exist on that branch)", () => {
+    // Sanity: the chip is a sig-gate concept. The iter-36 min-bootstrap
+    // verdict has no signedDataMode field, so the chip must be null
+    // unconditionally — even if a callsite passes the wrong shape, we
+    // don't leak through any chip text.
+    const minBootstrap: VersionCheckState & {
+      kind: "update-blocked-by-min-bootstrap";
+    } = {
+      kind: "update-blocked-by-min-bootstrap",
+      requiredMinVersion: "1.2.0",
+      currentVersion: "1.0.0",
+      targetVersion: "1.5.0",
+      releaseNotesUrl: null,
+      bridgeDownloadUrl: null,
+      checkedAt: 1_700_000_000_000,
+    };
+    const msg = formatBlockedStateMessage(minBootstrap);
+    expect(msg.verifyModeChip).toBeNull();
+  });
+
+  it("preserves the iter-37 banner/currentLine/targetLine fields alongside the new verifyModeChip (additive only)", () => {
+    // Iter-54 is purely additive: a regression here would mean the
+    // iter-37 contract drifted under the iter-54 union extension.
+    const msg = formatBlockedStateMessage(
+      mkSigFetchBlocked({
+        signedDataMode: "manifest-bytes",
+        reason: "signature-verify-failed",
+      }),
+    );
+    expect(msg.banner).toBe(
+      "Update blocked: signature could not be verified (signature-verify-failed)",
+    );
+    expect(msg.currentLine).toBe("Currently installed: v1.4.0");
+    expect(msg.targetLine).toBe("Target: v1.5.0");
+    expect(msg.verifyModeChip).toBe("verify mode: manifest-body");
+  });
+
+  it("forwards an unknown future signedDataMode literal verbatim (forward-compat)", () => {
+    // The TS literal-union refuses unknown literals at compile-time,
+    // but a runtime caller (IPC bridge that lost a refinement step)
+    // could land one. The chip surfaces whatever was on the verdict so
+    // a support reader sees the raw label rather than a silently
+    // empty chip.
+    const msg = formatBlockedStateMessage(
+      mkSigFetchBlocked({
+        signedDataMode: "future-shape" as unknown as
+          | "manifest-sha256-hex"
+          | "manifest-bytes",
+      }),
+    );
+    expect(msg.verifyModeChip).toBe("verify mode: future-shape");
+  });
+
+  it("formatVerifyModeChip on the test seam matches the gate's iter-53 default label (round-trip)", async () => {
+    // The chip-text formatter is the renderer's contract; the gate's
+    // default-fallback is "manifest-sha256-hex". This pin ensures the
+    // two stay in lock-step: a future iteration that renames either
+    // side surfaces here so the chip never displays an out-of-date
+    // label.
+    const { applySignatureFetchGate, formatVerifyModeChip } =
+      versionCheckInternals;
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const FIXED_AT = Date.UTC(2026, 3, 26, 12, 0, 0);
+    const upstream: VersionCheckState = {
+      kind: "update-available",
+      current: "1.4.0",
+      latest: "1.5.0",
+      downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+      releaseNotesUrl: null,
+      checkedAt: FIXED_AT,
+      signatureUrl: "https://rud1.es/desktop/v1.5.0.dmg.sig",
+    } as VersionCheckState;
+    const out = await applySignatureFetchGate(upstream, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      // Default → chip text is the literal label spelling (no prose
+      // translation for the iter-49 default since that label is the
+      // canonical name used in publisher tooling docs).
+      expect(formatVerifyModeChip(out.signedDataMode)).toBe(
+        "verify mode: manifest-sha256-hex",
+      );
+    }
+  });
+});
+
+// ─── Iter 54 — buildSettingsWindowHtml renders the chip ─────────────────────
+describe("buildSettingsWindowHtml — iter 54 verifyModeChip in HTML", () => {
+  it("includes the chip markup for 'manifest-sha256-hex' (the iter-49 default literal)", () => {
+    // The data-URL is URI-component-encoded; we decode once before
+    // searching so the test asserts the raw HTML the BrowserWindow
+    // sees post-loadURL. The chip text is the exact prose
+    // formatVerifyModeChip emits — a regression in either the prose
+    // or the markup surfaces here.
+    const dataUrl = buildSettingsWindowHtml("1.4.0");
+    const html = decodeURIComponent(
+      dataUrl.replace(/^data:text\/html;charset=utf-8,/, ""),
+    );
+    expect(html).toContain("manifest-sha256-hex");
+    // Chip text wiring: the renderer constructs
+    // "verify mode: " + rawMode (or "manifest-body" for the bytes
+    // variant). Pin both halves so a future refactor that splits the
+    // strings can't drift one without the other.
+    expect(html).toContain("verify mode: ");
+    // The .chip CSS class drives the styling — pin it so the styling
+    // hook doesn't get renamed without test acknowledgement.
+    expect(html).toContain(".chip");
+    expect(html).toContain('id="verify-mode-chip"');
+  });
+
+  it("includes the 'manifest-body' prose translation for the 'manifest-bytes' iter-53 opt-in", () => {
+    const dataUrl = buildSettingsWindowHtml("1.4.0");
+    const html = decodeURIComponent(
+      dataUrl.replace(/^data:text\/html;charset=utf-8,/, ""),
+    );
+    // The renderer's branch for 'manifest-bytes' specifically emits
+    // 'manifest-body' rather than the literal label. Pin the string
+    // so the iter-54 prose contract is unambiguous.
+    expect(html).toContain("manifest-body");
+  });
+
+  it("does NOT bake a chip element into the HTML for legacy verdicts (chip rendered conditionally on signedDataMode)", () => {
+    // The chip is rendered conditionally by the inline JS at runtime
+    // based on `state.signedDataMode`. The static HTML therefore must
+    // NOT contain a pre-baked chip — only the conditional branch logic
+    // and the CSS class rule. A regression that pre-bakes the chip
+    // element would surface as a stray "verify mode: …" string in the
+    // template-string portion of the HTML (i.e., outside the inline JS
+    // string concat). We can't easily distinguish those two locations,
+    // but we can pin the conditional shape: the renderer reads
+    // `state.signedDataMode` (the field name) before constructing the
+    // chip. A regression that hard-codes the chip without reading the
+    // field would drop this reference.
+    const dataUrl = buildSettingsWindowHtml("1.4.0");
+    const html = decodeURIComponent(
+      dataUrl.replace(/^data:text\/html;charset=utf-8,/, ""),
+    );
+    expect(html).toContain("state.signedDataMode");
+  });
+
+  it("the runtime-version wrapper threads through to the same chip-bearing HTML (iter-46 + iter-54 interplay)", () => {
+    // Iter 46 added buildSettingsWindowHtmlWithRuntimeVersion as the
+    // caller's preferred entry point. Iter 54 must flow through that
+    // wrapper too — a regression that wired the chip only into the
+    // raw helper but forgot the wrapper would surface here.
+    const dataUrl = buildSettingsWindowHtmlWithRuntimeVersion("1.4.0");
+    const html = decodeURIComponent(
+      dataUrl.replace(/^data:text\/html;charset=utf-8,/, ""),
+    );
+    expect(html).toContain("manifest-body");
+    expect(html).toContain('id="verify-mode-chip"');
+  });
+});

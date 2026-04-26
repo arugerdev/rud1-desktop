@@ -1325,14 +1325,47 @@ export interface BlockedStateMessage {
   downloadHint: string;
   /** When non-null, a "What's new" changelog URL the renderer surfaces. */
   releaseNotesUrl: string | null;
+  /**
+   * Iter 54 — operator-facing chip surfacing the iter-53 `signedDataMode`
+   * label on the `update-blocked-by-signature-fetch` verdict (the only
+   * verdict that carries the field). Format: `"verify mode: …"` where
+   * `…` is the human-readable spelling of the label
+   * (`manifest-sha256-hex` stays literal, `manifest-bytes` translates to
+   * `manifest-body` for prose readability — mirrors the iter-53 commit
+   * message phrasing).
+   *
+   * `null` when:
+   *   • the verdict is `update-blocked-by-min-bootstrap` (no
+   *     signedDataMode field exists on that branch — the chip is a
+   *     signature-gate concept);
+   *   • the verdict is `update-blocked-by-signature-fetch` but
+   *     `signedDataMode` is missing/undefined (legacy iter ≤52 verdicts
+   *     that pre-date the iter-53 label — defensive: we don't fabricate
+   *     a default for legacy data, the renderer just hides the chip).
+   *
+   * The renderer (inline blocked banner + Settings panel) reads this
+   * verbatim; the iter-53 default-fallback to `manifest-sha256-hex`
+   * lives at the gate, not here.
+   */
+  verifyModeChip: string | null;
 }
 
 /**
- * Format the iter-36 `update-blocked-by-min-bootstrap` state into the copy
- * the iter-37 Settings/About panel renders. Pure: no DOM, no Electron.
+ * Format the blocked-update verdict into the copy the iter-37
+ * Settings/About panel + the inline blocked banner render. Pure: no DOM,
+ * no Electron.
  *
- * Rationale for keeping this a separate helper:
- *   • the HTML template builder in index.ts can stay a string-concat path
+ * Iter 54 — extended to accept BOTH blocked verdicts:
+ *   • `update-blocked-by-min-bootstrap` (iter 36) — the original
+ *     "Download v{X} manually first" call to action.
+ *   • `update-blocked-by-signature-fetch` (iter 48) — the sig-strict
+ *     gate verdict; surfaced here so the iter-53 `signedDataMode` label
+ *     can flow into the shared `verifyModeChip` field on the return
+ *     shape and the renderer doesn't have to special-case the chip.
+ *
+ * Rationale for keeping this a single helper across both verdicts:
+ *   • the HTML template builders (index.ts inline banner +
+ *     `buildSettingsWindowHtml`) can stay string-concat paths
  *     (no logic interleaved with markup, easier to scan for XSS holes);
  *   • unit tests can pin the exact operator-facing copy without parsing
  *     HTML — a regression in the headline ("Update blocked" vs "Download
@@ -1347,15 +1380,68 @@ export interface BlockedStateMessage {
  * otherwise require.
  */
 export function formatBlockedStateMessage(
-  state: VersionCheckState & { kind: "update-blocked-by-min-bootstrap" },
+  state:
+    | (VersionCheckState & { kind: "update-blocked-by-min-bootstrap" })
+    | (VersionCheckState & { kind: "update-blocked-by-signature-fetch" }),
 ): BlockedStateMessage {
+  if (state.kind === "update-blocked-by-signature-fetch") {
+    return {
+      banner: `Update blocked: signature could not be verified (${state.reason})`,
+      currentLine: `Currently installed: v${state.currentVersion}`,
+      targetLine: `Target: v${state.targetVersion}`,
+      downloadHint: `Reason: ${state.reason}`,
+      releaseNotesUrl: state.releaseNotesUrl,
+      verifyModeChip: formatVerifyModeChip(state.signedDataMode),
+    };
+  }
   return {
     banner: `Download v${state.requiredMinVersion} manually first to continue receiving updates`,
     currentLine: `Currently installed: v${state.currentVersion}`,
     targetLine: `Target: v${state.targetVersion}`,
     downloadHint: `Manual download required for v${state.requiredMinVersion}`,
     releaseNotesUrl: state.releaseNotesUrl,
+    // The min-bootstrap verdict has no signedDataMode field — the chip
+    // is a sig-gate concept. Always null on this branch.
+    verifyModeChip: null,
   };
+}
+
+/**
+ * Iter 54 — pure helper that translates the iter-53 `signedDataMode`
+ * label into the human-readable chip text. Returns `null` when the
+ * label is missing/undefined (legacy iter ≤52 verdict — the renderer
+ * hides the chip rather than fabricating a default; the iter-53
+ * gate-side fallback is what populates a default for fresh verdicts).
+ *
+ * Translation table:
+ *   "manifest-sha256-hex" → "verify mode: manifest-sha256-hex"
+ *                            (literal — the iter-49 default convention,
+ *                             preserved verbatim so operators searching
+ *                             support tickets for the value find it).
+ *   "manifest-bytes"      → "verify mode: manifest-body"
+ *                            (translated for prose readability — the
+ *                             iter-53 commit message uses "manifest-body"
+ *                             in prose; the structured label stays
+ *                             "manifest-bytes" in the JSON envelope).
+ *   anything else         → `verify mode: <as-provided>`
+ *                            (forward-compat: an unknown future literal
+ *                             surfaces verbatim so support readers see
+ *                             it instead of an empty chip).
+ *
+ * Exported on the test seam (`__test`) so the iter-54 round-trip test
+ * can assert chip text matches what `applySignatureFetchGate` produces
+ * without going through the inline-banner DOM.
+ */
+function formatVerifyModeChip(
+  signedDataMode: string | null | undefined,
+): string | null {
+  if (signedDataMode == null || signedDataMode === "") {
+    return null;
+  }
+  if (signedDataMode === "manifest-bytes") {
+    return "verify mode: manifest-body";
+  }
+  return `verify mode: ${signedDataMode}`;
 }
 
 /**
@@ -2556,6 +2642,11 @@ export const __test = {
   // Iter 37 — Settings/About formatters.
   formatBlockedStateMessage,
   formatVersionCheckSummary,
+  // Iter 54 — operator-facing chip text for the iter-53 signedDataMode
+  // label. Exposed on the seam so the round-trip test can pin chip
+  // text vs the gate's `signedDataMode` field without going through
+  // the inline-banner DOM.
+  formatVerifyModeChip,
   // Iter 38 — bridge download URL precedence helpers.
   pickDownloadUrl,
   isBridgeDownloadUrlAllowed,

@@ -23,6 +23,11 @@
  *             pulling in `index.ts`'s Electron lifecycle side-effects;
  *             add a thin `buildSettingsWindowHtmlWithRuntimeVersion`
  *             wrapper so callers can't forget to pass app.getVersion()
+ *   iter 54 — surface the iter-53 `signedDataMode` label as a small
+ *             chip on the sig-fetch blocked verdict; same chip text
+ *             as `formatBlockedStateMessage` produces for the inline
+ *             banner so operators see the publisher-convention label
+ *             without copying out the support-blob JSON
  */
 
 /**
@@ -78,6 +83,12 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
   .row { display:flex; justify-content:space-between; padding:4px 0; }
   .row .k { color:#a1a1aa; }
   .row .v { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  /* Iter 54 — small chip surfacing the iter-53 signedDataMode label on
+     the sig-fetch blocked verdict. Visually distinct from .row so the
+     operator reads it as metadata about the verify path, not a
+     state-shape field. Display:inline-block keeps it adjacent to the
+     reason row. */
+  .chip { display:inline-block; background:#27272a; color:#e4e4e7; border:1px solid #3f3f46; border-radius:9999px; padding:2px 8px; font-size:11px; font-family: ui-monospace, "SF Mono", Consolas, monospace; margin:6px 0 0 0; }
   button { background:#27272a; color:#e4e4e7; border:1px solid #3f3f46; border-radius:4px; padding:5px 12px; font-size:12px; cursor:pointer; font-family:inherit; }
   button:hover { background:#3f3f46; }
   button:disabled { opacity:0.5; cursor:not-allowed; }
@@ -360,6 +371,29 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
     var statusRow = (typeof state.httpStatus === 'number')
       ? '<div class="row"><span class="k">HTTP status</span><span class="v">' + escape(state.httpStatus) + '</span></div>'
       : '';
+    // Iter 54 — small chip surfacing the iter-53 signedDataMode label.
+    // Mirrors formatVerifyModeChip in version-check-manager.ts:
+    //   "manifest-bytes"      → "verify mode: manifest-body" (prose)
+    //   "manifest-sha256-hex" → "verify mode: manifest-sha256-hex"
+    //   anything else literal → forwarded verbatim (forward-compat)
+    //   missing/null/empty    → chip omitted (defensive — legacy iter
+    //                          ≤52 verdicts pre-date the field; we
+    //                          don't fabricate a default in the
+    //                          renderer, the iter-53 gate-side default
+    //                          fallback is what populates fresh
+    //                          verdicts).
+    var rawMode = state.signedDataMode;
+    var chipText = null;
+    if (typeof rawMode === 'string' && rawMode.length > 0) {
+      if (rawMode === 'manifest-bytes') {
+        chipText = 'verify mode: manifest-body';
+      } else {
+        chipText = 'verify mode: ' + rawMode;
+      }
+    }
+    var chipRow = chipText
+      ? '<div class="chip" id="verify-mode-chip">' + escape(chipText) + '</div>'
+      : '';
     var notes = state.releaseNotesUrl
       ? '<p><a id="rn-link">What\\'s new — view release notes</a></p>'
       : '';
@@ -371,6 +405,7 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
         '<div class="row"><span class="k">Reason</span><span class="v">' + escape(reason) + '</span></div>' +
         sigRow +
         statusRow +
+        chipRow +
       '</div>' +
       notes +
       '<div class="actions">' +
