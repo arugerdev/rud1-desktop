@@ -41,30 +41,45 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 // electron is a native module; importing it in a plain Node vitest run
 // without mocking produces `app is undefined` at ipc-handlers.ts line 38.
 // We only need a stub of the three symbols used at module load.
-vi.mock("electron", () => ({
-  ipcMain: {
-    handle: vi.fn(),
+vi.mock("electron", () => {
+  // Notification needs both a constructor (for `new Notification(...)`)
+  // and an `isSupported` static — notifications.ts feature-detects
+  // before constructing. The mock returns a no-op `show()` so the
+  // ipc-handlers can fire toasts without blowing up the test run.
+  const NotificationStub = vi.fn().mockImplementation(() => ({
+    show: vi.fn(),
     on: vi.fn(),
-  },
-  app: {
-    isPackaged: true,
-    getVersion: () => "0.1.0-test",
-  },
-  BrowserWindow: {
-    fromWebContents: vi.fn(() => null),
-  },
-  // Iter 37 — clipboard + shell:openExternal channels need stubs so the
-  // ipc-handlers module can be loaded under vitest. The dispatch tests
-  // exercise the handler closures directly via the captured handler
-  // table; assertions check that these stubs were called with the
-  // sanitised payload (or NOT called when the validator rejects).
-  clipboard: {
-    writeText: vi.fn(),
-  },
-  shell: {
-    openExternal: vi.fn(async () => undefined),
-  },
-}));
+  })) as unknown as { isSupported?: () => boolean };
+  NotificationStub.isSupported = () => true;
+  return {
+    ipcMain: {
+      handle: vi.fn(),
+      on: vi.fn(),
+    },
+    app: {
+      isPackaged: true,
+      getVersion: () => "0.1.0-test",
+    },
+    BrowserWindow: {
+      fromWebContents: vi.fn(() => null),
+    },
+    Notification: NotificationStub,
+    // Iter 37 — clipboard + shell:openExternal channels need stubs so the
+    // ipc-handlers module can be loaded under vitest. The dispatch tests
+    // exercise the handler closures directly via the captured handler
+    // table; assertions check that these stubs were called with the
+    // sanitised payload (or NOT called when the validator rejects).
+    clipboard: {
+      writeText: vi.fn(),
+    },
+    shell: {
+      openExternal: vi.fn(async () => undefined),
+      // usb:launchInstaller channel calls shell.openPath. Empty string
+      // = success per Electron's contract.
+      openPath: vi.fn(async () => ""),
+    },
+  };
+});
 
 // Manager modules pull in child_process / fs / network probes at import
 // time. We stub them to be inert — this suite is about the origin check,
@@ -78,6 +93,17 @@ vi.mock("./usb-manager", () => ({
   usbAttach: vi.fn(async () => 1),
   usbDetach: vi.fn(async () => undefined),
   usbList: vi.fn(async () => []),
+  isUsbipInstalled: vi.fn(() => true),
+  getUsbipInstallerPath: vi.fn(() => null),
+  // Re-exported error class so `instanceof UsbipMissingError` checks
+  // inside ipc-handlers compile and behave under the mock.
+  UsbipMissingError: class UsbipMissingError extends Error {
+    installerPath: string | null = null;
+    constructor() {
+      super("USB/IP missing (test stub)");
+      this.name = "UsbipMissingError";
+    }
+  },
 }));
 vi.mock("./net-diag-manager", () => ({
   ping: vi.fn(async () => ({ ok: true })),

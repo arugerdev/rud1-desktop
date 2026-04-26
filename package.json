@@ -12,7 +12,10 @@
     "build": "tsc --outDir dist",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
+    "fetch:wg-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-wireguard-win.ps1",
+    "fetch:usbip-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-usbip-win.ps1",
+    "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
+    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "dist:linux": "npm run build && electron-builder --linux",
     "dist:mac": "npm run build && electron-builder --mac",
     "test": "vitest run",
@@ -37,17 +40,13 @@
     "directories": {
       "output": "release"
     },
-    "extraResources": [
-      {
-        "from": "resources/${os}",
-        "to": "bin",
-        "filter": ["**/*"]
-      }
-    ],
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
       "icon": "resources/icon.ico",
-      "requestedExecutionLevel": "requireAdministrator"
+      "requestedExecutionLevel": "requireAdministrator",
+      "extraResources": [
+        { "from": "resources/win32", "to": "bin", "filter": ["**/*"] }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -61,14 +60,20 @@
         { "target": "deb", "arch": ["x64", "arm64"] }
       ],
       "icon": "resources/icon.png",
-      "category": "Network"
+      "category": "Network",
+      "extraResources": [
+        { "from": "resources/linux", "to": "bin", "filter": ["**/*"] }
+      ]
     },
     "mac": {
       "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
       "icon": "resources/icon.icns",
       "hardenedRuntime": true,
       "entitlements": "resources/entitlements.mac.plist",
-      "entitlementsInherit": "resources/entitlements.mac.plist"
+      "entitlementsInherit": "resources/entitlements.mac.plist",
+      "extraResources": [
+        { "from": "resources/darwin", "to": "bin", "filter": ["**/*"] }
+      ]
     },
     "protocols": [
       {

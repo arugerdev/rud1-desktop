@@ -2,7 +2,7 @@
  * WireGuard VPN manager.
  *
  * Abstracts platform differences:
- *   Windows  — uses the WireGuard tunnel service via wireguard.exe /installtunnel
+ *   Windows  — uses the WireGuard tunnel service via wireguard.exe /installtunnelservice
  *   Linux    — uses wg-quick up/down (requires CAP_NET_ADMIN or sudo)
  *   macOS    — uses wg-quick (from Homebrew or bundled wireguard-go)
  *
@@ -145,15 +145,49 @@ export function parseNetshInterface(stdout: string): { connected: boolean } {
 async function connectWindows(wgConfig: string): Promise<void> {
   const file = await writeTempConfig(wgConfig);
   const wireguard = wgQuickPath();
-  // WireGuard Windows: installs a named tunnel service
-  await execFileAsync(wireguard, ["/installtunnel", file]);
+  // WireGuard for Windows registers the tunnel as a Windows service.
+  // The flag is `/installtunnelservice <conf-path>` (NOT `/installtunnel` —
+  // that's a phantom from older docs; `wireguard.exe` rejects it and
+  // prints the help text). The tunnel name is derived from the config
+  // filename (rud1.conf -> service name "WireGuardTunnel$rud1"), which
+  // is why writeTempConfig pins the filename to TUNNEL_NAME.
+  await execFileAsync(wireguard, ["/installtunnelservice", file]);
 }
 
 async function disconnectWindows(): Promise<void> {
   assertTunnelName(TUNNEL_NAME);
   const wireguard = wgQuickPath();
-  await execFileAsync(wireguard, ["/removetunnel", TUNNEL_NAME]);
+  // `/uninstalltunnelservice <tunnel-name>` — same pairing rule as install.
+  await execFileAsync(wireguard, ["/uninstalltunnelservice", TUNNEL_NAME]);
   await removeTempConfig();
+}
+
+/** Best-effort teardown used by the idempotent connect path. Swallows
+ *  the "no such tunnel" error so a fresh device (no prior install)
+ *  doesn't fail the precondition. Other errors propagate. */
+async function teardownIfPresent(): Promise<void> {
+  try {
+    if (process.platform === "win32") {
+      await disconnectWindows();
+    } else {
+      await disconnectUnix();
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.toLowerCase() : String(err);
+    // WireGuard for Windows: "Unable to open tunnel service" / "no such service"
+    // wg-quick (Linux/Mac):  "is not a wireguard interface"
+    // Either shape means "nothing to tear down" — safe to ignore.
+    if (
+      msg.includes("no such service") ||
+      msg.includes("not a wireguard interface") ||
+      msg.includes("does not exist") ||
+      msg.includes("unable to open tunnel service") ||
+      msg.includes("unable to find")
+    ) {
+      return;
+    }
+    throw err;
+  }
 }
 
 async function statusWindows(): Promise<{ connected: boolean; ip?: string }> {
@@ -205,6 +239,19 @@ async function statusUnix(): Promise<{ connected: boolean; ip?: string }> {
 
 export async function vpnConnect(wgConfig: string): Promise<void> {
   ensureWireguardAvailable();
+  // Idempotent connect. Three reasons to tear down whatever's currently
+  // installed before bringing up the new config:
+  //
+  //   1. The panel always generates a fresh keypair on click, so any
+  //      previously-installed tunnel has a stale private key that won't
+  //      handshake. WireGuard for Windows otherwise refuses with
+  //      "Tunnel already installed and running".
+  //   2. The user may have lost panel state (page reload, app restart)
+  //      while the tunnel service is still up. A second click should
+  //      reconcile, not error out.
+  //   3. The peer config could have been re-issued by the cloud (e.g.
+  //      device endpoint changed); rolling the service picks it up.
+  await teardownIfPresent();
   if (process.platform === "win32") return connectWindows(wgConfig);
   return connectUnix(wgConfig);
 }

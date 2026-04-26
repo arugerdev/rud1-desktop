@@ -22,14 +22,64 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   usb: {
-    attach: (host: string, busId: string) =>
-      ipcRenderer.invoke("usb:attach", host, busId) as Promise<{ ok: boolean; port?: number; error?: string }>,
+    /**
+     * Attach a remote USB device. The optional `label` is forwarded to
+     * the OS notification so the toast reads "SanDisk Cruzer attached"
+     * instead of "USB 1-1.4 attached" — the renderer assembles the
+     * label from the cloud's UsbDevice row (`vendorName + productName`).
+     * Backwards-compatible: omitting it falls back to the bus ID.
+     *
+     * On Windows when usbip-win2 isn't installed, the response carries
+     * `usbipMissing: true` + the absolute path to the bundled
+     * installer so the renderer can offer a one-click Install CTA.
+     */
+    attach: (host: string, busId: string, label?: string) =>
+      ipcRenderer.invoke("usb:attach", host, busId, label) as Promise<{
+        ok: boolean;
+        port?: number;
+        error?: string;
+        usbipMissing?: boolean;
+        installerPath?: string | null;
+      }>,
 
     detach: (port: number) =>
-      ipcRenderer.invoke("usb:detach", port) as Promise<{ ok: boolean; error?: string }>,
+      ipcRenderer.invoke("usb:detach", port) as Promise<{
+        ok: boolean;
+        error?: string;
+        usbipMissing?: boolean;
+        installerPath?: string | null;
+      }>,
 
     list: () =>
       ipcRenderer.invoke("usb:list") as Promise<{ port: number; host: string; busId: string }[]>,
+
+    /**
+     * Probe whether the USB/IP userspace tool is reachable. Useful for
+     * showing an "Install USB/IP" banner before the user even clicks
+     * Attach. `installerPath` is non-null only on Windows builds with
+     * the bundled NSIS installer present (developer ran `fetch:usbip-win`).
+     */
+    status: () =>
+      ipcRenderer.invoke("usb:status") as Promise<
+        | {
+            ok: true;
+            installed: boolean;
+            installerPath: string | null;
+            platform: NodeJS.Platform;
+          }
+        | { ok: false; error: string }
+      >,
+
+    /**
+     * Run the bundled USB/IP NSIS installer (Windows only). The user
+     * sees the usbip-win2 install dialog and walks through driver
+     * acceptance; we don't await completion. Renderer should retry
+     * `usb.status()` after the user closes the installer.
+     */
+    launchInstaller: () =>
+      ipcRenderer.invoke("usb:launchInstaller") as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
   },
 
   net: {

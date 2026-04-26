@@ -1,7 +1,18 @@
 node_modules/
 dist/
 release/
+release-*/
 *.conf
 priv.key
 pub.key
 .env
+
+# Bundled native binaries — fetched per-platform by scripts/fetch-*.ps1 / .sh.
+# resources/README.md documents how to populate these. The directories
+# themselves (and their .gitkeep markers + READMEs) stay tracked.
+resources/win32/*
+!resources/win32/.gitkeep
+resources/linux/*
+!resources/linux/.gitkeep
+resources/darwin/*
+!resources/darwin/.gitkeep

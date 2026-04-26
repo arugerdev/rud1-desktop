@@ -44,7 +44,20 @@
 
 import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
 import { vpnConnect, vpnDisconnect, vpnStatus } from "./vpn-manager";
-import { usbAttach, usbDetach, usbList } from "./usb-manager";
+import {
+  usbAttach,
+  usbDetach,
+  usbList,
+  isUsbipInstalled,
+  getUsbipInstallerPath,
+  UsbipMissingError,
+} from "./usb-manager";
+import {
+  notifyVpnConnected,
+  notifyVpnDisconnected,
+  notifyUsbAttached,
+  notifyUsbDetached,
+} from "./notifications";
 import {
   ping,
   interfaces,
@@ -339,10 +352,29 @@ export function registerIpcHandlers(opts: {
   firstBootDedupe?: FirstBootDedupeAccessor;
   versionCheck?: VersionCheckAccessor;
 } = {}): void {
+  // Per-port label cache for detach notifications. The renderer already
+  // knows the human-readable name when it calls attach (vendor + product
+  // from the cloud's UsbDevice row); we stash it here so the matching
+  // detach notification can echo the same label without the renderer
+  // having to thread it through a second IPC. Capped at 64 entries —
+  // far above realistic concurrent attach counts on any sane setup.
+  const usbLabelByPort = new Map<number, string>();
+  function rememberUsbLabel(port: number, label: string | undefined) {
+    if (!label) return;
+    if (usbLabelByPort.size >= 64) {
+      const firstKey = usbLabelByPort.keys().next().value;
+      if (firstKey !== undefined) usbLabelByPort.delete(firstKey);
+    }
+    usbLabelByPort.set(port, label);
+  }
+
   ipcMain.handle("vpn:connect", async (event, wgConfig: string) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     try {
       await vpnConnect(wgConfig);
+      // Fire-and-forget toast. The deviceName isn't available at this
+      // layer; the renderer-side panel still shows the rich state.
+      notifyVpnConnected();
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -353,6 +385,7 @@ export function registerIpcHandlers(opts: {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     try {
       await vpnDisconnect();
+      notifyVpnDisconnected();
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -368,22 +401,52 @@ export function registerIpcHandlers(opts: {
     }
   });
 
-  ipcMain.handle("usb:attach", async (event, host: string, busId: string) => {
-    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
-    try {
-      const port = await usbAttach(host, busId);
-      return { ok: true, port };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  });
+  ipcMain.handle(
+    "usb:attach",
+    async (event, host: string, busId: string, label?: string) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const port = await usbAttach(host, busId);
+        rememberUsbLabel(port, label);
+        notifyUsbAttached(label ?? null, busId);
+        return { ok: true, port };
+      } catch (err) {
+        // UsbipMissingError carries a structured `installerPath` so the
+        // renderer can offer a one-click install instead of just
+        // dumping the message string.
+        if (err instanceof UsbipMissingError) {
+          return {
+            ok: false,
+            error: err.message,
+            usbipMissing: true,
+            installerPath: err.installerPath,
+          };
+        }
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
 
   ipcMain.handle("usb:detach", async (event, port: number) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     try {
       await usbDetach(port);
+      const label = usbLabelByPort.get(port);
+      usbLabelByPort.delete(port);
+      // The bus id is unrecoverable from the port alone post-detach;
+      // pass an empty string and let the helper render "USB detached"
+      // when the cached label is also missing.
+      notifyUsbDetached(label ?? null, "");
       return { ok: true };
     } catch (err) {
+      if (err instanceof UsbipMissingError) {
+        return {
+          ok: false,
+          error: err.message,
+          usbipMissing: true,
+          installerPath: err.installerPath,
+        };
+      }
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
@@ -395,6 +458,54 @@ export function registerIpcHandlers(opts: {
     } catch {
       return [];
     }
+  });
+
+  // Status probe used by the panel to decide whether to surface the
+  // "Install USB/IP" CTA before the user even tries Attach.
+  ipcMain.handle("usb:status", async (event) => {
+    if (!checkSender(event)) {
+      return { ok: false, error: "Unauthorized origin" } as const;
+    }
+    return {
+      ok: true as const,
+      installed: isUsbipInstalled(),
+      installerPath: getUsbipInstallerPath(),
+      platform: process.platform,
+    };
+  });
+
+  // Launches the bundled NSIS installer with elevation so the user
+  // can complete the kernel-driver install in one click. Returns
+  // immediately after spawning — the installer's own UI walks the
+  // user through driver acceptance. We do NOT await `wait=true`:
+  // a busy modal blocking the Electron main process is worse UX
+  // than letting the user retry Attach after closing the installer.
+  ipcMain.handle("usb:launchInstaller", async (event) => {
+    if (!checkSender(event)) {
+      return { ok: false, error: "Unauthorized origin" } as const;
+    }
+    if (process.platform !== "win32") {
+      return {
+        ok: false,
+        error: "USB/IP installer is bundled only for Windows builds.",
+      } as const;
+    }
+    const path = getUsbipInstallerPath();
+    if (!path) {
+      return {
+        ok: false,
+        error: "Bundled USB/IP installer missing — re-run npm run fetch:usbip-win.",
+      } as const;
+    }
+    // shell.openPath uses the OS file association. For a .exe that
+    // means `ShellExecute` with the default verb, which honours the
+    // installer's manifest (`requireAdministrator`) and triggers UAC
+    // automatically. Returns the empty string on success.
+    const result = await shell.openPath(path);
+    if (result !== "") {
+      return { ok: false, error: result } as const;
+    }
+    return { ok: true as const };
   });
 
   ipcMain.handle("net:ping", async (event, host: string) => {

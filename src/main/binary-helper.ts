@@ -48,11 +48,17 @@ function systemInstallCandidates(name: string): string[] {
   if (process.platform !== "win32") return [];
   const exe = `${name}.exe`;
   const out: string[] = [];
+  const programFiles = process.env["ProgramFiles"];
+  const programFilesX86 = process.env["ProgramFiles(x86)"];
   if (name === "wireguard" || name === "wg") {
-    const programFiles = process.env["ProgramFiles"];
-    const programFilesX86 = process.env["ProgramFiles(x86)"];
     if (programFiles) out.push(path.join(programFiles, "WireGuard", exe));
     if (programFilesX86) out.push(path.join(programFilesX86, "WireGuard", exe));
+  }
+  if (name === "usbip") {
+    // usbip-win2's NSIS installer drops the userspace tool here. PATH
+    // typically isn't updated by the installer, so we look explicitly.
+    if (programFiles) out.push(path.join(programFiles, "USBip", exe));
+    if (programFilesX86) out.push(path.join(programFilesX86, "USBip", exe));
   }
   return out;
 }
@@ -97,4 +103,18 @@ export function usbipdPath(): string {
  */
 export function isBinaryAvailable(name: string): boolean {
   return path.isAbsolute(binaryPath(name));
+}
+
+/**
+ * Path to the bundled USB/IP for Windows installer (`USBip-X.Y.Z-x64.exe`).
+ * Returns `null` on non-Windows platforms or when the installer wasn't
+ * bundled (developer skipped `npm run fetch:usbip-win`). The caller can
+ * spawn this via `shell.openPath` to walk the user through a one-time
+ * driver install — usbip-win2 ships a kernel-mode VHCI driver, so a
+ * userspace-only bundle wouldn't be enough.
+ */
+export function usbipInstallerPath(): string | null {
+  if (process.platform !== "win32") return null;
+  const candidate = path.join(resourcesDir(), "USBip-installer.exe");
+  return fs.existsSync(candidate) ? candidate : null;
 }
