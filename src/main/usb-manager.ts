@@ -233,10 +233,68 @@ function isDriverMissingError(msg: string): boolean {
   return DRIVER_MISSING_PATTERNS.some((re) => re.test(msg));
 }
 
+/**
+ * Iter 60: ask the Pi to bind the device to usbip-host before we run
+ * `usbip attach` from the client. Without this precall, devices that
+ * are still claimed by their native kernel driver (cdc_acm for an
+ * Arduino, 8192cu for the Realtek WiFi dongle, etc.) fail the client
+ * attach with "device not found" — they're physically present on the
+ * Pi but not exported, and the operator had to first toggle a "share"
+ * switch in the cloud which propagated via heartbeat.
+ *
+ * The endpoint is idempotent on the Pi: a second call against an
+ * already-exported bus id returns 200. Failures we surface as-is so
+ * the renderer renders a useful message:
+ *   - 403 → client IP not in `usb.authorized_nets`. Most often the Pi
+ *           was provisioned with the placeholder `10.200.0.0/16` but
+ *           the cloud-issued VPN subnet is `10.77.<N>.0/24`. Fix on the
+ *           Pi: edit /etc/rud1-agent/config.yaml or PUT /api/usbip/policy.
+ *   - 404 → bus id not present on the Pi (device was unplugged between
+ *           the panel render and the attach click).
+ *   - 500 → `usbip bind` blew up (driver not loaded, kernel module
+ *           missing, etc.).
+ *
+ * Network-level failures (DNS, ECONNREFUSED, timeout) are swallowed:
+ * the subsequent client-side `usbip attach` will surface a more
+ * specific error against the same host:port, and we don't want to
+ * mask "VPN tunnel down" as "Pi rejected bind".
+ */
+async function bindOnPi(host: string, busId: string): Promise<void> {
+  const url = `http://${host}:7070/api/usbip/attach`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ busId }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    // Network unreachable / timed out / DNS failure. Fall through; the
+    // local `usbip attach` will fail with the same root cause and a
+    // clearer message.
+    return;
+  }
+  if (res.ok) return;
+  let detail = "";
+  try { detail = (await res.text()).slice(0, 500).trim(); } catch { /* ignore */ }
+  if (res.status === 403 && /authorized_nets/i.test(detail)) {
+    throw new Error(
+      `Pi refused USB bind: this client is not in the device's authorized_nets. ` +
+      `Edit /etc/rud1-agent/config.yaml on the Pi so usb.authorized_nets includes the active VPN subnet, ` +
+      `or PUT /api/usbip/policy with the correct CIDR list.`,
+    );
+  }
+  throw new Error(
+    `Pi rejected USB bind for ${busId} (HTTP ${res.status})${detail ? ": " + detail : ""}`,
+  );
+}
+
 export async function usbAttach(host: string, busId: string): Promise<number> {
   assertHost(host);
   assertBusId(busId);
   ensureUsbipAvailable();
+  await bindOnPi(host, busId);
   try {
     if (process.platform === "win32") return await attachWindows(host, busId);
     return await attachLinux(host, busId);

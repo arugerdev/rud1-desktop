@@ -162,28 +162,43 @@ async function disconnectWindows(): Promise<void> {
   await removeTempConfig();
 }
 
-/** Best-effort teardown used by the idempotent connect path. Swallows
- *  the "no such tunnel" error so a fresh device (no prior install)
- *  doesn't fail the precondition. Other errors propagate. */
-async function teardownIfPresent(): Promise<void> {
+/** Probe whether the WireGuard tunnel is currently registered with the
+ *  Service Control Manager. Locale-immune: relies on `sc.exe`'s exit
+ *  code (0 = service exists, 1060 = ERROR_SERVICE_DOES_NOT_EXIST). The
+ *  previous implementation lower-cased the error message and grepped
+ *  for English substrings — Spanish Windows ships
+ *  "El servicio especificado no existe como servicio instalado", which
+ *  matched none of them, so a fresh install always blew up the connect
+ *  flow with an "uninstall failed" error before the install ever ran. */
+async function tunnelServiceExistsWindows(): Promise<boolean> {
+  const serviceName = `WireGuardTunnel$${TUNNEL_NAME}`;
   try {
-    if (process.platform === "win32") {
-      await disconnectWindows();
-    } else {
-      await disconnectUnix();
-    }
+    await execFileAsync("sc.exe", ["query", serviceName], { windowsHide: true });
+    return true;
+  } catch {
+    // execFileAsync rejects on any non-zero exit. The expected case here
+    // is 1060 (service not installed); any other failure (SCM down,
+    // sc.exe missing) is surfaced through the subsequent install path
+    // which has its own error handling.
+    return false;
+  }
+}
+
+/** Best-effort teardown used by the idempotent connect path. On Windows
+ *  we positively probe for the service before issuing the uninstall;
+ *  on Unix wg-quick is already idempotent enough that we just swallow
+ *  the well-known "is not a wireguard interface" string. */
+async function teardownIfPresent(): Promise<void> {
+  if (process.platform === "win32") {
+    if (!(await tunnelServiceExistsWindows())) return;
+    await disconnectWindows();
+    return;
+  }
+  try {
+    await disconnectUnix();
   } catch (err) {
     const msg = err instanceof Error ? err.message.toLowerCase() : String(err);
-    // WireGuard for Windows: "Unable to open tunnel service" / "no such service"
-    // wg-quick (Linux/Mac):  "is not a wireguard interface"
-    // Either shape means "nothing to tear down" — safe to ignore.
-    if (
-      msg.includes("no such service") ||
-      msg.includes("not a wireguard interface") ||
-      msg.includes("does not exist") ||
-      msg.includes("unable to open tunnel service") ||
-      msg.includes("unable to find")
-    ) {
+    if (msg.includes("not a wireguard interface") || msg.includes("does not exist")) {
       return;
     }
     throw err;
