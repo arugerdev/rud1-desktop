@@ -14,6 +14,7 @@
     "dist": "npm run build && electron-builder",
     "fetch:wg-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-wireguard-win.ps1",
     "fetch:usbip-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-usbip-win.ps1",
+    "icons:generate": "python scripts/generate-app-icons.py",
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "dist:linux": "npm run build && electron-builder --linux",

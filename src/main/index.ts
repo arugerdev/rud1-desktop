@@ -6,7 +6,12 @@
  * in Electron via window.electronAPI and enables native controls.
  *
  * Configuration (env vars or defaults):
- *   RUD1_APP_URL      — URL to load (default: https://www.rud1.es)
+ *   RUD1_APP_URL      — URL to load (default: https://www.rud1.es/dashboard).
+ *                       The cloud's auth middleware redirects unauthenticated
+ *                       users to /login; landing on /dashboard rather than
+ *                       the marketing root means a logged-in user goes
+ *                       straight to their devices and a logged-out user
+ *                       lands on a sign-in form, never on the marketing site.
  *   RUD1_APP_ORIGIN   — allowed origin(s) for IPC, comma-separated
  *                       (default: https://rud1.es,https://www.rud1.es)
  *   RUD1_DEV_TOOLS    — open DevTools on start (set to "1" for debugging)
@@ -71,7 +76,7 @@ import {
   resetAutoUpdateState,
 } from "./auto-updater";
 
-const APP_URL = process.env.RUD1_APP_URL ?? "https://www.rud1.es";
+const APP_URL = process.env.RUD1_APP_URL ?? "https://www.rud1.es/dashboard";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 // Iter 29 — manifest URL for the lightweight desktop version check.
 // Defaults to a stable path under the same domain as the app; can be
@@ -135,7 +140,41 @@ let lastManifestSha256: string | null = null;
 // their existing v3 sidecar.
 let lastManifestVersion: number | null = null;
 
+// Resuelve el icono empaquetado para la BrowserWindow + taskbar.
+//   Dev:    resources/<platform>/  →  <repo>/resources/icon.{ico,png}
+//   Prod:   process.resourcesPath  →  <app>/resources/icon.{ico,png}
+// Devuelve null cuando no hay icono — Electron entonces cae al icono
+// por defecto, sin romper nada. Los iconos los genera el script
+// `scripts/generate-app-icons.py` a partir del favicon de rud1-es,
+// y se cablean en el packaging vía `win.icon` / `linux.icon` /
+// `mac.icon` del package.json.
+function resolveAppIconPath(): string | null {
+  const baseDir = app.isPackaged
+    ? process.resourcesPath
+    : path.join(app.getAppPath(), "resources");
+  const candidates =
+    process.platform === "win32"
+      ? ["icon.ico", "icon.png"]
+      : process.platform === "darwin"
+      ? ["icon.icns", "icon.png"]
+      : ["icon.png"];
+  for (const name of candidates) {
+    const candidate = path.join(baseDir, name);
+    try {
+      // Sync existsSync deliberately — solo se llama una vez al
+      // crear ventana; no hay loop ni hot path aquí.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const fs = require("fs") as typeof import("fs");
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // Defensive: un fallo del fs no debe impedir abrir la ventana.
+    }
+  }
+  return null;
+}
+
 function createWindow(): BrowserWindow {
+  const iconPath = resolveAppIconPath();
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -143,6 +182,19 @@ function createWindow(): BrowserWindow {
     minHeight: 600,
     title: "rud1",
     backgroundColor: "#09090b", // matches zinc-950 dark background
+    // Icono explícito en lugar de depender solo del manifest del .exe.
+    // Sin esto, el icono de la barra de tareas durante una sesión `npm
+    // run dev` cae al icono por defecto de Electron — el packaging lo
+    // arreglaba pero los desarrolladores veían el "átomo" de Electron
+    // todo el rato.
+    ...(iconPath ? { icon: iconPath } : {}),
+    // Oculta la barra de menú nativa (File / Edit / View / …). El
+    // operador final no necesita esos atajos — esto es una "real app"
+    // que carga rud1.es, no un editor. La barra de título estándar (con
+    // los botones minimizar/maximizar/cerrar) se mantiene porque al
+    // ponerla en false además se quitan esos controles, y los usuarios
+    // de Windows esperan poder arrastrar la ventana por su título.
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -150,6 +202,10 @@ function createWindow(): BrowserWindow {
       sandbox: true,
     },
   });
+  // setMenuBarVisibility(false) extra para que ALT no la haga emerger.
+  // autoHideMenuBar sólo la oculta hasta que el usuario pulsa Alt; aquí
+  // queremos que NUNCA aparezca.
+  win.setMenuBarVisibility(false);
 
   // Open external links in the system browser, not in the app
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -723,6 +779,14 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
+  // Apaga el menú nativo (File / Edit / View / Help). Combinado con
+  // `autoHideMenuBar: true` y `setMenuBarVisibility(false)` en la
+  // ventana principal, esto garantiza que ni siquiera la pulsación de
+  // ALT pueda hacer aparecer la barra. La app se comporta como una
+  // aplicación de escritorio dedicada (estilo Slack / Discord) en
+  // lugar de un browser ligero.
+  Menu.setApplicationMenu(null);
+
   registerIpcHandlers({
     firstBootDedupe: {
       list: () => notifiedHosts,
