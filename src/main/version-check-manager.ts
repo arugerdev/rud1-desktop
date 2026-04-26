@@ -218,6 +218,23 @@ export type VersionCheckState =
       downloadUrl: string | null;
       releaseNotesUrl: string | null;
       manifestVersion: number | null;
+      // Iter 53 — what convention `verifySignedData` follows. Threaded
+      // verbatim from the gate options into the verdict so the
+      // diagnostics renderer + the support-blob round-trip can label
+      // which signing convention this build runs against. Two values:
+      //
+      //   "manifest-sha256-hex" — iter-49 default. Signed-data is the
+      //                            manifest's pinned SHA-256 hex string
+      //                            (UTF-8 encoded).
+      //   "manifest-bytes"      — iter-53 opt-in. Signed-data is the raw
+      //                            manifest body bytes — for publishers
+      //                            whose minisign workflow signs the
+      //                            manifest body directly.
+      //
+      // Optional / undefined on legacy blobs (iter ≤52 verdicts that
+      // never carried a label); the diagnostics renderer falls back to
+      // the iter-49 default when it's missing.
+      signedDataMode?: "manifest-sha256-hex" | "manifest-bytes";
       checkedAt: number;
     }
   | { kind: "error"; message: string; checkedAt: number };
@@ -1671,6 +1688,29 @@ export interface SignatureFetchGateOptions {
    * an https→http downgrade is rejected regardless of policy.
    */
   samePublisherPolicy?: "same-origin" | "same-registrable-domain";
+  /**
+   * Iter 53 — opt-in label for which convention `verifySignedData`
+   * follows. The gate doesn't TRANSFORM the buffer either way; this is
+   * a pure contract label propagated into the verdict envelope so the
+   * diagnostics renderer (and the support-blob round-trip) can show
+   * "verify mode: manifest-body" vs "verify mode: manifest-sha256-hex".
+   *
+   *   "manifest-sha256-hex" — iter 49 default. Caller threads in the
+   *                            manifest's pinned SHA-256 hex string,
+   *                            UTF-8 encoded, as `verifySignedData`.
+   *                            Publisher's minisign workflow signs the
+   *                            sha256 digest string (rud1 default).
+   *   "manifest-bytes"      — iter 53 opt-in. Caller threads in the
+   *                            raw manifest body bytes. For publishers
+   *                            whose minisign workflow emits a signature
+   *                            over the manifest body directly (some
+   *                            CI templates do this — easier to script
+   *                            without an intermediate digest step).
+   *
+   * Defaults to `"manifest-sha256-hex"` (iter-49 byte-identical) when
+   * omitted, so existing callers stay byte-for-byte unchanged.
+   */
+  signedDataMode?: "manifest-sha256-hex" | "manifest-bytes";
 }
 
 /**
@@ -1687,6 +1727,13 @@ export async function applySignatureFetchGate(
 
   const now = options.now ?? Date.now();
   const manifestVersion = options.manifestVersion ?? null;
+  // Iter 53 — propagate the signed-data-mode label into every verdict
+  // return so the diagnostics renderer + support-blob can show "verify
+  // mode: manifest-body" vs "verify mode: manifest-sha256-hex". The
+  // gate doesn't transform `verifySignedData` either way; this is a
+  // pure contract label. Defaults to "manifest-sha256-hex" (iter-49
+  // byte-identical) so callers that don't opt in stay unchanged.
+  const signedDataMode = options.signedDataMode ?? "manifest-sha256-hex";
 
   // v1/v2 manifests OR a v3 manifest whose signatureUrl was rejected
   // at parse time (validateSignatureUrl returned null) → block. The
@@ -1702,6 +1749,7 @@ export async function applySignatureFetchGate(
       downloadUrl: state.downloadUrl,
       releaseNotesUrl: state.releaseNotesUrl,
       manifestVersion,
+      signedDataMode,
       checkedAt: now,
     };
   }
@@ -1720,6 +1768,7 @@ export async function applySignatureFetchGate(
       downloadUrl: state.downloadUrl,
       releaseNotesUrl: state.releaseNotesUrl,
       manifestVersion,
+      signedDataMode,
       checkedAt: now,
     };
   }
@@ -1759,6 +1808,7 @@ export async function applySignatureFetchGate(
           downloadUrl: state.downloadUrl,
           releaseNotesUrl: state.releaseNotesUrl,
           manifestVersion,
+          signedDataMode,
           checkedAt: now,
         };
       }
@@ -1781,6 +1831,7 @@ export async function applySignatureFetchGate(
       downloadUrl: state.downloadUrl,
       releaseNotesUrl: state.releaseNotesUrl,
       manifestVersion,
+      signedDataMode,
       checkedAt: now,
     };
   }
@@ -1812,6 +1863,7 @@ export async function applySignatureFetchGate(
         downloadUrl: state.downloadUrl,
         releaseNotesUrl: state.releaseNotesUrl,
         manifestVersion,
+        signedDataMode,
         checkedAt: now,
       };
     }
@@ -1829,6 +1881,7 @@ export async function applySignatureFetchGate(
         downloadUrl: state.downloadUrl,
         releaseNotesUrl: state.releaseNotesUrl,
         manifestVersion,
+        signedDataMode,
         checkedAt: now,
       };
     }
@@ -1855,6 +1908,7 @@ export async function applySignatureFetchGate(
           downloadUrl: state.downloadUrl,
           releaseNotesUrl: state.releaseNotesUrl,
           manifestVersion,
+          signedDataMode,
           checkedAt: now,
         };
       }
@@ -1872,6 +1926,7 @@ export async function applySignatureFetchGate(
           downloadUrl: state.downloadUrl,
           releaseNotesUrl: state.releaseNotesUrl,
           manifestVersion,
+          signedDataMode,
           checkedAt: now,
         };
       }
@@ -1896,6 +1951,7 @@ export async function applySignatureFetchGate(
           downloadUrl: state.downloadUrl,
           releaseNotesUrl: state.releaseNotesUrl,
           manifestVersion,
+          signedDataMode,
           checkedAt: now,
         };
       }
@@ -1912,6 +1968,7 @@ export async function applySignatureFetchGate(
       downloadUrl: state.downloadUrl,
       releaseNotesUrl: state.releaseNotesUrl,
       manifestVersion,
+      signedDataMode,
       checkedAt: now,
     };
   } finally {
@@ -2419,6 +2476,14 @@ export interface BlockedBySignatureFetchDiagnosticsState {
   downloadUrl?: string | null;
   releaseNotesUrl?: string | null;
   manifestVersion?: number | null;
+  // Iter 53 — verify-mode label, threaded from the gate's
+  // `signedDataMode` option. Optional so legacy iter ≤52 blobs (which
+  // never carried the field) still round-trip through this serialiser
+  // without a TypeScript guard. The blob always emits a value: when the
+  // input state omits it, the envelope falls back to "manifest-sha256-hex"
+  // (the iter-49 default) so a support reader sees an explicit label
+  // rather than a missing key.
+  signedDataMode?: "manifest-sha256-hex" | "manifest-bytes";
 }
 
 export function buildBlockedBySignatureFetchDiagnosticsBlob(
@@ -2451,6 +2516,12 @@ export function buildBlockedBySignatureFetchDiagnosticsBlob(
   envelope.downloadUrl = state.downloadUrl ?? null;
   envelope.releaseNotesUrl = state.releaseNotesUrl ?? null;
   envelope.manifestVersion = state.manifestVersion ?? null;
+  // Iter 53 — always emit an explicit label so a support reader can
+  // disambiguate "publisher signs the sha256-hex digest" (rud1 default)
+  // from "publisher signs the manifest body bytes directly". Legacy
+  // iter ≤52 callers that don't thread the field land on the iter-49
+  // default — same convention the gate itself uses.
+  envelope.signedDataMode = state.signedDataMode ?? "manifest-sha256-hex";
   return JSON.stringify(envelope, null, 2);
 }
 

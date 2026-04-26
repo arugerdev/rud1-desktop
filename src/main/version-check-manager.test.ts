@@ -5484,3 +5484,186 @@ describe("applySignatureFetchGate — iter 52 same-publisher policy", () => {
     }
   });
 });
+
+// ─── Iter 53: signedDataMode opt-in label ────────────────────────────────────
+//
+// The gate accepts a new `signedDataMode?: "manifest-sha256-hex" |
+// "manifest-bytes"` option. Iter-49 default is "manifest-sha256-hex"
+// (publisher signs the sha256 hex digest, rud1's CI default); the
+// iter-53 opt-in is "manifest-bytes" for publishers whose minisign
+// workflow signs the manifest body directly. The gate doesn't
+// transform the signed-data buffer either way — this option is purely
+// a contract label propagated into every blocked verdict so the
+// diagnostics renderer + support-blob round-trip can disambiguate.
+describe("applySignatureFetchGate iter-53 signedDataMode label", () => {
+  const { applySignatureFetchGate } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 26, 12, 0, 0);
+  const GOOD_SIG_URL = "https://rud1.es/desktop/v1.5.0.dmg.sig";
+
+  function mkUpdateAvailable(extra: Record<string, unknown> = {}): VersionCheckState {
+    return {
+      kind: "update-available",
+      current: "1.4.0",
+      latest: "1.5.0",
+      downloadUrl: "https://rud1.es/desktop/v1.5.0.dmg",
+      releaseNotesUrl: null,
+      checkedAt: FIXED_AT,
+      ...extra,
+    };
+  }
+
+  it("default (no signedDataMode option) → blocked verdict labels iter-49 'manifest-sha256-hex' (back-compat)", async () => {
+    // A network failure is the easiest path to a blocked verdict that
+    // doesn't depend on the verify layer's pubkey/signature math —
+    // iter-53 must label the verdict regardless of WHICH gate fired.
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.signedDataMode).toBe("manifest-sha256-hex");
+    }
+  });
+
+  it("explicit 'manifest-bytes' opt-in → blocked verdict carries the iter-53 label", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      signedDataMode: "manifest-bytes",
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.signedDataMode).toBe("manifest-bytes");
+    }
+  });
+
+  it("v1/v2 manifest block → label still threaded (no signatureUrl branch)", async () => {
+    // Tests that the very first blocked-verdict short-circuit (the
+    // signature-not-supported-by-manifest-version branch) honours the
+    // label. A future grep for "no label here" would surface this gap.
+    const state = mkUpdateAvailable({ signatureUrl: null });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 2,
+      now: FIXED_AT,
+      signedDataMode: "manifest-bytes",
+    });
+    expect(out.kind).toBe("update-blocked-by-signature-fetch");
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.reason).toBe("signature-not-supported-by-manifest-version");
+      expect(out.signedDataMode).toBe("manifest-bytes");
+    }
+  });
+
+  it("update-available passthrough leaves the label OFF the verdict (only blocks carry it)", async () => {
+    // The gate's pass-through path returns the original
+    // `update-available` verdict UNCHANGED — no label injection. The
+    // signedDataMode field exists ONLY on the blocked verdict so the
+    // happy-path renderer doesn't grow a label-shaped wart.
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      new Response(new Uint8Array(24).buffer, { status: 200 });
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      signedDataMode: "manifest-bytes",
+    });
+    expect(out.kind).toBe("update-available");
+    expect((out as Record<string, unknown>).signedDataMode).toBeUndefined();
+  });
+
+  it("unknown future signedDataMode literal is forwarded verbatim (forward-compat)", async () => {
+    // The TS literal-union + default-fallback contract means a caller
+    // cannot pass an unknown literal at compile-time, but a runtime
+    // caller (e.g. an IPC bridge that lost a refinement step) can.
+    // Defensive verify: the gate threads the value through without
+    // narrowing to the iter-49 default. The renderer is the place to
+    // refuse unknown labels — the gate stays a passthrough.
+    const fakeFetch: typeof globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const state = mkUpdateAvailable({ signatureUrl: GOOD_SIG_URL });
+    const out = await applySignatureFetchGate(state, {
+      manifestVersion: 3,
+      fetch: fakeFetch,
+      now: FIXED_AT,
+      signedDataMode: "future-shape" as unknown as
+        | "manifest-sha256-hex"
+        | "manifest-bytes",
+    });
+    if (out.kind === "update-blocked-by-signature-fetch") {
+      expect(out.signedDataMode).toBe("future-shape");
+    }
+  });
+});
+
+// ─── Iter 53: BlockedBySignatureFetchDiagnosticsState — signedDataMode round-trip ──
+describe("buildBlockedBySignatureFetchDiagnosticsBlob iter-53 signedDataMode", () => {
+  const { buildBlockedBySignatureFetchDiagnosticsBlob } = versionCheckInternals;
+  const FIXED_AT = Date.UTC(2026, 3, 26, 12, 0, 0);
+
+  it("emits the iter-49 default 'manifest-sha256-hex' when the input state omits the field (legacy iter ≤52)", () => {
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-unreachable",
+        signatureUrl: "https://rud1.es/desktop/v1.5.0.dmg.sig",
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+      },
+      FIXED_AT,
+    );
+    const parsed = JSON.parse(blob);
+    expect(parsed.signedDataMode).toBe("manifest-sha256-hex");
+  });
+
+  it("round-trips an explicit 'manifest-bytes' label without rewriting", () => {
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-verify-failed",
+        signatureUrl: "https://rud1.es/desktop/v1.5.0.dmg.sig",
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+        signedDataMode: "manifest-bytes",
+      },
+      FIXED_AT,
+    );
+    const parsed = JSON.parse(blob);
+    expect(parsed.signedDataMode).toBe("manifest-bytes");
+    // Confirm the rest of the iter-49/50/51/52 envelope is unchanged
+    // (regression: the iter-53 field must NOT shift any other key
+    // ordering / shape — support tooling parses on key names, but a
+    // broken envelope would silently degrade the operator triage flow).
+    expect(parsed.reason).toBe("signature-verify-failed");
+    expect(parsed.signatureUrl).toBe(
+      "https://rud1.es/desktop/v1.5.0.dmg.sig",
+    );
+    expect(parsed.kind).toBe("update-blocked-by-signature-fetch");
+  });
+
+  it("keeps the signedDataMode label even when signatureUrl is null (v1/v2 not-supported branch)", () => {
+    const blob = buildBlockedBySignatureFetchDiagnosticsBlob(
+      {
+        reason: "signature-not-supported-by-manifest-version",
+        signatureUrl: null,
+        currentVersion: "1.4.0",
+        targetVersion: "1.5.0",
+        signedDataMode: "manifest-bytes",
+      },
+      FIXED_AT,
+    );
+    const parsed = JSON.parse(blob);
+    expect(parsed.signatureUrl).toBeNull();
+    expect(parsed.signedDataMode).toBe("manifest-bytes");
+  });
+});
