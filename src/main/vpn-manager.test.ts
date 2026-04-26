@@ -39,6 +39,9 @@ vi.mock("electron", () => ({
 
 import {
   validateTunnelName,
+  parseEndpointFromConfig,
+  isCGNATEndpoint,
+  inspectConfig,
   __test,
 } from "./vpn-manager";
 
@@ -325,4 +328,145 @@ describe("binary-helper resolution (cross-platform)", () => {
       "renderer-supplied value. Validated by manual QA + electron-builder " +
       "packaging pipeline)",
   );
+});
+
+// ─── 8. parseEndpointFromConfig — extract `Endpoint =` from a wg config ──────
+
+describe("parseEndpointFromConfig", () => {
+  it("returns the Endpoint value from the [Peer] block", () => {
+    const cfg = `
+[Interface]
+PrivateKey = aGVsbG8=
+Address = 10.77.42.5/32
+
+[Peer]
+PublicKey = c2VydmVy
+AllowedIPs = 10.77.42.0/24
+Endpoint = 203.0.113.5:51820
+PersistentKeepalive = 25
+`;
+    expect(parseEndpointFromConfig(cfg)).toBe("203.0.113.5:51820");
+  });
+
+  it("tolerates CRLF line endings", () => {
+    const cfg = "[Peer]\r\nEndpoint = 198.51.100.7:51820\r\n";
+    expect(parseEndpointFromConfig(cfg)).toBe("198.51.100.7:51820");
+  });
+
+  it("strips inline comments", () => {
+    expect(parseEndpointFromConfig("Endpoint = 8.8.8.8:51820 # comment")).toBe(
+      "8.8.8.8:51820",
+    );
+    expect(parseEndpointFromConfig("Endpoint = 8.8.8.8:51820 ; another"))
+      .toBe("8.8.8.8:51820");
+  });
+
+  it("is case-insensitive on the key", () => {
+    expect(parseEndpointFromConfig("ENDPOINT = 8.8.8.8:51820")).toBe(
+      "8.8.8.8:51820",
+    );
+    expect(parseEndpointFromConfig("eNdPoInT=8.8.8.8:51820")).toBe(
+      "8.8.8.8:51820",
+    );
+  });
+
+  it("returns null when the value is missing or blank", () => {
+    expect(parseEndpointFromConfig("Endpoint = ")).toBeNull();
+    expect(parseEndpointFromConfig("Endpoint =")).toBeNull();
+  });
+
+  it("returns null when no Endpoint line is present", () => {
+    expect(parseEndpointFromConfig("[Interface]\nAddress = 10.77.42.5/32"))
+      .toBeNull();
+    expect(parseEndpointFromConfig("")).toBeNull();
+    expect(parseEndpointFromConfig("# nothing useful here")).toBeNull();
+  });
+
+  it("rejects non-string input", () => {
+    // @ts-expect-error — exercising the runtime guard
+    expect(parseEndpointFromConfig(undefined)).toBeNull();
+    // @ts-expect-error
+    expect(parseEndpointFromConfig(null)).toBeNull();
+  });
+});
+
+// ─── 9. isCGNATEndpoint — RFC 6598 100.64.0.0/10 detector ────────────────────
+
+describe("isCGNATEndpoint", () => {
+  it("matches every IP inside 100.64.0.0/10", () => {
+    for (const ep of [
+      "100.64.0.0:51820",
+      "100.64.0.1:51820",
+      "100.95.123.45:51820",
+      "100.127.255.254:51820",
+      "100.127.255.255",            // bare IP, no port
+    ]) {
+      expect(isCGNATEndpoint(ep)).toBe(true);
+    }
+  });
+
+  it("rejects neighbouring ranges", () => {
+    for (const ep of [
+      "100.63.255.255:51820", // one below CGNAT
+      "100.128.0.0:51820",    // one above CGNAT
+      "99.255.255.255:51820",
+      "101.0.0.0:51820",
+      "10.0.0.1:51820",       // RFC1918
+      "192.168.1.1:51820",
+      "172.16.0.1:51820",
+      "127.0.0.1:51820",      // loopback
+      "203.0.113.5:51820",    // public
+    ]) {
+      expect(isCGNATEndpoint(ep)).toBe(false);
+    }
+  });
+
+  it("returns false for empty or malformed input", () => {
+    expect(isCGNATEndpoint("")).toBe(false);
+    expect(isCGNATEndpoint(null)).toBe(false);
+    expect(isCGNATEndpoint(undefined)).toBe(false);
+    expect(isCGNATEndpoint("not.an.ip:51820")).toBe(false);
+    expect(isCGNATEndpoint("100.64.0.1.5:51820")).toBe(false);
+    expect(isCGNATEndpoint("100.64.0:51820")).toBe(false);
+    expect(isCGNATEndpoint("100..64.0.1:51820")).toBe(false);
+    expect(isCGNATEndpoint("100.64.300.1:51820")).toBe(false);
+  });
+
+  it("ignores IPv6 endpoints (CGNAT is v4-only)", () => {
+    expect(isCGNATEndpoint("[2606:4700:4700::1111]:51820")).toBe(false);
+    expect(isCGNATEndpoint("::1")).toBe(false);
+  });
+});
+
+// ─── 10. inspectConfig — IPC pre-flight envelope ─────────────────────────────
+
+describe("inspectConfig", () => {
+  it("flags CGNAT endpoints from the config", () => {
+    const cfg = "[Peer]\nEndpoint = 100.64.10.20:51820\n";
+    const r = inspectConfig(cfg);
+    expect(r.endpoint).toBe("100.64.10.20:51820");
+    expect(r.cgnat).toBe(true);
+    expect(r.hasEndpoint).toBe(true);
+  });
+
+  it("does not flag normal public endpoints as CGNAT", () => {
+    const cfg = "[Peer]\nEndpoint = 203.0.113.5:51820\n";
+    const r = inspectConfig(cfg);
+    expect(r.endpoint).toBe("203.0.113.5:51820");
+    expect(r.cgnat).toBe(false);
+    expect(r.hasEndpoint).toBe(true);
+  });
+
+  it("returns hasEndpoint=false on empty / endpoint-less configs", () => {
+    expect(inspectConfig("")).toEqual({
+      endpoint: null,
+      cgnat: false,
+      hasEndpoint: false,
+    });
+    expect(inspectConfig("[Interface]\nAddress = 10.77.42.5/32")).toEqual({
+      endpoint: null,
+      cgnat: false,
+      hasEndpoint: false,
+    });
+  });
 });

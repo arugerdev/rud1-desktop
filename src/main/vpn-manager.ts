@@ -274,6 +274,86 @@ export function generateKeyPairInstructions(): string {
   return 'wg genkey | tee priv.key | wg pubkey';
 }
 
+// ─── Endpoint pre-flight ──────────────────────────────────────────────────────
+
+/**
+ * Pulls the `Endpoint = host:port` value out of a WireGuard config blob.
+ * Returns null when no `[Peer]` block carries an endpoint, when the value is
+ * blank, or when the line is malformed. The parser is permissive: it tolerates
+ * inline comments (`# ...`), CRLF or LF line endings, leading whitespace, and
+ * mixed-case keys.
+ *
+ * Used by the IPC layer to pre-flight the tunnel: we want to detect a CGNAT'd
+ * peer endpoint BEFORE invoking `wireguard.exe /installtunnelservice`, so the
+ * renderer can surface an actionable warning instead of letting the operator
+ * stare at an interface that "just doesn't connect".
+ */
+export function parseEndpointFromConfig(wgConfig: string): string | null {
+  if (typeof wgConfig !== "string" || wgConfig.length === 0) return null;
+  const lines = wgConfig.split(/\r?\n/);
+  for (const raw of lines) {
+    // Strip inline comments and surrounding whitespace, then split on the
+    // first `=` only — host:port may contain digits but never `=`.
+    const trimmed = raw.replace(/[#;].*$/, "").trim();
+    if (trimmed.length === 0) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq < 0) continue;
+    const key = trimmed.slice(0, eq).trim().toLowerCase();
+    if (key !== "endpoint") continue;
+    const value = trimmed.slice(eq + 1).trim();
+    if (value.length === 0) return null;
+    return value;
+  }
+  return null;
+}
+
+const CGNAT_FIRST_OCTET = 100;
+const CGNAT_SECOND_LO = 64;
+const CGNAT_SECOND_HI = 127; // 100.64.0.0/10 = 100.64.0.0 .. 100.127.255.255
+
+/**
+ * Reports whether `host` (or "host:port") is an IPv4 literal inside the
+ * RFC 6598 carrier-grade NAT range 100.64.0.0/10. We deliberately do NOT
+ * resolve hostnames here — DNS in main is opt-in and a connect call should
+ * not block on it. If the agent reports a DNS name as endpoint, we trust
+ * the cloud-side CGNAT signal forwarded via the heartbeat instead.
+ */
+export function isCGNATEndpoint(endpoint: string | null | undefined): boolean {
+  if (!endpoint) return false;
+  // Strip an optional `:<port>` suffix. Bracketed IPv6 literals never trigger
+  // this path — CGNAT is IPv4-only by definition.
+  const colonIdx = endpoint.lastIndexOf(":");
+  const host = colonIdx > 0 && !endpoint.includes("]")
+    ? endpoint.slice(0, colonIdx)
+    : endpoint;
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  const octets = parts.map((p) => Number(p));
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = octets;
+  return a === CGNAT_FIRST_OCTET && b >= CGNAT_SECOND_LO && b <= CGNAT_SECOND_HI;
+}
+
+/**
+ * Pre-flight inspection of a wg config that the IPC handler can fold into
+ * its response so the renderer gets actionable hints alongside the
+ * connect ack. Pure — no side effects, no I/O.
+ */
+export interface ConfigPreflight {
+  endpoint: string | null;
+  cgnat: boolean;
+  hasEndpoint: boolean;
+}
+
+export function inspectConfig(wgConfig: string): ConfigPreflight {
+  const endpoint = parseEndpointFromConfig(wgConfig);
+  return {
+    endpoint,
+    hasEndpoint: !!endpoint,
+    cgnat: isCGNATEndpoint(endpoint),
+  };
+}
+
 /**
  * Test-only hatch — exposes the tunnel-name validator, the
  * wg/netsh parsers, and the config-path resolver so the unit tests

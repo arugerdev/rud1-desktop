@@ -43,7 +43,7 @@
  */
 
 import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
-import { vpnConnect, vpnDisconnect, vpnStatus } from "./vpn-manager";
+import { vpnConnect, vpnDisconnect, vpnStatus, inspectConfig } from "./vpn-manager";
 import {
   usbAttach,
   usbDetach,
@@ -370,14 +370,31 @@ export function registerIpcHandlers(opts: {
 
   ipcMain.handle("vpn:connect", async (event, wgConfig: string) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    // Pre-flight: parse the config and surface non-fatal warnings (CGNAT,
+    // missing Endpoint) on the response envelope. We still attempt the
+    // connect — wireguard.exe will just sit there with no handshake — but
+    // the renderer can show an actionable hint instead of a generic
+    // "tunnel installed" toast that masks the real failure.
+    const preflight = inspectConfig(typeof wgConfig === "string" ? wgConfig : "");
     try {
       await vpnConnect(wgConfig);
       // Fire-and-forget toast. The deviceName isn't available at this
       // layer; the renderer-side panel still shows the rich state.
       notifyVpnConnected();
-      return { ok: true };
+      return {
+        ok: true,
+        endpoint: preflight.endpoint,
+        cgnat: preflight.cgnat,
+        hasEndpoint: preflight.hasEndpoint,
+      };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        endpoint: preflight.endpoint,
+        cgnat: preflight.cgnat,
+        hasEndpoint: preflight.hasEndpoint,
+      };
     }
   });
 
