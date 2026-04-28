@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Genera los iconos de aplicación a partir de rud1-es/public/favicon.ico.
+Genera los iconos de aplicación a partir de resources/icon.ico.
 
 Salidas:
   resources/icon.ico   — copia tal cual del favicon (Windows EXE + NSIS).
@@ -30,7 +30,7 @@ except ImportError:
     sys.exit(1)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SOURCE = REPO_ROOT.parent / "rud1-es" / "public" / "favicon.ico"
+SOURCE = REPO_ROOT / "resources" / "icon.ico"
 RESOURCES = REPO_ROOT / "resources"
 
 
