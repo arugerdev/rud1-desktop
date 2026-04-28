@@ -1,0 +1,131 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      # ---------------- WINDOWS ----------------
+      - name: Build Windows
+        if: matrix.os == 'windows-latest'
+        run: npm run dist:win
+
+      - name: Rename Windows artifact
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem -Path release -Recurse -Filter *.exe | Select-Object -First 1
+          if ($file) {
+            Copy-Item $file.FullName release/rud1-Setup.exe
+          }
+
+      - name: Upload Windows artifact
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: release/rud1-Setup.exe
+
+      # ---------------- LINUX ----------------
+      - name: Build Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run dist:linux
+
+      - name: Rename Linux artifact
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          file=$(find release -name "*.AppImage" | head -n 1)
+          if [ -f "$file" ]; then
+            cp "$file" release/rud1.AppImage
+          fi
+
+      - name: Upload Linux artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: release/rud1.AppImage
+
+      # ---------------- MAC ----------------
+      - name: Build macOS
+        if: matrix.os == 'macos-latest'
+        run: npm run dist:mac
+
+      - name: Rename macOS artifact
+        if: matrix.os == 'macos-latest'
+        run: |
+          file=$(find release -name "*.dmg" | head -n 1)
+          if [ -f "$file" ]; then
+            cp "$file" release/rud1.dmg
+          fi
+
+      - name: Upload macOS artifact
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: release/rud1.dmg
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Move artifacts to root
+        run: |
+          find . -type f -name "rud1-Setup.exe" -exec mv {} ./rud1-Setup.exe \; || true
+          find . -type f -name "rud1.AppImage" -exec mv {} ./rud1.AppImage \; || true
+          find . -type f -name "rud1.dmg" -exec mv {} ./rud1.dmg \; || true
+
+      - name: Delete previous latest release
+        uses: dev-drprasad/delete-tag-and-release@v1.1
+        with:
+          tag_name: latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create latest tag
+        run: |
+          git tag latest
+          git push origin latest --force
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          files: |
+            rud1-Setup.exe
+            rud1.AppImage
+            rud1.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
