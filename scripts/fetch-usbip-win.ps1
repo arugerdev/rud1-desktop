@@ -53,13 +53,13 @@ $Installer   = Join-Path $Resources "USBip-installer.exe"
 $LicenseFile = Join-Path $Resources "COPYING.usbip-win2.txt"
 $NoticeFile  = Join-Path $Resources "NOTICE.usbip-win2.txt"
 
-function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function OK2($m)  { Write-Host "OK  $m" -ForegroundColor Green }
-function Warn3($m){ Write-Host "!!  $m" -ForegroundColor Yellow }
+function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+function Write-Ok($msg)   { Write-Host "OK  $msg" -ForegroundColor Green }
+function Write-Warn2($m)  { Write-Host "!!  $m" -ForegroundColor Yellow }
 
 $existing = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { "" }
 if (-not $Force -and $existing -eq $USBIP_VERSION -and (Test-Path $Installer)) {
-  OK2 "usbip-win2 $USBIP_VERSION already present in resources/win32/. Use -Force to re-download."
+  Write-OK "usbip-win2 $USBIP_VERSION already present in resources/win32/. Use -Force to re-download."
   exit 0
 }
 
@@ -68,18 +68,18 @@ New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 $Tmp = Join-Path $Stage "USBip-installer.exe"
 
 try {
-  Step "Downloading $USBIP_URL"
+  Write-Step "Downloading $USBIP_URL"
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   Invoke-WebRequest -Uri $USBIP_URL -OutFile $Tmp -UseBasicParsing
 
-  Step "Verifying SHA256"
+  Write-Step "Verifying SHA256"
   $hash = (Get-FileHash -Path $Tmp -Algorithm SHA256).Hash.ToLower()
   if ($hash -ne $USBIP_SHA256) {
     throw "SHA256 mismatch. Expected $USBIP_SHA256, got $hash. Refusing to use."
   }
-  OK2 "SHA256 matches pinned value"
+  Write-OK "SHA256 matches pinned value"
 
-  Step "Verifying Authenticode signature"
+  Write-Step "Verifying Authenticode signature"
   $sig = Get-AuthenticodeSignature -FilePath $Tmp
   if ($sig.Status -ne "Valid") {
     throw "Authenticode status is '$($sig.Status)' (expected 'Valid'). Refusing to use."
@@ -91,13 +91,13 @@ try {
   if ($subject -notmatch "Cloudyne Systems" -and $subject -notmatch "Scheibling") {
     throw "Unexpected signer subject: $subject. Expected Cloudyne Systems or Scheibling."
   }
-  OK2 "Signed by '$subject'"
+  Write-OK "Signed by '$subject'"
 
-  Step "Installing into $Resources"
+  Write-Step "Installing into $Resources"
   New-Item -ItemType Directory -Force -Path $Resources | Out-Null
   Copy-Item $Tmp $Installer -Force
   $USBIP_VERSION | Out-File -FilePath $VersionFile -Encoding ascii -NoNewline
-  OK2 "USBip-installer.exe installed (version $USBIP_VERSION)"
+  Write-OK "USBip-installer.exe installed (version $USBIP_VERSION)"
 }
 finally {
   Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
@@ -135,23 +135,23 @@ project itself is independently licensed and does not fall under the
 GPL — only this bundled tool does.
 "@
 Set-Content -Path $NoticeFile -Value $NoticeText -Encoding utf8
-OK2 "Wrote $NoticeFile"
+Write-OK "Wrote $NoticeFile"
 
 $LocalLicense = Join-Path $ScriptDir "..\resources\gpl-2.0.txt"
 
 if (-not (Test-Path $LocalLicense)) {
   if ((Get-Item $LicenseFile).Length -lt 8000) {
-    Step "Fetching canonical GPLv2 text from www.gnu.org"
+    Write-Step "Fetching canonical GPLv2 text from www.gnu.org"
     Invoke-WebRequest -Uri "https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt" `
       -OutFile $LicenseFile -UseBasicParsing
-    OK2 "Wrote $LicenseFile"
+    Write-OK "Wrote $LicenseFile"
   }
 }
 
 Copy-Item $LocalLicense $LicenseFile -Force
-Write-Ok "Copied local GPLv2 license"
+Write-OK "Copied local GPLv2 license"
 
 Write-Host ""
-OK2 "Done. resources/win32/ now contains usbip-win2 artefacts:"
+Write-OK "Done. resources/win32/ now contains usbip-win2 artefacts:"
 Get-ChildItem $Resources -Filter "*usbip*" | Select-Object Name, Length | Format-Table -AutoSize
 Get-ChildItem $Resources -Filter "USBip*"   | Select-Object Name, Length | Format-Table -AutoSize
