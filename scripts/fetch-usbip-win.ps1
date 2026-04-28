@@ -137,12 +137,19 @@ GPL — only this bundled tool does.
 Set-Content -Path $NoticeFile -Value $NoticeText -Encoding utf8
 OK2 "Wrote $NoticeFile"
 
-if (-not (Test-Path $LicenseFile) -or (Get-Item $LicenseFile).Length -lt 8000) {
-  Step "Fetching canonical GPLv2 text from www.gnu.org"
-  Invoke-WebRequest -Uri "https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt" `
-    -OutFile $LicenseFile -UseBasicParsing
-  OK2 "Wrote $LicenseFile"
+$LocalLicense = Join-Path $ScriptDir "..\resources\gpl-2.0.txt"
+
+if (-not (Test-Path $LocalLicense)) {
+  if ((Get-Item $LicenseFile).Length -lt 8000) {
+    Step "Fetching canonical GPLv2 text from www.gnu.org"
+    Invoke-WebRequest -Uri "https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt" `
+      -OutFile $LicenseFile -UseBasicParsing
+    OK2 "Wrote $LicenseFile"
+  }
 }
+
+Copy-Item $LocalLicense $LicenseFile -Force
+Write-Ok "Copied local GPLv2 license"
 
 Write-Host ""
 OK2 "Done. resources/win32/ now contains usbip-win2 artefacts:"

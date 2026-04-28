@@ -155,12 +155,19 @@ Write-Ok "Wrote $NoticeFile"
 
 # Embed the canonical GPLv2 text. We pull it from the official GNU URL
 # the first time, then never re-fetch (the text is immutable).
-if (-not (Test-Path $LicenseFile) -or (Get-Item $LicenseFile).Length -lt 8000) {
-  Write-Step "Fetching canonical GPLv2 text from www.gnu.org"
-  Invoke-WebRequest -Uri "https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt" `
-    -OutFile $LicenseFile -UseBasicParsing
-  Write-Ok "Wrote $LicenseFile"
+$LocalLicense = Join-Path $ScriptDir "..\resources\gpl-2.0.txt"
+
+if (-not (Test-Path $LocalLicense)) {
+  if ((Get-Item $LicenseFile).Length -lt 8000) {
+    Write-Step "Fetching canonical GPLv2 text from www.gnu.org"
+    Invoke-WebRequest -Uri "https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt" `
+      -OutFile $LicenseFile -UseBasicParsing
+    Write-Ok "Wrote $LicenseFile"
+  }
 }
+
+Copy-Item $LocalLicense $LicenseFile -Force
+Write-Ok "Copied local GPLv2 license"
 
 Write-Host ""
 Write-Ok "Done. resources/win32/ now contains:"
