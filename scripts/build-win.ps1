@@ -45,13 +45,19 @@ function Warn2($m){ Write-Host "!!  $m" -ForegroundColor Yellow }
 
 # ── 1. Fetch WireGuard ──────────────────────────────────────────────────────
 Step "Fetching WireGuard binaries (idempotent)"
-& (Join-Path $ScriptDir "fetch-wireguard-win.ps1")
-if ($LASTEXITCODE -ne 0) { throw "fetch-wireguard-win.ps1 failed with code $LASTEXITCODE" }
+try {
+  & (Join-Path $ScriptDir "fetch-wireguard-win.ps1")
+} catch {
+  throw "fetch-wireguard-win.ps1 failed: $_"
+}
 
 # ── 1b. Fetch usbip-win2 installer ──────────────────────────────────────────
 Step "Fetching usbip-win2 installer (idempotent)"
-& (Join-Path $ScriptDir "fetch-usbip-win.ps1")
-if ($LASTEXITCODE -ne 0) { throw "fetch-usbip-win.ps1 failed with code $LASTEXITCODE" }
+try {
+  & (Join-Path $ScriptDir "fetch-usbip-win.ps1")
+} catch {
+  throw "fetch-usbip-win.ps1 failed: $_"
+}
 
 # ── 1c. Generate app icons from rud1-es favicon ─────────────────────────────
 # Idempotente: copia el .ico tal cual y re-renderiza el .png. Si el
@@ -64,16 +70,22 @@ if ($null -eq $python) {
   Warn2 "python no encontrado en PATH; saltando generate-app-icons.py."
   Warn2 "Instala Python 3 y Pillow (`pip install --user Pillow`) para empaquetar los iconos."
 } else {
+  try {
   & $python.Source $icons
-  if ($LASTEXITCODE -ne 0) { throw "generate-app-icons.py failed with code $LASTEXITCODE" }
+  } catch {
+    throw "generate-app-icons.py failed: $_"
+  }
 }
 
 # ── 2. tsc compile ──────────────────────────────────────────────────────────
 Step "Running tsc"
 $tsc = Join-Path $RepoRoot "node_modules\.bin\tsc.cmd"
 if (-not (Test-Path $tsc)) { throw "tsc not found at $tsc - run 'npm install' first" }
-& $tsc --outDir (Join-Path $RepoRoot "dist")
-if ($LASTEXITCODE -ne 0) { throw "tsc failed with code $LASTEXITCODE" }
+try {
+  & $tsc --outDir (Join-Path $RepoRoot "dist")
+} catch {
+  throw "tsc failed: $_"
+}
 
 # ── 3. Decide output directory ──────────────────────────────────────────────
 $DefaultOut = Join-Path $RepoRoot "release"
@@ -114,8 +126,12 @@ if (-not (Test-Path $builder)) { throw "electron-builder not found at $builder" 
 # `--config.directories.output` is the documented way to override the
 # YAML/package.json output dir from the CLI; it wins over the default
 # defined in package.json's "build.directories.output".
-& $builder --win --config.directories.output=$OutDir
-if ($LASTEXITCODE -ne 0) { throw "electron-builder failed with code $LASTEXITCODE" }
+
+try {
+  & $builder --win --config.directories.output=$OutDir
+} catch {
+  throw "electron-builder failed: $_"
+}
 
 # ── 5. Surface the result ──────────────────────────────────────────────────
 Write-Host ""
