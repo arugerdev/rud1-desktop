@@ -4,7 +4,7 @@
   "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
   "main": "dist/main/index.js",
   "author": "rud1",
-  "license": "UNLICENSED",
+  "license": "Freeware",
   "private": true,
   "scripts": {
     "dev": "concurrently \"npm run watch\" \"wait-on dist/main/index.js && electron .\"",
