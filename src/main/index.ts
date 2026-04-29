@@ -222,10 +222,24 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
+// Show the main window if it already exists; otherwise create a new one
+// and capture the reference so the next click reuses it. The earlier
+// `mainWindow?.show() ?? createWindow()` shape was wrong: `show()` returns
+// `undefined`, so the `??` always fell through to `createWindow()` and a
+// duplicate window appeared on every tray click while a window was already
+// open.
+function showOrCreateMainWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    return;
+  }
+  mainWindow = createWindow();
+}
+
 function createTray(): void {
   tray = createTrayInstance();
   rebuildTrayMenu();
-  tray.on("click", () => { mainWindow?.show() ?? createWindow(); });
+  tray.on("click", () => { showOrCreateMainWindow(); });
 }
 
 // rebuildTrayMenu refreshes the context menu using the cached
@@ -238,7 +252,7 @@ function createTray(): void {
 function rebuildTrayMenu(): void {
   if (!tray) return;
   const items: Electron.MenuItemConstructorOptions[] = [
-    { label: "Open rud1", click: () => { mainWindow?.show() ?? createWindow(); } },
+    { label: "Open rud1", click: () => { showOrCreateMainWindow(); } },
   ];
   if (lastFirmwareProbe && isFirstBoot(lastFirmwareProbe)) {
     const url = lastFirmwareProbe.setupUrl;
