@@ -29,9 +29,12 @@
  *      cleans up the endpoint.
  */
 
-import { spawn, ChildProcess } from "child_process";
+import { spawn, execFile, ChildProcess } from "child_process";
 import path from "path";
 import readline from "readline";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 import {
   rud1BridgePath,
@@ -657,7 +660,7 @@ export async function serialBridgeConfigurePair(opts?: {
     `Start-Process -FilePath '${setupc}' -ArgumentList 'change',` +
     `'${target.bridgePort}','PortName=${bridgeAlias},${opts2}' -Verb RunAs -Wait`,
   ].join(" ");
-  await execFileAsyncImport()(
+  await execFileAsync(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-Command", psCmd],
     { windowsHide: true, timeout: 60_000 },
@@ -681,21 +684,6 @@ export async function serialBridgeConfigurePair(opts?: {
     );
   }
   return updated;
-}
-
-// Lazy execFile import: keep the top-of-file imports lean so the
-// hot path doesn't pay for promisify on every load.
-let _execFileAsync: ReturnType<typeof makeExecFileAsync> | null = null;
-function execFileAsyncImport() {
-  if (!_execFileAsync) _execFileAsync = makeExecFileAsync();
-  return _execFileAsync;
-}
-function makeExecFileAsync() {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { execFile } = require("child_process") as typeof import("child_process");
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { promisify } = require("util") as typeof import("util");
-  return promisify(execFile);
 }
 
 /** Status snapshot for the renderer's diagnostics chip. */
