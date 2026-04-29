@@ -185,8 +185,8 @@ async function listLinux(): Promise<AttachedDevice[]> {
 
 async function attachWindows(host: string, busId: string): Promise<number> {
   const usbip = usbipPath();
-  await execFileAsync(usbip, ["attach", "-r", host, "-b", busId]);
-  return 0; // usbip-win doesn't expose port numbers the same way
+  const { stdout } = await execFileAsync(usbip, ["attach", "-r", host, "-b", busId]);
+  return parseAttachPort(stdout);
 }
 
 async function detachWindows(port: number): Promise<void> {
@@ -195,7 +195,13 @@ async function detachWindows(port: number): Promise<void> {
 }
 
 async function listWindows(): Promise<AttachedDevice[]> {
-  return []; // usbip-win list format differs; implement as needed
+  const usbip = usbipPath();
+  try {
+    const { stdout } = await execFileAsync(usbip, ["port"]);
+    return parseUsbipPort(stdout);
+  } catch {
+    return [];
+  }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -333,6 +339,66 @@ export async function usbDetach(port: number): Promise<void> {
 export async function usbList(): Promise<AttachedDevice[]> {
   if (process.platform === "win32") return listWindows();
   return listLinux();
+}
+
+/**
+ * Detach by bus ID — resolves the vhci port number from the live `usbip
+ * port` snapshot, then runs the regular port-based detach. Used as a
+ * fallback when the renderer's local attach state was lost (page reload,
+ * desktop restart, navigation away from the panel) and the only stable
+ * identifier still in hand is the bus ID echoed from the cloud's
+ * UsbDevice row.
+ *
+ * Idempotent: a bus ID that's not currently attached resolves to a
+ * silent no-op rather than an error, mirroring `usbDetach`'s
+ * "not attached" tolerance.
+ */
+export async function usbDetachByBusId(busId: string): Promise<void> {
+  assertBusId(busId);
+  ensureUsbipAvailable();
+  const attachments = await usbList();
+  const match = attachments.find((d) => d.busId === busId);
+  if (!match) return;
+  await usbDetach(match.port);
+}
+
+/**
+ * Best-effort sweep: list everything currently attached and detach each.
+ * Used as a precondition to `vpnDisconnect` so we don't strand a vhci
+ * port pointing at a tunnel we're about to tear down — the kernel keeps
+ * the device "attached" but every URB times out, and the next `usbip
+ * attach` fails with "port already in use" until the operator manually
+ * runs `usbip detach -p <n>`.
+ *
+ * Errors from individual detaches are collected into the result rather
+ * than thrown so a stuck device can't block the rest of the cleanup.
+ * Caller decides whether to surface the partial failure to the user.
+ */
+export interface DetachAllResult {
+  detached: AttachedDevice[];
+  failed: { device: AttachedDevice; error: string }[];
+}
+
+export async function usbDetachAll(): Promise<DetachAllResult> {
+  const result: DetachAllResult = { detached: [], failed: [] };
+  let attachments: AttachedDevice[];
+  try {
+    attachments = await usbList();
+  } catch {
+    return result;
+  }
+  for (const dev of attachments) {
+    try {
+      await usbDetach(dev.port);
+      result.detached.push(dev);
+    } catch (err) {
+      result.failed.push({
+        device: dev,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return result;
 }
 
 /** True when usbip is reachable from this app (bundled or system). */

@@ -99,6 +99,8 @@ vi.mock("./vpn-manager", () => ({
 vi.mock("./usb-manager", () => ({
   usbAttach: vi.fn(async () => 1),
   usbDetach: vi.fn(async () => undefined),
+  usbDetachByBusId: vi.fn(async () => undefined),
+  usbDetachAll: vi.fn(async () => ({ detached: [], failed: [] })),
   usbList: vi.fn(async () => []),
   isUsbipInstalled: vi.fn(() => true),
   getUsbipInstallerPath: vi.fn(() => null),
@@ -109,6 +111,44 @@ vi.mock("./usb-manager", () => ({
     constructor() {
       super("USB/IP missing (test stub)");
       this.name = "UsbipMissingError";
+    }
+  },
+}));
+vi.mock("./serial-bridge-manager", () => ({
+  serialBridgeOpen: vi.fn(async () => ({
+    busId: "1-1.3",
+    endpointPath: "COM7",
+    userVisiblePath: "COM7",
+    pid: 12345,
+  })),
+  serialBridgeClose: vi.fn(async () => undefined),
+  serialBridgeCloseAll: vi.fn(async () => undefined),
+  serialBridgeStatus: vi.fn(async () => ({
+    binaryAvailable: true,
+    com0com: null,
+    sessions: [],
+  })),
+  serialBridgeSessionFor: vi.fn(() => null),
+  serialBridgeConfigurePair: vi.fn(async () => ({
+    pairId: "0",
+    userPort: "COM200",
+    bridgePort: "COM201",
+    hasComAlias: true,
+  })),
+  Com0comMissingError: class Com0comMissingError extends Error {
+    setupcPath: string | null = null;
+    hasPairs: boolean = false;
+    constructor() {
+      super("com0com missing (test stub)");
+      this.name = "Com0comMissingError";
+    }
+  },
+  Com0comPairNotAliasedError: class Com0comPairNotAliasedError extends Error {
+    pair = { pairId: "0", userPort: "CNCA0", bridgePort: "CNCB0", hasComAlias: false };
+    setupcPath: string | null = null;
+    constructor() {
+      super("com0com pair not aliased (test stub)");
+      this.name = "Com0comPairNotAliasedError";
     }
   },
 }));

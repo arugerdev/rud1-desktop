@@ -14,6 +14,8 @@
     "dist": "npm run build && electron-builder",
     "fetch:wg-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-wireguard-win.ps1",
     "fetch:usbip-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-usbip-win.ps1",
+    "fetch:com0com-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-com0com-win.ps1",
+    "build:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-rud1-bridge.ps1",
     "icons:generate": "python scripts/generate-app-icons.py",
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
@@ -41,6 +43,11 @@
     "directories": {
       "output": "release"
     },
+    "files": [
+      "**/*",
+      "!release-*",
+      "!release-*/**"
+    ],
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
       "icon": "resources/icon.ico",

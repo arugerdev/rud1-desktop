@@ -96,6 +96,48 @@ export function usbipdPath(): string {
 }
 
 /**
+ * Resolves `rud1-bridge`, the Go auxiliary binary that runs the
+ * desktop-side TCP↔serial proxy for CDC-class devices. macOS ships
+ * arch-suffixed binaries (rud1-bridge-x64 / rud1-bridge-arm64) because
+ * cross-compiling lipo'd universal binaries from a Windows dev box
+ * isn't possible; the launcher branches on `process.arch` to pick
+ * the right one. Linux + Windows ship a single amd64 binary because
+ * neither build target supports arm64 yet (rud1-desktop only renders
+ * on the operator's machine, which is overwhelmingly x64).
+ *
+ * Falls through to bare `rud1-bridge` (PATH lookup) on platforms we
+ * haven't shipped a binary for — useful during dev when running
+ * against a hand-built copy on PATH.
+ */
+export function rud1BridgePath(): string {
+  const base = resourcesDir();
+  let candidate: string;
+  if (process.platform === "darwin") {
+    const arch = process.arch === "arm64" ? "arm64" : "x64";
+    candidate = path.join(base, `rud1-bridge-${arch}`);
+  } else if (process.platform === "win32") {
+    candidate = path.join(base, "rud1-bridge.exe");
+  } else {
+    candidate = path.join(base, "rud1-bridge");
+  }
+  if (fs.existsSync(candidate)) return candidate;
+  // Dev fallback: a developer-installed copy on PATH.
+  return process.platform === "win32" ? "rud1-bridge.exe" : "rud1-bridge";
+}
+
+/**
+ * True when the bundled rud1-bridge binary is present (i.e. the
+ * `npm run build:bridge` step has been run). Used by the panel to
+ * decide whether to even render the bridge-mode option for CDC
+ * devices: a desktop build without the bridge binary should treat
+ * Arduino-style devices as "USB/IP only" rather than offering a
+ * button that's going to ENOENT on click.
+ */
+export function isRud1BridgeAvailable(): boolean {
+  return path.isAbsolute(rud1BridgePath());
+}
+
+/**
  * Returns true when `binaryPath(name)` resolved to a real file. Useful
  * for preflight checks that need to give the user an actionable error
  * ("install WireGuard for Windows from <url>") instead of waiting for
@@ -116,5 +158,21 @@ export function isBinaryAvailable(name: string): boolean {
 export function usbipInstallerPath(): string | null {
   if (process.platform !== "win32") return null;
   const candidate = path.join(resourcesDir(), "USBip-installer.exe");
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Path to the bundled com0com installer (`com0com-installer.exe`).
+ * Returns `null` on non-Windows platforms or when the installer wasn't
+ * bundled (developer skipped `npm run fetch:com0com-win`). The serial
+ * bridge depends on com0com to expose a virtual COM port pair the
+ * operator opens in their Arduino IDE — we surface this path through
+ * the `serial:launchInstaller` IPC channel so the Connect tab can
+ * render a one-click CTA when the bridge fails because com0com is
+ * missing.
+ */
+export function com0comInstallerPath(): string | null {
+  if (process.platform !== "win32") return null;
+  const candidate = path.join(resourcesDir(), "com0com-installer.exe");
   return fs.existsSync(candidate) ? candidate : null;
 }

@@ -66,6 +66,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
         installerPath?: string | null;
       }>,
 
+    /**
+     * Detach by bus ID. Used by the panel as a fallback when its local
+     * attach state was lost (page reload, app restart, navigation) and
+     * only the bus id is known. The main process resolves the bus id
+     * to a vhci port from the live `usbip port` snapshot. Idempotent:
+     * a bus id not currently attached resolves to a silent success.
+     */
+    detachByBusId: (busId: string) =>
+      ipcRenderer.invoke("usb:detachByBusId", busId) as Promise<{
+        ok: boolean;
+        error?: string;
+        usbipMissing?: boolean;
+        installerPath?: string | null;
+      }>,
+
     list: () =>
       ipcRenderer.invoke("usb:list") as Promise<{ port: number; host: string; busId: string }[]>,
 
@@ -95,6 +110,143 @@ contextBridge.exposeInMainWorld("electronAPI", {
     launchInstaller: () =>
       ipcRenderer.invoke("usb:launchInstaller") as Promise<
         { ok: true } | { ok: false; error: string }
+      >,
+  },
+
+  /**
+   * Serial bridge — alternate transport for CDC-class devices
+   * (Arduinos, ESP32 dev boards, USB-serial dongles). The cloud's
+   * Connect tab feature-detects this whole namespace; older desktop
+   * builds (< this iter) don't expose it and the panel falls back
+   * to USB/IP for every device, which is the pre-bridge behaviour.
+   */
+  serial: {
+    /** Spin up a TCP↔serial bridge for `busId`. Returns the local
+     *  path (Windows COM port the user opens, or Unix pty symlink)
+     *  once rud1-bridge has bound the endpoint. */
+    open: (opts: {
+      busId: string;
+      piHost: string;
+      baud?: number;
+      dataBits?: number;
+      parity?: string;
+      stopBits?: string;
+      label?: string;
+    }) =>
+      ipcRenderer.invoke("serial:open", opts) as Promise<
+        | {
+            ok: true;
+            result: {
+              busId: string;
+              endpointPath: string;
+              userVisiblePath: string;
+              pid: number;
+            };
+          }
+        | {
+            ok: false;
+            error: string;
+            /** Set when com0com is missing or has no pairs configured.
+             *  The renderer surfaces a CTA banner with setup steps. */
+            com0comMissing?: boolean;
+            setupcPath?: string | null;
+            hasPairs?: boolean;
+          }
+      >,
+
+    /** Tear down the bridge for `busId`. Idempotent. */
+    close: (busId: string) =>
+      ipcRenderer.invoke("serial:close", busId) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+
+    /**
+     * Manual DTR pulse for an open bridge session. The firmware drives
+     * DTR low on the live `/dev/ttyACMx` for `pulseMs` (default 50)
+     * then re-asserts it — same shape Arduino's reset circuit expects.
+     * The session must already be open (Connect first); the firmware
+     * returns 404 otherwise. `pulseMs` is clamped firmware-side to
+     * [10, 5000].
+     */
+    reset: (opts: { busId: string; piHost: string; pulseMs?: number }) =>
+      ipcRenderer.invoke("serial:reset", opts) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+
+    /** Snapshot of the bridge subsystem: bundled binary present,
+     *  com0com state on Windows, currently-active sessions. */
+    status: () =>
+      ipcRenderer.invoke("serial:status") as Promise<
+        | {
+            ok: true;
+            result: {
+              binaryAvailable: boolean;
+              com0com: {
+                installed: boolean;
+                setupcPath: string | null;
+                pairs: { pairId: string; userPort: string; bridgePort: string }[];
+                error?: string;
+              } | null;
+              sessions: {
+                busId: string;
+                pid: number;
+                endpointPath: string;
+                startedAt: string;
+                lastEvent?: string;
+              }[];
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    /** Drill-down: live session for one bus id, or null. */
+    sessionFor: (busId: string) =>
+      ipcRenderer.invoke("serial:sessionFor", busId) as Promise<
+        | {
+            ok: true;
+            result: {
+              busId: string;
+              pid: number;
+              endpointPath: string;
+              startedAt: string;
+              lastEvent?: string;
+            } | null;
+          }
+        | { ok: false; error: string }
+      >,
+
+    /**
+     * Run the bundled com0com installer (Windows only). Symmetric to
+     * `usb.launchInstaller` for the USB/IP driver. The user sees the
+     * com0com install dialog and walks through driver acceptance; the
+     * panel should retry `serial.status()` after the user closes the
+     * installer to detect the new install.
+     */
+    launchInstaller: () =>
+      ipcRenderer.invoke("serial:launchInstaller") as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+
+    /**
+     * Assign COMxx aliases to a com0com pair that's currently named
+     * CNCAxxx/CNCBxxx. Triggers UAC because setupc.exe needs admin
+     * to drive the kernel driver's IOCTLs. Defaults to COM200/COM201
+     * so we don't collide with real COM ports the user may have.
+     * Idempotent: returns the existing aliased pair if one already
+     * exists.
+     */
+    configurePair: (opts?: { userPortAlias?: string; bridgePortAlias?: string }) =>
+      ipcRenderer.invoke("serial:configurePair", opts) as Promise<
+        | {
+            ok: true;
+            result: {
+              pairId: string;
+              userPort: string;
+              bridgePort: string;
+              hasComAlias: boolean;
+            };
+          }
+        | { ok: false; error: string; com0comMissing?: boolean }
       >,
   },
 

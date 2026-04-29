@@ -47,11 +47,25 @@ import { vpnConnect, vpnDisconnect, vpnStatus, inspectConfig, formatUptimeMs } f
 import {
   usbAttach,
   usbDetach,
+  usbDetachAll,
+  usbDetachByBusId,
   usbList,
   isUsbipInstalled,
   getUsbipInstallerPath,
   UsbipMissingError,
 } from "./usb-manager";
+import {
+  serialBridgeOpen,
+  serialBridgeClose,
+  serialBridgeCloseAll,
+  serialBridgeStatus,
+  serialBridgeSessionFor,
+  serialBridgeConfigurePair,
+  serialBridgeReset,
+  Com0comMissingError,
+  Com0comPairNotAliasedError,
+} from "./serial-bridge-manager";
+import { com0comInstallerPath } from "./binary-helper";
 import {
   notifyVpnConnected,
   notifyVpnCgnatWarning,
@@ -409,15 +423,61 @@ export function registerIpcHandlers(opts: {
 
   ipcMain.handle("vpn:disconnect", async (event) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    // Pre-flight: detach any USB devices currently attached over the
+    // tunnel BEFORE we tear it down. Once the tunnel is gone the vhci
+    // port is left pointing at an unreachable peer — every URB times
+    // out and `usbip attach` to the same bus id fails with "port already
+    // in use" until the operator manually runs `usbip detach -p <n>`.
+    // Best-effort: failures here don't block the disconnect, they're
+    // reported back so the renderer can paint a hint chip.
+    let usbCleanup: { detached: number; failed: number } = {
+      detached: 0,
+      failed: 0,
+    };
+    try {
+      const sweep = await usbDetachAll();
+      // Drop any cached labels for ports we just released so a stale
+      // entry doesn't surface in a future detach notification.
+      for (const dev of sweep.detached) {
+        usbLabelByPort.delete(dev.port);
+      }
+      usbCleanup = {
+        detached: sweep.detached.length,
+        failed: sweep.failed.length,
+      };
+    } catch {
+      // Swallow — the disconnect itself is the user-visible action and
+      // a missing usbip binary or transient list failure shouldn't gate it.
+    }
+    // Serial bridge sessions are independent from USB/IP attachments
+    // but ride the same WG tunnel — close them in the same sweep so
+    // the rud1-bridge subprocesses don't sit on dead TCP sockets
+    // waiting for a 30s keepalive timeout to notice the route is
+    // gone. Failures are best-effort just like the USB sweep above.
+    try {
+      await serialBridgeCloseAll();
+    } catch {
+      // Same rationale as usbDetachAll: don't block VPN disconnect.
+    }
     try {
       // Iter 59: capture uptime via the result envelope so the
       // notification toast can render "Tunnel dropped after 2h 14m".
       // Preserves the prior `{ok:true}` shape — `uptimeMs` is additive.
       const result = await vpnDisconnect();
       notifyVpnDisconnected(undefined, formatUptimeMs(result.uptimeMs));
-      return { ok: true, uptimeMs: result.uptimeMs };
+      return {
+        ok: true,
+        uptimeMs: result.uptimeMs,
+        usbDetached: usbCleanup.detached,
+        usbDetachFailed: usbCleanup.failed,
+      };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        usbDetached: usbCleanup.detached,
+        usbDetachFailed: usbCleanup.failed,
+      };
     }
   });
 
@@ -493,6 +553,39 @@ export function registerIpcHandlers(opts: {
     }
   });
 
+  /**
+   * Bus-ID-keyed detach for renderers that lost their port→bus map.
+   * The renderer tracks attach state in React state, which gets reset on
+   * page reload, navigation, or desktop restart — at which point clicking
+   * Detach has only the bus id in hand. Resolves to the live `usbip port`
+   * snapshot, finds the matching attachment, and runs the regular detach.
+   * Idempotent: a bus id with no current attachment is a silent no-op.
+   */
+  ipcMain.handle("usb:detachByBusId", async (event, busId: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      await usbDetachByBusId(busId);
+      // The label cache is keyed on port, not bus id, and the port is
+      // not surfaced from usbDetachByBusId. We don't try to reconcile
+      // here because the cache is bounded (64 entries, FIFO eviction)
+      // and a stale entry only affects an unrelated future detach
+      // notification's label string. Worst case: that notification
+      // reads "USB device detached" instead of "Arduino Uno detached".
+      notifyUsbDetached(null, busId);
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof UsbipMissingError) {
+        return {
+          ok: false,
+          error: err.message,
+          usbipMissing: true,
+          installerPath: err.installerPath,
+        };
+      }
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   ipcMain.handle("usb:list", async (event) => {
     if (!checkSender(event)) return [];
     try {
@@ -544,6 +637,182 @@ export function registerIpcHandlers(opts: {
     // installer's manifest (`requireAdministrator`) and triggers UAC
     // automatically. Returns the empty string on success.
     const result = await shell.openPath(path);
+    if (result !== "") {
+      return { ok: false, error: result } as const;
+    }
+    return { ok: true as const };
+  });
+
+  // ── Serial bridge — alternate transport for CDC-class devices ─────────
+  //
+  // The cloud's Connect tab routes Arduino-style devices through this
+  // path instead of USB/IP because the kernel `usbip_host` module is
+  // unstable when CDC interfaces re-enumerate (avrdude DTR-toggle
+  // reset). The renderer calls `serial:open` with the bus id + the
+  // Pi-side TCP port (returned by the Pi's POST /api/serial-bridge/open),
+  // we spawn the bundled rud1-bridge Go binary, and surface back a
+  // local path the user opens in their Arduino IDE.
+
+  ipcMain.handle(
+    "serial:open",
+    async (event, opts: {
+      busId: string;
+      piHost: string;
+      baud?: number;
+      dataBits?: number;
+      parity?: string;
+      stopBits?: string;
+      label?: string;
+    }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const result = await serialBridgeOpen(opts);
+        return { ok: true as const, result };
+      } catch (err) {
+        if (err instanceof Com0comMissingError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comMissing: true,
+            setupcPath: err.setupcPath,
+            hasPairs: err.hasPairs,
+          };
+        }
+        if (err instanceof Com0comPairNotAliasedError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comPairNotAliased: true,
+            pair: err.pair,
+            setupcPath: err.setupcPath,
+          };
+        }
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle("serial:close", async (event, busId: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      await serialBridgeClose(busId);
+      return { ok: true as const };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  // Manual DTR pulse for an open bridge session. Wraps the firmware's
+  // POST /api/serial-bridge/reset; the renderer surfaces this as a
+  // "Reset" button next to a bridged device. Common use case: an
+  // Arduino IDE upload that the operator's client didn't trigger via
+  // RFC 2217 (raw TCP scopes, com0com pairs that mishandle modem
+  // control IOCTLs across the virtual pair).
+  ipcMain.handle(
+    "serial:reset",
+    async (event, opts: { busId: string; piHost: string; pulseMs?: number }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        await serialBridgeReset(opts);
+        return { ok: true as const };
+      } catch (err) {
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle("serial:status", async (event) => {
+    if (!checkSender(event)) {
+      return { ok: false as const, error: "Unauthorized origin" };
+    }
+    try {
+      const result = await serialBridgeStatus();
+      return { ok: true as const, result };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  ipcMain.handle("serial:sessionFor", async (event, busId: string) => {
+    if (!checkSender(event)) {
+      return { ok: false as const, error: "Unauthorized origin" };
+    }
+    try {
+      const result = serialBridgeSessionFor(busId);
+      return { ok: true as const, result };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  // Configure a com0com pair by assigning COMxx aliases. Triggers
+  // a UAC prompt because setupc.exe needs admin to write the kernel
+  // driver's IOCTLs. Idempotent: if a pair is already aliased, returns
+  // the existing pair. Defaults to COM200 / COM201 (deliberately high
+  // numbers so they don't collide with the operator's real COM ports).
+  ipcMain.handle(
+    "serial:configurePair",
+    async (event, opts?: { userPortAlias?: string; bridgePortAlias?: string }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const pair = await serialBridgeConfigurePair(opts);
+        return { ok: true as const, result: pair };
+      } catch (err) {
+        if (err instanceof Com0comMissingError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comMissing: true,
+          };
+        }
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  // Launches the bundled com0com installer with elevation so the user
+  // can complete the kernel-driver install in one click. Symmetric to
+  // `usb:launchInstaller`. Returns immediately after spawning — the
+  // installer's own UI walks the user through driver acceptance.
+  ipcMain.handle("serial:launchInstaller", async (event) => {
+    if (!checkSender(event)) {
+      return { ok: false, error: "Unauthorized origin" } as const;
+    }
+    if (process.platform !== "win32") {
+      return {
+        ok: false,
+        error: "com0com is bundled only for Windows builds.",
+      } as const;
+    }
+    const installerPath = com0comInstallerPath();
+    if (!installerPath) {
+      return {
+        ok: false,
+        error: "Bundled com0com installer missing — re-run npm run fetch:com0com-win.",
+      } as const;
+    }
+    // shell.openPath uses ShellExecute → triggers UAC for the signed
+    // installer's `requireAdministrator` manifest. Empty string on
+    // success.
+    const result = await shell.openPath(installerPath);
     if (result !== "") {
       return { ok: false, error: result } as const;
     }
