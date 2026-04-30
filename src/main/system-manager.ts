@@ -13,7 +13,6 @@
  */
 
 import os from "os";
-import { performance } from "perf_hooks";
 
 export interface SystemStatsCpu {
   model: string;
@@ -140,7 +139,6 @@ export const __test = {
 };
 
 export async function getStats(): Promise<SystemStats> {
-  const startedAt = performance.now();
   const util = await sampleCpuUtilisation();
   const cpus = os.cpus();
   const first = cpus[0];
@@ -148,7 +146,6 @@ export async function getStats(): Promise<SystemStats> {
   const free = os.freemem();
   const used = Math.max(0, total - free);
   const usagePct = total > 0 ? Number(((used / total) * 100).toFixed(1)) : 0;
-  void startedAt; // reserved for perf logging; avoid unused-var lint
 
   return {
     hostname: os.hostname(),
