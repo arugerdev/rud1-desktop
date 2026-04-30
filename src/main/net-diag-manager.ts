@@ -32,7 +32,12 @@ const HOSTNAME_REGEX = /^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-
 const IPV6_REGEX = /^[0-9a-fA-F:]+$/;
 
 export function validateHost(h: string): boolean {
-  return typeof h === "string" && HOST_REGEX.test(h);
+  // Reject leading-dash values: HOST_REGEX itself permits `-` anywhere,
+  // and the spawning probes (ping/traceroute/portCheck) forward `host` as
+  // a positional argv slot — a value like "-T" would be parsed as a flag
+  // and confuse the underlying tool. usb-manager / vpn-manager added the
+  // same guard in iter 19 (commit a5ba407); net-diag was missed.
+  return typeof h === "string" && !h.startsWith("-") && HOST_REGEX.test(h);
 }
 
 export interface PingResult {

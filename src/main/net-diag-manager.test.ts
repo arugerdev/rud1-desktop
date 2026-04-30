@@ -208,6 +208,17 @@ describe("validateHost", () => {
     expect(validateHost({} as unknown as string)).toBe(false);
   });
 
+  it("rejects leading-dash values (flag-injection defence)", () => {
+    // The spawning probes (ping/traceroute/portCheck) forward `host` as a
+    // positional argv slot. A leading-dash value matches HOST_REGEX (it
+    // permits `-` in the char class) but would be parsed as a flag by the
+    // underlying tool — e.g. `traceroute … -T` switches to TCP-SYN mode.
+    // Mirrors the equivalent guard in usb-manager / vpn-manager (iter 19).
+    for (const bad of ["-T", "-d", "-r", "-h", "--help", "-attacker.com"]) {
+      expect(validateHost(bad)).toBe(false);
+    }
+  });
+
   it("rejects strings longer than 253 chars (upper bound of HOST_REGEX)", () => {
     const longButOk = "a".repeat(253);
     const tooLong = "a".repeat(254);
