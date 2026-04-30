@@ -241,7 +241,15 @@ function parseKeepalive(value: string): number | null {
 
 export async function wgStatus(tunnelName?: string): Promise<WgStatusResult> {
   if (tunnelName !== undefined) {
-    if (typeof tunnelName !== "string" || !TUNNEL_NAME_REGEX.test(tunnelName)) {
+    // Reject leading-dash values: TUNNEL_NAME_REGEX permits `-` in its char
+    // class, so a name like "-version" matches the regex but would be parsed
+    // as a flag by `wg show` (positional argv #2). Mirrors the iter 11 guard
+    // in net-diag-manager.validateHost.
+    if (
+      typeof tunnelName !== "string" ||
+      tunnelName.startsWith("-") ||
+      !TUNNEL_NAME_REGEX.test(tunnelName)
+    ) {
       return { available: false, reason: "invalid tunnel name" };
     }
   }

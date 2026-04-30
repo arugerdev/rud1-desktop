@@ -50,6 +50,7 @@ vi.mock("os", async () => {
 import {
   compareReports,
   mtuProbe,
+  wgStatus,
   __test,
 } from "./tunnel-diag-manager";
 
@@ -290,7 +291,23 @@ describe("mtuProbe", () => {
   );
 });
 
-// ─── 3. compareReports ──────────────────────────────────────────────────────
+// ─── 3. wgStatus tunnel-name guard ──────────────────────────────────────────
+
+describe("wgStatus", () => {
+  it("rejects leading-dash tunnel names (flag-injection defence)", async () => {
+    // TUNNEL_NAME_REGEX permits `-` in its char class, so without an explicit
+    // startsWith-dash guard a value like "-version" matches the regex and
+    // would be forwarded as positional argv #2 to `wg show`, where it would
+    // be parsed as a flag. Mirrors the equivalent guard added in iter 11 to
+    // net-diag-manager.validateHost.
+    for (const bad of ["-version", "-h", "--help", "-rud1", "-_attacker"]) {
+      const res = await wgStatus(bad);
+      expect(res).toEqual({ available: false, reason: "invalid tunnel name" });
+    }
+  });
+});
+
+// ─── 4. compareReports ──────────────────────────────────────────────────────
 
 describe("compareReports", () => {
   it("swaps when pathA's exportedAt is later than pathB's", async () => {
