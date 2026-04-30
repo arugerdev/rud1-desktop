@@ -1,26 +1,12 @@
 /**
  * Native OS notification helpers for VPN / USB lifecycle events.
  *
- * Why this exists at all: the operator needs to know — without
- * pulling up the panel — when (a) the VPN tunnel comes up or drops,
- * and (b) a USB device finishes attaching / detaching. The panel
- * already mirrors the state, but a notification makes those events
- * non-blocking surface area: the user can be on a Slack window or in
- * a terminal and still see "Pi-shop-01: SanDisk USB attached" the
- * moment the bridge confirms it.
- *
- * Implementation notes
- * --------------------
- *   • Electron's main-process `Notification` API maps to the native
- *     toast on each platform: Action Center (Win), Notification
- *     Centre (mac), libnotify/notify-osd (Linux).
- *   • We call `Notification.isSupported()` once at module load. On a
- *     headless or notification-deprived environment the helpers
- *     no-op rather than throwing — IPC handlers should never crash
- *     because the toast couldn't render.
- *   • Title/body are bounded so a malicious or absurdly long device
- *     label can't push past the platform's display limits and break
- *     wrapping. Linux libnotify in particular has a per-line cap.
+ * Surfaces lifecycle transitions outside the panel so the operator sees
+ * them while focused on Slack, a terminal, etc. Title/body are bounded
+ * because Linux libnotify has a per-line cap and a malicious device
+ * label could otherwise break wrapping. On unsupported environments
+ * (headless, no DBus session) the helpers no-op rather than throwing —
+ * an IPC handler should never crash because the toast couldn't render.
  */
 
 import { Notification } from "electron";
@@ -32,7 +18,7 @@ const MAX_BODY = 240;
 
 function clamp(s: string, max: number): string {
   if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…"; // …
+  return s.slice(0, max - 1) + "…";
 }
 
 function show(title: string, body: string, opts?: { silent?: boolean }) {
@@ -84,16 +70,10 @@ export function notifyVpnCgnatWarning(deviceName?: string) {
 }
 
 /**
- * Fired after a successful disconnect. The user typically sees the
- * panel switch to "VPN Disconnected" already; this is for when they
- * triggered disconnect from a device's Connect tab and immediately
- * navigated away.
- *
- * Iter 59: optional `uptimeLabel` — pre-formatted via vpn-manager's
- * `formatUptimeMs` (e.g. "2h 14m"). When supplied we append "after X"
- * so the user gets a satisfying confirmation that the tunnel was
- * actually live, distinguishable from a "tear down a leftover service"
- * fall-through path.
+ * Fired after a successful disconnect. Mainly for when the user triggers
+ * disconnect from a device's Connect tab and immediately navigates away.
+ * `uptimeLabel` (pre-formatted by vpn-manager, e.g. "2h 14m") differentiates
+ * a real teardown from a leftover-service cleanup so the toast is meaningful.
  */
 export function notifyVpnDisconnected(
   deviceName?: string,
