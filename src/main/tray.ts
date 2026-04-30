@@ -1,32 +1,9 @@
-/**
- * tray — runtime icon management for the system tray (iter 30).
- *
- * Iter 28 documented the tradeoff: with no real icon assets the tray fell
- * back to `nativeImage.createEmpty()`, which is invisible on Windows /
- * Linux and only worked on macOS (where `setTitle("N")` carries the
- * attention signal). Iter 30 ships two real assets (`tray-idle.png`,
- * `tray-attention.png`) plus their `@2x` HiDPI variants under
- * `resources/tray/` and exposes `setTrayIcon('idle' | 'attention')` so
- * the existing `tray-attention` state machine can swap visuals on rising/
- * falling edges.
- *
- * Resolution policy:
- *   1. `app.getAppPath()` is the canonical install root in both dev and
- *      packaged builds (Electron sets it to the repo for `npm run dev`
- *      and to `resources/app.asar` for packaged builds; either way the
- *      `resources/tray/` directory is sibling to the JS).
- *   2. A dev-mode fallback walks one directory up from `__dirname` when
- *      the appPath candidate is missing — useful when the main script
- *      runs from a watched `dist/` outside the canonical app root (e.g.
- *      a vitest spawn from the repo root).
- *   3. If both candidates are empty / missing the function still returns
- *      a Tray instance backed by `nativeImage.createEmpty()` and emits a
- *      `console.warn` — degrading gracefully rather than crashing main.
- *
- * The Tray instance + the resolved-icon record are kept in module-level
- * state so `setTrayIcon` can swap the image without the caller threading
- * a Tray reference through every call site.
- */
+// Real `tray-idle.png` / `tray-attention.png` (and `@2x` HiDPI variants)
+// live under `resources/tray/`. We resolve them via `app.getAppPath()`
+// first (canonical in dev and packaged), then walk up from `__dirname`
+// for vitest-from-repo-root spawns. If nothing matches we fall back to
+// `nativeImage.createEmpty()` — invisible on Windows/Linux but better
+// than crashing main.
 
 import { Tray, nativeImage, app, screen, type NativeImage } from "electron";
 import * as fs from "fs";
@@ -45,13 +22,6 @@ let trayInstance: Tray | null = null;
 let resolution: TrayIconResolution | null = null;
 let appliedState: TrayIconState | null = null;
 
-/**
- * Search candidate roots for the `resources/tray/<name>` icon file.
- * Returns the first existing absolute path, or null when none match.
- *
- * Exported for unit tests so the resolution rules can be exercised
- * without spinning up a Tray.
- */
 export function resolveTrayIconPath(
   name: string,
   appPath: string,
@@ -69,11 +39,6 @@ export function resolveTrayIconPath(
   return null;
 }
 
-/**
- * Resolve all four icon variants up-front and emit a single warn log
- * when any are missing. Pure (modulo `fileExists`) so tests can pin the
- * "all-missing" branch.
- */
 export function resolveTrayIcons(
   appPath: string,
   scriptDir: string,
@@ -97,11 +62,7 @@ export function resolveTrayIcons(
   };
 }
 
-/**
- * Pick the right resolution for the supplied display scale factor.
- * `>= 1.5` is the standard Electron heuristic for "treat as HiDPI" —
- * matches the `image@2x` convention.
- */
+// `>= 1.5` is the standard Electron HiDPI threshold for `image@2x`.
 export function pickIconForState(
   state: TrayIconState,
   scaleFactor: number,
@@ -116,14 +77,9 @@ export function pickIconForState(
 
 function loadImage(p: string | null): NativeImage {
   if (p == null) return nativeImage.createEmpty();
-  const img = nativeImage.createFromPath(p);
-  return img;
+  return nativeImage.createFromPath(p);
 }
 
-/**
- * Build the tray. Resolves icons, refuses an empty image at startup
- * (warn + fallback), and applies the initial 'idle' state.
- */
 export function createTray(): Tray {
   const appPath = app.getAppPath();
   resolution = resolveTrayIcons(appPath, __dirname);
@@ -142,11 +98,7 @@ export function createTray(): Tray {
   return trayInstance;
 }
 
-/**
- * Swap the tray image to the requested state. Idempotent: no-op when
- * the same state is requested twice in a row, so the iter 28 debounce in
- * `computeTrayState` flows through cleanly.
- */
+// Idempotent so the tray-attention debounce can call us on every tick.
 export function setTrayIcon(state: TrayIconState): void {
   if (!trayInstance || !resolution) return;
   if (appliedState === state) return;
@@ -164,11 +116,6 @@ export function setTrayIcon(state: TrayIconState): void {
   appliedState = state;
 }
 
-/**
- * Test/teardown helper — resets module-level state without destroying
- * a real Tray. The runtime path uses `tray.destroy()` directly via
- * `getTrayInstance` so the lifecycle is unambiguous.
- */
 export function resetTrayForTesting(): void {
   trayInstance = null;
   resolution = null;
@@ -187,9 +134,7 @@ function getScaleFactorSafe(): number {
   try {
     return screen.getPrimaryDisplay().scaleFactor || 1;
   } catch {
-    // `screen` is unavailable until app.whenReady(); the tests call
-    // through resolveTrayIcons / pickIconForState directly, so this
-    // is only hit if a misordered caller invokes setTrayIcon early.
+    // `screen` is unavailable until app.whenReady(); a misordered early caller lands here.
     return 1;
   }
 }
