@@ -1,86 +1,20 @@
-/**
- * tray-attention — pure state machine for the tray-icon "attention" badge
- * (iter 28).
- *
- * Iter 25–27 surfaced first-boot LAN devices via:
- *   • the tray context-menu CTA (visible only when the operator opens the
- *     menu — easy to miss),
- *   • a one-shot OS notification on the rising edge (also easy to miss
- *     if the operator wasn't looking at the corner of their screen at the
- *     right moment), and
- *   • a tooltip update (basically invisible — requires hovering).
- *
- * Iter 28 closes the gap with a persistent visual signal on the tray icon
- * itself. Two practical paths exist in Electron:
- *
- *   1. Swap the tray image (`tray.setImage(badgedIcon)`) — works on every
- *      platform, but requires shipping a second icon asset and tinting/
- *      compositing one when the count rises. The repo currently ships NO
- *      icon at all (the tray falls back to `nativeImage.createEmpty()` —
- *      see `createTray()` in index.ts), so a swap would need at least two
- *      new files baked in.
- *
- *   2. macOS: `tray.setTitle("N")` renders short text next to the icon in
- *      the menu bar — visible at all times, no extra asset needed.
- *      Windows/Linux: Electron has no equivalent (`setTitle` is a macOS-only
- *      API; it silently no-ops elsewhere). The cross-platform fallback is
- *      a tooltip change ("rud1 — N device(s) ready to configure") which
- *      matches the existing `setToolTip` plumbing in rebuildTrayMenu().
- *
- * We pick (2): no new assets, no new heavyweight deps, and the macOS title
- * is the strongest visual signal we can produce without shipping pixels.
- * The Win/Linux degradation is documented in the commit and is, in
- * practice, a wash with iter 27 — the OS notification + tray context-menu
- * CTA already worked, and the tooltip is a marginal upgrade.
- *
- * `computeTrayState` is the pure state machine: given the previous count
- * and the new count, it returns the fields the side-effecting `applyTrayState`
- * (in index.ts) needs to call into Electron. Keeping the policy here means
- * the behaviour can be exhaustively unit-tested without a real Tray.
- */
+// Pure state machine for the tray-icon "attention" badge: given the
+// previous and new first-boot host counts, returns the tray fields the
+// caller in index.ts pushes to Electron. Kept side-effect-free so the
+// policy is exhaustively unit-testable without a real Tray.
+//
+// macOS uses `tray.setTitle()` for an always-visible count next to the
+// menu-bar icon; on Win/Linux setTitle no-ops, so the tooltip + the
+// idle/attention icon swap (in tray.ts) carry the signal.
 
-/**
- * The display-shape of the tray attention state. Cross-platform; the
- * platform-specific surfaces (`tray.setTitle` on macOS, tooltip everywhere)
- * are applied by the caller in index.ts.
- */
 export interface TrayAttentionState {
-  /** Number of distinct first-boot hosts currently on the LAN. */
   count: number;
-  /**
-   * String to render via `tray.setTitle()` on macOS. Empty string means
-   * "no badge — clear the title". Capped at "9+" so the menu-bar real
-   * estate doesn't blow up on a fleet network.
-   */
   title: string;
-  /**
-   * Tooltip text — used as the cross-platform fallback signal. When count
-   * is zero this is the steady-state "rud1 Desktop"; otherwise it embeds
-   * the count so an operator hovering over the icon sees the queue.
-   */
   tooltip: string;
 }
 
-/**
- * Iter 30 — the tray icon also flips between two visual variants:
- * "idle" (the baseline ring) and "attention" (ring + notification dot).
- * The caller in `index.ts` consumes `nextIcon` directly; the
- * `iconStateForCount` helper is exposed for tests + symmetry with the
- * existing format helpers.
- */
 export type TrayIconKind = "idle" | "attention";
 
-/**
- * The diff `applyTrayState` consumes to decide whether it has any work to
- * do. `changed=false` means the count is unchanged from the previous call
- * — the caller can no-op to avoid spamming `tray.setTitle` and
- * `tray.setToolTip` on every probe tick.
- *
- * Iter 30 — `prevIcon` / `nextIcon` mirror `prev.count` / `next.count`
- * but in the icon-variant space. `iconChanged` is true iff the icon
- * variant actually flipped on this transition (a count change inside
- * the same variant — e.g. 1 → 2 — does NOT flip the icon).
- */
 export interface TrayStateTransition {
   prev: TrayAttentionState;
   next: TrayAttentionState;
@@ -90,42 +24,22 @@ export interface TrayStateTransition {
   iconChanged: boolean;
 }
 
-/**
- * Pure helper: which icon variant matches a given count. Any non-zero,
- * non-NaN count maps to the attention variant; otherwise idle.
- */
 export function iconStateForCount(count: number): TrayIconKind {
   if (!Number.isFinite(count) || count <= 0) return "idle";
   return Math.floor(count) > 0 ? "attention" : "idle";
 }
 
-/**
- * Format the title shown next to the icon on macOS. Two ergonomic choices:
- *
- *   • A leading space — `setTitle("N")` renders the digit flush against
- *     the icon, which looks like a subscript at typical menu-bar font
- *     sizes. Padding it gives the eye room to read.
- *   • "9+" cap — counts above 9 fold to "9+" so the title stays
- *     readable. The exact breakpoint is arbitrary; 9 is a good
- *     compromise between "shows the real number for typical fleets" and
- *     "doesn't take 4 chars of menu bar".
- */
+// Leading space keeps the digit from rendering flush against the icon
+// (subscript-looking at menu-bar font sizes); cap at "9+" so the title
+// can't blow out menu-bar real estate on a fleet network.
 export function formatTrayTitle(count: number): string {
   if (!Number.isFinite(count) || count <= 0) return "";
-  // Treat fractional counts as their floor — the count is conceptually
-  // an integer (number of hosts), but defensive against accidental float
-  // arithmetic in the caller.
   const n = Math.floor(count);
   if (n <= 0) return "";
   if (n > 9) return " 9+";
   return ` ${n}`;
 }
 
-/**
- * Format the tooltip embedded in the tray. The "rud1 Desktop" baseline
- * matches the iter 25 default; the attention shape mirrors the wording of
- * the iter 26 notification body for consistency across surfaces.
- */
 export function formatTrayTooltip(count: number): string {
   const n = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
   if (n <= 0) return "rud1 Desktop";
@@ -133,23 +47,13 @@ export function formatTrayTooltip(count: number): string {
   return `rud1 Desktop — ${n} devices ready to configure`;
 }
 
-/**
- * Compute the post-transition tray state from the previous count and the
- * new count.
- *
- * Pure: never touches Electron, never reads time. The caller decides
- * whether to actually push the new state to the tray based on
- * `transition.changed` — saves a `setTitle`/`setToolTip` round-trip on
- * idle ticks.
- */
 export function computeTrayState(
   prevCount: number,
   newCount: number,
 ): TrayStateTransition {
-  // Coerce non-finite or negative counts to 0 — these would otherwise
-  // confuse the diff (`NaN !== NaN` in particular makes the "changed"
-  // bit always true). The probe loop never produces them, but the IPC
-  // surface might once we add a renderer-driven count override.
+  // Coerce non-finite/negative to 0 — `NaN !== NaN` would otherwise pin
+  // `changed` to true on every tick. Probe loop never emits these, but
+  // the IPC surface might once a renderer-driven override lands.
   const prev = clampCount(prevCount);
   const next = clampCount(newCount);
   const prevIcon = iconStateForCount(prev);
