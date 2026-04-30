@@ -485,11 +485,14 @@ export function registerIpcHandlers(opts: {
     // Iter 57: error / unauthorized paths must still satisfy the renderer's
     // VpnStatusResult shape (lifecycle stamps are part of the contract now);
     // returning a bare `{connected:false}` would break a strict consumer.
+    // Iter 58 added `tunnelUptimeMs` to that contract — keep error paths in
+    // sync so a strict TS consumer doesn't read `undefined` off the field.
     if (!checkSender(event)) {
       return {
         connected: false,
         lastConnectedAt: null,
         lastDisconnectedAt: null,
+        tunnelUptimeMs: null,
       };
     }
     try {
@@ -499,6 +502,7 @@ export function registerIpcHandlers(opts: {
         connected: false,
         lastConnectedAt: null,
         lastDisconnectedAt: null,
+        tunnelUptimeMs: null,
       };
     }
   });
