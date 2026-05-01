@@ -162,7 +162,9 @@ export function parseUsbipPort(stdout: string): AttachedDevice[] {
 
 async function attachLinux(host: string, busId: string): Promise<number> {
   const usbip = usbipPath();
-  const { stdout } = await execFileAsync(usbip, ["attach", "-h", host, "-b", busId]);
+  // kernel.org usbip-utils only accepts -r/-b/-d; -h is rejected as
+  // "invalid option" so Linux/macOS attach was silently broken.
+  const { stdout } = await execFileAsync(usbip, ["attach", "-r", host, "-b", busId]);
   return parseAttachPort(stdout);
 }
 
