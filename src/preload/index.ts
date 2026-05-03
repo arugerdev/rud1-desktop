@@ -151,6 +151,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
             com0comMissing?: boolean;
             setupcPath?: string | null;
             hasPairs?: boolean;
+            /** Set when a com0com pair exists but lacks COMxx aliases —
+             *  Arduino IDE won't list CNCAx/CNCBx in its port picker.
+             *  Renderer surfaces the "Configurar par COM" CTA. */
+            com0comPairNotAliased?: boolean;
+            /** Set when a com0com pair has COM aliases but is missing
+             *  EmuBR=yes on the user side — Arduino IDE 2.x filters
+             *  Tools > Port on the PNP attributes EmuBR enables, so
+             *  the COM is reachable via `mode COMx` but invisible to
+             *  the IDE. Same recovery path as `com0comPairNotAliased`
+             *  (the Configure CTA re-runs setupc with EmuBR=yes). */
+            com0comPairNoEmuBR?: boolean;
+            pair?: {
+              pairId: string;
+              userPort: string;
+              bridgePort: string;
+              hasComAlias: boolean;
+              emuBR?: boolean;
+            };
           }
       >,
 

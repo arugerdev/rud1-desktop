@@ -64,6 +64,7 @@ import {
   serialBridgeReset,
   Com0comMissingError,
   Com0comPairNotAliasedError,
+  Com0comPairNoEmuBRError,
 } from "./serial-bridge-manager";
 import { com0comInstallerPath } from "./binary-helper";
 import {
@@ -687,6 +688,15 @@ export function registerIpcHandlers(opts: {
             ok: false as const,
             error: err.message,
             com0comPairNotAliased: true,
+            pair: err.pair,
+            setupcPath: err.setupcPath,
+          };
+        }
+        if (err instanceof Com0comPairNoEmuBRError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comPairNoEmuBR: true,
             pair: err.pair,
             setupcPath: err.setupcPath,
           };

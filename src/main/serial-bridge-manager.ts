@@ -378,6 +378,39 @@ export class Com0comPairNotAliasedError extends Error {
 }
 
 /**
+ * Raised when a com0com pair carries a COMxx alias but lacks the
+ * `EmuBR=yes` option on the user-side port. com0com without EmuBR
+ * runs the virtual UART at "as fast as possible" speed AND, more
+ * importantly, doesn't surface the PNP attributes that Arduino IDE
+ * 2.x's port picker filters on — the COM exists in `mode COMx` but
+ * never appears in Tools > Port. Recovery is the same single setupc
+ * change call as for the not-aliased case (we re-run setupc with the
+ * existing alias + EmuBR=yes,EmuOverrun=yes), so the renderer can
+ * route this to the same "Configure COM port pair" CTA as
+ * Com0comPairNotAliasedError. Kept distinct so the panel can paint
+ * a different banner copy ("aliased but invisible to Arduino IDE")
+ * for the operator who already ran the installer's GUI flow.
+ */
+export class Com0comPairNoEmuBRError extends Error {
+  readonly pair: Com0comPair;
+  readonly setupcPath: string | null;
+  constructor(pair: Com0comPair, setupcPath: string | null) {
+    super(
+      `The com0com pair (${pair.userPort} / ${pair.bridgePort}) is aliased but ` +
+      "missing the EmuBR=yes option, so Arduino IDE 2.x won't enumerate it in " +
+      "Tools > Port. Use the 'Configure COM port pair' action in the Connect " +
+      "tab to apply EmuBR=yes,EmuOverrun=yes (one UAC prompt), or run " +
+      `setupc.exe manually: \`setupc change ${pair.userPort} ` +
+      `PortName=${pair.userPort},EmuBR=yes,EmuOverrun=yes\` and the same on ` +
+      `${pair.bridgePort}.`,
+    );
+    this.name = "Com0comPairNoEmuBRError";
+    this.pair = pair;
+    this.setupcPath = setupcPath;
+  }
+}
+
+/**
  * Brings up a serial bridge session. Returns once the bundled
  * rud1-bridge has bound the local endpoint AND printed its ready
  * line — at that point the renderer can tell the operator which
@@ -430,6 +463,16 @@ export async function serialBridgeOpen(opts: OpenOptions): Promise<OpenResult> {
       // panel renders the dedicated CTA instead of letting the user
       // start a session they can't actually use.
       throw new Com0comPairNotAliasedError(picked, status.setupcPath);
+    }
+    if (!picked.emuBR) {
+      // Aliased pair but EmuBR=yes is missing on the user side.
+      // Arduino IDE 2.x filters Tools > Port on the PNP hardware
+      // attributes EmuBR enables, so without it the COM exists in
+      // `mode COMx` and `[SerialPort]::GetPortNames()` but never
+      // appears in the IDE's picker. Same recovery path as the
+      // not-aliased case (one setupc UAC), so we route through the
+      // same CTA — see Com0comPairNoEmuBRError docstring.
+      throw new Com0comPairNoEmuBRError(picked, status.setupcPath);
     }
     pair = picked;
     // Pass the B-side to rud1-bridge; the user opens the A-side.
@@ -609,24 +652,37 @@ export async function serialBridgeConfigurePair(opts?: {
   if (!status.installed || !status.setupcPath) {
     throw new Com0comMissingError(status);
   }
-  // Pick the first pair without a COM alias; if every pair already
-  // has one, fall through and treat as no-op.
-  const target = status.pairs.find((p) => !p.hasComAlias);
+  // Two reasons to (re-)configure a pair:
+  //   1. it lacks a COMxx alias (CNCAx/CNCBx is invisible to most tools)
+  //   2. it has an alias but is missing EmuBR=yes (Arduino IDE 2.x
+  //      filters those out of Tools > Port — see
+  //      Com0comPairNoEmuBRError for the mechanism)
+  // We treat both as "needs setup" so a second click on the
+  // "Configure pair" CTA fixes the EmuBR-missing case without forcing
+  // the operator into a setupc CLI flow.
+  const target =
+    status.pairs.find((p) => !p.hasComAlias) ??
+    status.pairs.find((p) => p.hasComAlias && !p.emuBR);
   if (!target) {
-    const aliased = status.pairs.find((p) => p.hasComAlias);
-    if (!aliased) throw new Com0comMissingError(status);
-    return aliased;
+    // Nothing to fix — every pair is aliased AND has EmuBR=yes. Pick
+    // the first usable pair so the renderer can update its state with
+    // a confirmed shape rather than guessing.
+    const usable = status.pairs.find((p) => p.hasComAlias && p.emuBR) ??
+      status.pairs.find((p) => p.hasComAlias);
+    if (!usable) throw new Com0comMissingError(status);
+    return usable;
   }
-  // Default to a low pair (e.g. COM7/COM8) when one is free, fall
-  // through to the legacy COM200/COM201 backstop otherwise. The low
-  // numbers dodge a class of vendor-tool bugs ("can't enumerate
-  // 3-digit COM names") while still staying clear of the conventional
-  // modem (COM1) and common USB-serial slots (COM3/COM4). Operators
-  // with strong opinions can still pass `userPortAlias`/
-  // `bridgePortAlias` to override.
+  // For pairs that already have aliases (EmuBR-only fix), keep the
+  // existing names so the user's external configurations (Arduino IDE
+  // last-used port, terminal favourites, etc.) keep working. For
+  // freshly-named pairs, default to a low free pair.
   const defaults = await pickFreePair(status);
-  const userAlias = opts?.userPortAlias ?? defaults.user;
-  const bridgeAlias = opts?.bridgePortAlias ?? defaults.bridge;
+  const userAlias =
+    opts?.userPortAlias ??
+    (target.hasComAlias ? target.userPort : defaults.user);
+  const bridgeAlias =
+    opts?.bridgePortAlias ??
+    (target.hasComAlias ? target.bridgePort : defaults.bridge);
 
   // Validate aliases as a guardrail — the values flow through to a
   // child_process spawn argv; we don't want a crafted IPC message
@@ -666,11 +722,11 @@ export async function serialBridgeConfigurePair(opts?: {
     { windowsHide: true, timeout: 60_000 },
   );
 
-  // Re-detect to confirm the alias landed. The kernel IOCTL is
-  // synchronous on success, so we don't need a poll loop here — but
-  // we DO need to give Windows a moment to refresh the COM port
-  // enumeration cache, otherwise the next setupc list still shows
-  // the old name.
+  // Re-detect to confirm both the alias AND EmuBR=yes landed. The
+  // kernel IOCTL is synchronous on success, so we don't need a poll
+  // loop here — but we DO need to give Windows a moment to refresh
+  // the COM port enumeration cache, otherwise the next setupc list
+  // still shows the old name.
   await new Promise((r) => setTimeout(r, 500));
   const fresh = await detectCom0com();
   const updated = fresh.pairs.find(
@@ -681,6 +737,15 @@ export async function serialBridgeConfigurePair(opts?: {
       `Configure pair completed but the alias (${userAlias} / ${bridgeAlias}) ` +
       "isn't reflected in setupc list yet. Try clicking Connect again — if " +
       "it still fails, run setupc list manually as admin to inspect.",
+    );
+  }
+  if (!updated.emuBR) {
+    throw new Error(
+      `Configure pair landed the alias (${userAlias} / ${bridgeAlias}) but ` +
+      "EmuBR=yes didn't take. Without it, Arduino IDE 2.x won't list the " +
+      "port. Run `setupc list` as admin to confirm the option string, then " +
+      "manually `setupc change " + userAlias + " PortName=" + userAlias +
+      ",EmuBR=yes,EmuOverrun=yes`.",
     );
   }
   return updated;

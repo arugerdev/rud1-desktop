@@ -151,6 +151,14 @@ vi.mock("./serial-bridge-manager", () => ({
       this.name = "Com0comPairNotAliasedError";
     }
   },
+  Com0comPairNoEmuBRError: class Com0comPairNoEmuBRError extends Error {
+    pair = { pairId: "0", userPort: "COM200", bridgePort: "COM201", hasComAlias: true, emuBR: false };
+    setupcPath: string | null = null;
+    constructor() {
+      super("com0com pair missing EmuBR=yes (test stub)");
+      this.name = "Com0comPairNoEmuBRError";
+    }
+  },
 }));
 vi.mock("./net-diag-manager", () => ({
   ping: vi.fn(async () => ({ ok: true })),
