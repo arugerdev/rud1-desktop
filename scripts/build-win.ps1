@@ -145,7 +145,7 @@ if (-not (Test-Path $builder)) { throw "electron-builder not found at $builder" 
 # defined in package.json's "build.directories.output".
 
 try {
-  & $builder --win --config.directories.output=$OutDir
+  & $builder --win --publish never --config.directories.output=$OutDir
 } catch {
   throw "electron-builder failed: $_"
 }

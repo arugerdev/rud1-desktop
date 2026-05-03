@@ -20,8 +20,8 @@
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "dist:win:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1 -SkipFetch",
-    "dist:linux": "npm run build && electron-builder --linux",
-    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -49,6 +49,7 @@
       "!release-*",
       "!release-*/**"
     ],
+    "publish": null,
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
       "icon": "resources/icon.ico",
@@ -70,6 +71,7 @@
       ],
       "icon": "resources/icon.png",
       "category": "Network",
+      "maintainer": "rud1 <noreply@rud1.es>",
       "extraResources": [
         { "from": "resources/linux", "to": "bin", "filter": ["**/*"] }
       ]
