@@ -1,0 +1,6 @@
+﻿This redistribution bundles com0com-installer.exe, the signed installer
+for the com0com kernel driver (https://com0com.sourceforge.net/).
+
+Authors: Vyacheslav Frolov and contributors.
+Version: 3.0.0.0
+License: GPL-2.0 (see COPYING.com0com.txt)

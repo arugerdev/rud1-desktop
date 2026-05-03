@@ -7,12 +7,7 @@ priv.key
 pub.key
 .env
 
-# Bundled native binaries — fetched per-platform by scripts/fetch-*.ps1 / .sh.
-# resources/README.md documents how to populate these. The directories
-# themselves (and their .gitkeep markers + READMEs) stay tracked.
-resources/win32/*
-!resources/win32/.gitkeep
-resources/linux/*
-!resources/linux/.gitkeep
-resources/darwin/*
-!resources/darwin/.gitkeep
+# Bundled native binaries live under resources/{win32,linux,darwin}/ and ARE
+# committed so CI can build releases without network fetches. Populate them
+# locally with the scripts/fetch-*.ps1 + scripts/build-rud1-bridge.ps1
+# helpers, then `git add resources/<platform>/` and push.

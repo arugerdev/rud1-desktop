@@ -9,8 +9,11 @@ The directory naming matches Node's `process.platform`, NOT electron-builder's
 `${os}` substitution variable — picking one and keeping it consistent is what
 stops resources from silently going un-bundled.
 
-Binaries are NOT committed to git. Run the per-platform fetch scripts to
-populate this tree (the `dist:<os>` npm scripts chain them automatically).
+Binaries ARE committed to git so the GitHub Actions release pipeline can
+build for win/linux/mac without network fetches. Populate them locally
+with the helper scripts below, then `git add resources/<platform>/` and
+push — CI uses the committed copies as-is (the workflow sets
+`RUD1_SKIP_FETCH=1` to suppress the fetch chain).
 
 ## Required binaries
 

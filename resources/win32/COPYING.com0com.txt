@@ -1,0 +1,11 @@
+﻿com0com is licensed under the GNU General Public License v2.
+
+The full text of the license is available at:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+Source code corresponding to the bundled binary is available at:
+https://sourceforge.net/projects/com0com/
+
+This file is shipped with rud1-desktop's com0com-installer.exe to
+satisfy the GPL's "must include / point to source" obligation when
+binaries are redistributed.

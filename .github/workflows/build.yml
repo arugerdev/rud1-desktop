@@ -4,134 +4,181 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    continue-on-error: true
-
-    strategy:
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v3
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-      
-      - name: Install Pillow
-        run: pip install Pillow
-
-      # ---------------- WINDOWS ----------------
-      - name: Build Windows
-        if: matrix.os == 'windows-latest'
+      - name: Build Windows installer
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run dist:win
+          RUD1_SKIP_FETCH: "1"
+        run: npm run dist:win:ci
 
-      - name: Rename Windows artifact
-        if: matrix.os == 'windows-latest'
+      - name: Stage installer artifact
         shell: pwsh
         run: |
           $file = Get-ChildItem -Path release -Recurse -Filter "*Setup*.exe" | Select-Object -First 1
-          if ($file) {
-            Copy-Item $file.FullName release/rud1-Setup.exe
-          }
+          if (-not $file) { throw "No NSIS *Setup*.exe produced under release/" }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item $file.FullName artifacts/rud1-Setup.exe -Force
 
-      - name: Upload Windows artifact
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: release/rud1-Setup.exe
+          path: artifacts/rud1-Setup.exe
+          if-no-files-found: error
 
-      # ---------------- LINUX ----------------
-      - name: Build Linux
-        if: matrix.os == 'ubuntu-latest'
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure committed Linux binaries are executable
+        run: |
+          set -eux
+          if [ -f resources/linux/rud1-bridge ]; then
+            chmod +x resources/linux/rud1-bridge
+          fi
+          for f in resources/linux/wg resources/linux/wg-quick resources/linux/usbip resources/linux/usbipd; do
+            [ -f "$f" ] && chmod +x "$f" || true
+          done
+
+      - name: Build Linux artifacts
         run: npm run dist:linux
 
-      - name: Rename Linux artifact
-        if: matrix.os == 'ubuntu-latest'
+      - name: Stage Linux artifacts
         run: |
-          file=$(find release -name "*.AppImage" | head -n 1)
-          if [ -f "$file" ]; then
-            cp "$file" release/rud1.AppImage
-          fi
+          set -eux
+          mkdir -p artifacts
+          appimage=$(find release -maxdepth 2 -name "*.AppImage" | head -n 1)
+          deb=$(find release -maxdepth 2 -name "*.deb" | head -n 1)
+          [ -n "$appimage" ] && cp "$appimage" artifacts/rud1.AppImage
+          [ -n "$deb" ] && cp "$deb" artifacts/rud1.deb
+          ls -la artifacts/
 
-      - name: Upload Linux artifact
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: release/rud1.AppImage
+          path: artifacts/*
+          if-no-files-found: error
 
-      # ---------------- MAC ----------------
-      - name: Build macOS
-        if: matrix.os == 'macos-latest'
+  build-mac:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure committed macOS binaries are executable
+        run: |
+          set -eux
+          for f in resources/darwin/rud1-bridge-x64 resources/darwin/rud1-bridge-arm64 \
+                   resources/darwin/wg resources/darwin/wg-quick resources/darwin/wireguard-go; do
+            [ -f "$f" ] && chmod +x "$f" || true
+          done
+
+      - name: Build macOS DMGs
+        env:
+          # Skip code signing — we have no Apple Developer cert in CI. The
+          # output DMGs are unsigned; users have to right-click → Open the
+          # first time.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run dist:mac
 
-      - name: Rename macOS artifact
-        if: matrix.os == 'macos-latest'
+      - name: Stage macOS artifacts
         run: |
-          file=$(find release -name "*.dmg" | head -n 1)
-          if [ -f "$file" ]; then
-            cp "$file" release/rud1.dmg
+          set -eux
+          mkdir -p artifacts
+          for dmg in $(find release -maxdepth 2 -name "*.dmg"); do
+            base=$(basename "$dmg")
+            cp "$dmg" "artifacts/$base"
+          done
+          # Preserve arch-suffixed names if electron-builder produced both
+          # (rud1-<v>.dmg + rud1-<v>-arm64.dmg). Fall back to a single
+          # rud1.dmg if only one was emitted.
+          if [ "$(ls artifacts/*.dmg 2>/dev/null | wc -l)" = "1" ]; then
+            mv artifacts/*.dmg artifacts/rud1.dmg
+          else
+            for f in artifacts/*-arm64.dmg; do [ -f "$f" ] && mv "$f" artifacts/rud1-arm64.dmg; done
+            for f in artifacts/*.dmg; do
+              base=$(basename "$f")
+              case "$base" in
+                rud1.dmg|rud1-arm64.dmg) ;;
+                *) mv "$f" artifacts/rud1.dmg ;;
+              esac
+            done
           fi
+          ls -la artifacts/
 
-      - name: Upload macOS artifact
-        if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: mac
-          path: release/rud1.dmg
+          path: artifacts/*
+          if-no-files-found: error
 
   release:
-    name: Create Release
-    needs: build
+    name: Publish "latest" release
+    needs: [build-windows, build-linux, build-mac]
     runs-on: ubuntu-latest
-
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Move artifacts to root
-        run: |
-          find . -type f -name "rud1-Setup.exe" -exec mv {} ./rud1-Setup.exe \; || true
-          find . -type f -name "rud1.AppImage" -exec mv {} ./rud1.AppImage \; || true
-          find . -type f -name "rud1.dmg" -exec mv {} ./rud1.dmg \; || true
-
-      - name: Delete previous latest release
-        uses: dev-drprasad/delete-tag-and-release@v1.1
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: latest
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded
 
-      - name: Create Release
+      - name: Flatten artifacts
+        run: |
+          set -eux
+          mkdir -p release-files
+          find downloaded -type f -exec cp {} release-files/ \;
+          ls -la release-files/
+
+      - name: Reset "latest" release + tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+
+      - name: Create "latest" release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Latest Build
-          files: |
-            rud1-Setup.exe
-            rud1.AppImage
-            rud1.dmg
+          prerelease: false
+          target_commitish: ${{ github.sha }}
+          files: release-files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

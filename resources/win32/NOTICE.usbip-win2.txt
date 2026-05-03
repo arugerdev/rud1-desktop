@@ -1,0 +1,28 @@
+﻿usbip-win2
+Version: 0.9.7.7
+Source:  https://github.com/vadimgrn/usbip-win2
+Author:  Vadim Grinco and contributors
+License: GNU General Public License version 2 (GPL-2.0-only) â€” see
+         COPYING.usbip-win2.txt next to this file.
+
+This rud1 Desktop installer bundles the unmodified, official
+USBip-0.9.7.7-x64.exe NSIS installer from the upstream GitHub
+release. It is invoked by the rud1 main process via shell:openItem
+(or execFile with elevation) only after the user accepts a UI prompt.
+
+The installer drops:
+  - VHCI kernel-mode driver (vhci.sys) into Windows DriverStore
+  - usbip.exe userspace tool into Program Files\USBip\
+  - usbip_xfer.exe support tool
+
+We do NOT modify any of these binaries. Authenticode signatures by
+Cloudyne Systems / Scheibling Consulting AB remain intact.
+
+Corresponding source code for this exact bundled version is available
+permanently at:
+
+  https://github.com/vadimgrn/usbip-win2/archive/refs/tags/v.0.9.7.7.tar.gz
+
+A copy of GPLv2 ships in COPYING.usbip-win2.txt. The rud1 Desktop
+project itself is independently licensed and does not fall under the
+GPL â€” only this bundled tool does.

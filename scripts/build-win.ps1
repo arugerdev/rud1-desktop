@@ -34,6 +34,13 @@
   if you want to skip npm.
 #>
 
+param(
+  # CI builds the binaries from the resources committed in the repo and
+  # never reaches out to wireguard.com / GitHub / SourceForge. Pass
+  # -SkipFetch (or set RUD1_SKIP_FETCH=1) to suppress the chain.
+  [switch]$SkipFetch
+)
+
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -43,20 +50,28 @@ function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function OK($m)   { Write-Host "OK  $m" -ForegroundColor Green }
 function Warn2($m){ Write-Host "!!  $m" -ForegroundColor Yellow }
 
-# ── 1. Fetch WireGuard ──────────────────────────────────────────────────────
-Step "Fetching WireGuard binaries (idempotent)"
-try {
-  & (Join-Path $ScriptDir "fetch-wireguard-win.ps1")
-} catch {
-  throw "fetch-wireguard-win.ps1 failed: $_"
+if (-not $SkipFetch -and $env:RUD1_SKIP_FETCH -eq "1") {
+  $SkipFetch = $true
 }
 
-# ── 1b. Fetch usbip-win2 installer ──────────────────────────────────────────
-Step "Fetching usbip-win2 installer (idempotent)"
-try {
-  & (Join-Path $ScriptDir "fetch-usbip-win.ps1")
-} catch {
-  throw "fetch-usbip-win.ps1 failed: $_"
+if ($SkipFetch) {
+  Step "Skipping fetch:* steps (using committed resources/win32/*)"
+} else {
+  # ── 1. Fetch WireGuard ──────────────────────────────────────────────────
+  Step "Fetching WireGuard binaries (idempotent)"
+  try {
+    & (Join-Path $ScriptDir "fetch-wireguard-win.ps1")
+  } catch {
+    throw "fetch-wireguard-win.ps1 failed: $_"
+  }
+
+  # ── 1b. Fetch usbip-win2 installer ──────────────────────────────────────
+  Step "Fetching usbip-win2 installer (idempotent)"
+  try {
+    & (Join-Path $ScriptDir "fetch-usbip-win.ps1")
+  } catch {
+    throw "fetch-usbip-win.ps1 failed: $_"
+  }
 }
 
 # ── 1c. Generate app icons from rud1-es favicon ─────────────────────────────

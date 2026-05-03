@@ -1,0 +1,25 @@
+﻿WireGuard for Windows
+Version: 1.0.1
+Source:  https://git.zx2c4.com/wireguard-windows/
+Author:  Jason A. Donenfeld and contributors
+License: GNU General Public License version 2 (GPL-2.0-only) â€” see
+         COPYING.WireGuard.txt next to this file.
+
+This rud1 Desktop installer bundles the unmodified, official
+wireguard.exe and wg.exe binaries from the upstream MSI release. They
+are invoked as separate processes by the rud1 Desktop main process via
+execFile (no linking, no library use) â€” i.e. mere aggregation per the
+GPL FAQ. The signing certificate (WireGuard LLC) and Authenticode
+timestamp are preserved.
+
+Corresponding source code for this exact bundled version is available
+permanently at:
+
+  https://git.zx2c4.com/wireguard-windows/snapshot/wireguard-windows-1.0.1.tar.xz
+
+If that URL ever moves, the canonical archive lives under
+https://git.zx2c4.com/wireguard-windows/. A copy of GPLv2 ships in
+COPYING.WireGuard.txt.
+
+The rud1 Desktop project itself is independently licensed and does not
+fall under the GPL â€” only this bundled tool does.

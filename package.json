@@ -19,6 +19,7 @@
     "icons:generate": "python scripts/generate-app-icons.py",
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
+    "dist:win:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1 -SkipFetch",
     "dist:linux": "npm run build && electron-builder --linux",
     "dist:mac": "npm run build && electron-builder --mac",
     "test": "vitest run",
@@ -64,8 +65,8 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64", "arm64"] },
-        { "target": "deb", "arch": ["x64", "arm64"] }
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb", "arch": ["x64"] }
       ],
       "icon": "resources/icon.png",
       "category": "Network",
@@ -75,10 +76,8 @@
     },
     "mac": {
       "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
-      "icon": "resources/icon.icns",
-      "hardenedRuntime": true,
-      "entitlements": "resources/entitlements.mac.plist",
-      "entitlementsInherit": "resources/entitlements.mac.plist",
+      "category": "public.app-category.utilities",
+      "identity": null,
       "extraResources": [
         { "from": "resources/darwin", "to": "bin", "filter": ["**/*"] }
       ]
