@@ -70,38 +70,214 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
 <title>rud1 — Settings & About</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#09090b; color:#e4e4e7; margin:0; padding:20px; font-size:13px; line-height:1.5; }
-  h1 { font-size:15px; font-weight:600; margin:0 0 4px 0; }
-  h2 { font-size:13px; font-weight:600; margin:24px 0 8px 0; color:#e4e4e7; text-transform:uppercase; letter-spacing:0.04em; }
-  p { margin:0 0 8px 0; }
-  .muted { color:#a1a1aa; font-size:12px; }
-  .banner { background:#7f1d1d; color:#fef2f2; padding:12px 14px; border-radius:6px; border:1px solid #b91c1c; margin:0 0 12px 0; font-weight:500; }
-  .banner.warn { background:#78350f; color:#fffbeb; border-color:#b45309; }
-  .banner.ok { background:#14532d; color:#f0fdf4; border-color:#166534; }
-  .summary { padding:8px 0; border-bottom:1px solid #27272a; }
-  .row { display:flex; justify-content:space-between; padding:4px 0; }
-  .row .k { color:#a1a1aa; }
-  .row .v { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
-  /* Iter 54 — small chip surfacing the iter-53 signedDataMode label on
-     the sig-fetch blocked verdict. Visually distinct from .row so the
-     operator reads it as metadata about the verify path, not a
-     state-shape field. Display:inline-block keeps it adjacent to the
-     reason row. */
-  .chip { display:inline-block; background:#27272a; color:#e4e4e7; border:1px solid #3f3f46; border-radius:9999px; padding:2px 8px; font-size:11px; font-family: ui-monospace, "SF Mono", Consolas, monospace; margin:6px 0 0 0; }
-  button { background:#27272a; color:#e4e4e7; border:1px solid #3f3f46; border-radius:4px; padding:5px 12px; font-size:12px; cursor:pointer; font-family:inherit; }
-  button:hover { background:#3f3f46; }
-  button:disabled { opacity:0.5; cursor:not-allowed; }
-  button.primary { background:#1d4ed8; border-color:#1e40af; color:#eff6ff; }
-  button.primary:hover { background:#1e40af; }
-  .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
-  a { color:#93c5fd; cursor:pointer; text-decoration:underline; }
-  a:hover { color:#bfdbfe; }
-  .toast { position:fixed; bottom:14px; right:14px; background:#1d4ed8; color:#eff6ff; padding:8px 12px; border-radius:4px; font-size:12px; opacity:0; transition:opacity 0.2s; pointer-events:none; }
-  .toast.show { opacity:1; }
-  code { font-family: ui-monospace, "SF Mono", Consolas, monospace; background:#27272a; padding:2px 5px; border-radius:3px; font-size:12px; }
-  code.hash { word-break:break-all; font-size:11px; color:#fde68a; }
-  .hash-help { margin:6px 0 4px 0; }
+  /*
+   * rud1 Liquid Glass — Settings panel.
+   * Light + dark themes driven by prefers-color-scheme so the panel
+   * follows the OS appearance without needing a toggle (the window
+   * is a small modal opened from the tray; no chrome to host one).
+   * Pastel palette mirrors rud1-es / rud1-app for cross-surface parity.
+   */
+  :root {
+    color-scheme: light dark;
+
+    --bg: #f4f6fa;
+    --fg: #1a2030;
+    --muted-fg: #6b7588;
+    --surface: rgba(255, 255, 255, 0.62);
+    --surface-strong: rgba(255, 255, 255, 0.82);
+    --edge: rgba(255, 255, 255, 0.85);
+    --border: rgba(180, 195, 220, 0.55);
+    --shadow: rgba(60, 80, 120, 0.18);
+
+    --primary: #6db3f5;
+    --primary-soft: #d0e8ff;
+    --primary-fg: #0d2540;
+
+    --success-bg: #c8efd9;
+    --success-border: #8fd6b0;
+    --success-fg: #0e3f25;
+
+    --warning-bg: #fde6c2;
+    --warning-border: #f5b962;
+    --warning-fg: #4a2d0a;
+
+    --danger-bg: #fbd5d0;
+    --danger-border: #f1908a;
+    --danger-fg: #5a1a17;
+
+    --hash-fg: #b87a16;
+    --link: #3a86c4;
+    --link-hover: #1f6eaa;
+
+    /* Mesh tints — light */
+    --mesh-1: rgba(189, 219, 255, 0.55);
+    --mesh-2: rgba(228, 207, 255, 0.5);
+    --mesh-3: rgba(196, 240, 224, 0.45);
+    --mesh-4: rgba(255, 226, 197, 0.45);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0e17;
+      --fg: #e6eaf2;
+      --muted-fg: #93a0b8;
+      --surface: rgba(28, 36, 50, 0.55);
+      --surface-strong: rgba(28, 36, 50, 0.78);
+      --edge: rgba(180, 200, 230, 0.12);
+      --border: rgba(120, 140, 175, 0.22);
+      --shadow: rgba(0, 0, 0, 0.55);
+
+      --primary: #92c8ff;
+      --primary-soft: rgba(110, 172, 230, 0.32);
+      --primary-fg: #0e1a2a;
+
+      --success-bg: rgba(143, 214, 176, 0.22);
+      --success-border: rgba(143, 214, 176, 0.45);
+      --success-fg: #b9ecd0;
+
+      --warning-bg: rgba(245, 185, 98, 0.22);
+      --warning-border: rgba(245, 185, 98, 0.45);
+      --warning-fg: #f4d59c;
+
+      --danger-bg: rgba(241, 144, 138, 0.22);
+      --danger-border: rgba(241, 144, 138, 0.45);
+      --danger-fg: #f3bcb7;
+
+      --hash-fg: #f4d59c;
+      --link: #92c8ff;
+      --link-hover: #c8e2ff;
+
+      /* Mesh tints — dark */
+      --mesh-1: rgba(40, 80, 130, 0.4);
+      --mesh-2: rgba(80, 60, 130, 0.36);
+      --mesh-3: rgba(40, 110, 95, 0.32);
+      --mesh-4: rgba(130, 80, 50, 0.32);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "SF Pro Text", Inter, Roboto, sans-serif;
+    background: var(--bg);
+    background-image:
+      radial-gradient(at 18% 12%, var(--mesh-1), transparent 55%),
+      radial-gradient(at 85% 8%, var(--mesh-2), transparent 55%),
+      radial-gradient(at 70% 90%, var(--mesh-3), transparent 55%),
+      radial-gradient(at 12% 85%, var(--mesh-4), transparent 55%);
+    background-attachment: fixed;
+    color: var(--fg);
+    margin: 0;
+    padding: 24px;
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 6px 0; letter-spacing: -0.01em; }
+  h2 { font-size: 11px; font-weight: 600; margin: 26px 0 10px 0; color: var(--muted-fg); text-transform: uppercase; letter-spacing: 0.08em; }
+  p { margin: 0 0 8px 0; }
+  .muted { color: var(--muted-fg); font-size: 12px; }
+  .banner {
+    background: var(--danger-bg);
+    color: var(--danger-fg);
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid var(--danger-border);
+    margin: 0 0 14px 0;
+    font-weight: 500;
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+  }
+  .banner.warn { background: var(--warning-bg); color: var(--warning-fg); border-color: var(--warning-border); }
+  .banner.ok { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+  .summary {
+    padding: 12px 14px;
+    margin: 0 0 12px 0;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    backdrop-filter: blur(20px) saturate(170%);
+    -webkit-backdrop-filter: blur(20px) saturate(170%);
+    box-shadow: 0 4px 18px var(--shadow);
+  }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; }
+  .row .k { color: var(--muted-fg); }
+  .row .v { font-family: ui-monospace, "SF Mono", Consolas, monospace; text-align: right; word-break: break-all; }
+  .chip {
+    display: inline-block;
+    background: var(--primary-soft);
+    color: var(--primary-fg);
+    border: 1px solid var(--border);
+    border-radius: 9999px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    margin: 8px 0 0 0;
+  }
+  @media (prefers-color-scheme: dark) {
+    .chip { color: var(--primary); }
+  }
+  button {
+    background: var(--surface);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 7px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+    transition: background 0.15s ease, transform 0.1s ease;
+  }
+  button:hover { background: var(--surface-strong); }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: var(--primary-fg);
+    font-weight: 600;
+    box-shadow: 0 4px 16px rgba(109, 179, 245, 0.35);
+  }
+  button.primary:hover { filter: brightness(1.05); }
+  .actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  a { color: var(--link); cursor: pointer; text-decoration: none; border-bottom: 1px dashed currentColor; padding-bottom: 1px; }
+  a:hover { color: var(--link-hover); }
+  .toast {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    background: var(--primary);
+    color: var(--primary-fg);
+    padding: 10px 14px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    pointer-events: none;
+    box-shadow: 0 8px 28px rgba(109, 179, 245, 0.35);
+  }
+  .toast.show { opacity: 1; }
+  code {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    background: var(--primary-soft);
+    color: var(--primary-fg);
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    code { color: var(--primary); }
+  }
+  code.hash { word-break: break-all; font-size: 11px; color: var(--hash-fg); background: transparent; padding: 0; }
+  .hash-help { margin: 8px 0 4px 0; }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted-fg); }
 </style>
 </head>
 <body>

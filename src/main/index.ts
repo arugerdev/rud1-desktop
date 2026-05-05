@@ -24,6 +24,7 @@ import {
   Menu,
   Notification,
   Tray,
+  nativeTheme,
 } from "electron";
 import os from "os";
 import path from "path";
@@ -181,7 +182,7 @@ function createWindow(): BrowserWindow {
     minWidth: 900,
     minHeight: 600,
     title: "rud1",
-    backgroundColor: "#09090b", // matches zinc-950 dark background
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
     // Icono explícito en lugar de depender solo del manifest del .exe.
     // Sin esto, el icono de la barra de tareas durante una sesión `npm
     // run dev` cae al icono por defecto de Electron — el packaging lo
@@ -549,7 +550,7 @@ function showDedupeWindow(): void {
     width: 540,
     height: 480,
     title: "rud1 — First-boot notifications",
-    backgroundColor: "#09090b",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
     minimizable: false,
     maximizable: false,
     parent: mainWindow ?? undefined,
@@ -589,21 +590,112 @@ function buildDedupeWindowHtml(): string {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
 <title>rud1 — First-boot notifications</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#09090b; color:#e4e4e7; margin:0; padding:16px; }
-  h1 { font-size:14px; font-weight:600; margin:0 0 8px 0; }
-  p.help { font-size:12px; color:#a1a1aa; margin:0 0 16px 0; }
-  table { width:100%; border-collapse:collapse; font-size:12px; }
-  th, td { text-align:left; padding:8px; border-bottom:1px solid #27272a; vertical-align:middle; }
-  th { color:#a1a1aa; font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:0.04em; }
+  /*
+   * rud1 Liquid Glass — dedupe inspector.
+   * Light + dark via prefers-color-scheme; pastel palette aligned
+   * with the Settings panel and the rest of the rud1 design system.
+   */
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f6fa;
+    --fg: #1a2030;
+    --muted-fg: #6b7588;
+    --surface: rgba(255, 255, 255, 0.62);
+    --surface-strong: rgba(255, 255, 255, 0.82);
+    --border: rgba(180, 195, 220, 0.55);
+    --shadow: rgba(60, 80, 120, 0.18);
+    --row-divider: rgba(180, 195, 220, 0.4);
+    --danger-fg: #b54f47;
+    --danger-bg: rgba(241, 144, 138, 0.18);
+    --danger-border: rgba(241, 144, 138, 0.5);
+    --mesh-1: rgba(189, 219, 255, 0.5);
+    --mesh-2: rgba(228, 207, 255, 0.45);
+    --mesh-3: rgba(196, 240, 224, 0.4);
+    --mesh-4: rgba(255, 226, 197, 0.4);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0e17;
+      --fg: #e6eaf2;
+      --muted-fg: #93a0b8;
+      --surface: rgba(28, 36, 50, 0.55);
+      --surface-strong: rgba(28, 36, 50, 0.78);
+      --border: rgba(120, 140, 175, 0.22);
+      --shadow: rgba(0, 0, 0, 0.55);
+      --row-divider: rgba(120, 140, 175, 0.18);
+      --danger-fg: #f3bcb7;
+      --danger-bg: rgba(241, 144, 138, 0.18);
+      --danger-border: rgba(241, 144, 138, 0.4);
+      --mesh-1: rgba(40, 80, 130, 0.36);
+      --mesh-2: rgba(80, 60, 130, 0.32);
+      --mesh-3: rgba(40, 110, 95, 0.28);
+      --mesh-4: rgba(130, 80, 50, 0.28);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "SF Pro Text", Inter, Roboto, sans-serif;
+    background: var(--bg);
+    background-image:
+      radial-gradient(at 18% 12%, var(--mesh-1), transparent 55%),
+      radial-gradient(at 85% 8%, var(--mesh-2), transparent 55%),
+      radial-gradient(at 70% 90%, var(--mesh-3), transparent 55%),
+      radial-gradient(at 12% 85%, var(--mesh-4), transparent 55%);
+    background-attachment: fixed;
+    color: var(--fg);
+    margin: 0;
+    padding: 18px;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 8px 0; letter-spacing: -0.01em; }
+  p.help { font-size: 12px; color: var(--muted-fg); margin: 0 0 16px 0; }
+  table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 12px;
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    backdrop-filter: blur(20px) saturate(170%);
+    -webkit-backdrop-filter: blur(20px) saturate(170%);
+    box-shadow: 0 4px 18px var(--shadow);
+  }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--row-divider); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  th { color: var(--muted-fg); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
   td.host { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
-  td.when { color:#a1a1aa; }
-  button { background:#27272a; color:#e4e4e7; border:1px solid #3f3f46; border-radius:4px; padding:4px 10px; font-size:12px; cursor:pointer; }
-  button:hover { background:#3f3f46; }
-  button.danger { color:#fca5a5; border-color:#7f1d1d; }
-  button.danger:hover { background:#450a0a; }
-  .footer { display:flex; justify-content:space-between; align-items:center; margin-top:16px; }
-  .empty { color:#71717a; font-style:italic; padding:24px 8px; text-align:center; }
+  td.when { color: var(--muted-fg); }
+  button {
+    background: var(--surface);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    backdrop-filter: blur(12px) saturate(160%);
+    -webkit-backdrop-filter: blur(12px) saturate(160%);
+    transition: background 0.15s ease, transform 0.1s ease;
+  }
+  button:hover { background: var(--surface-strong); }
+  button:active { transform: scale(0.97); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.danger {
+    color: var(--danger-fg);
+    background: var(--danger-bg);
+    border-color: var(--danger-border);
+  }
+  button.danger:hover { filter: brightness(1.05); }
+  .footer { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
+  .empty { color: var(--muted-fg); font-style: italic; padding: 32px 12px; text-align: center; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted-fg); }
 </style>
 </head>
 <body>
@@ -723,7 +815,7 @@ function showSettingsWindow(): void {
     width: 580,
     height: 540,
     title: "rud1 — Settings & About",
-    backgroundColor: "#09090b",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
     minimizable: false,
     maximizable: false,
     parent: mainWindow ?? undefined,
