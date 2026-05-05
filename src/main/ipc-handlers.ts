@@ -43,6 +43,7 @@
  */
 
 import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
+import { getAutoStart, setAutoStart } from "./auto-start-manager";
 import { vpnConnect, vpnDisconnect, vpnStatus, inspectConfig, formatUptimeMs } from "./vpn-manager";
 import {
   usbAttach,
@@ -1188,6 +1189,38 @@ export function registerIpcHandlers(opts: {
 
   ipcMain.handle("app:version", () => app.getVersion());
   ipcMain.handle("app:platform", () => process.platform);
+
+  // Auto-start (per-user "launch at login"). Read-side is cheap so we
+  // re-query on every renderer refresh rather than caching — the panel
+  // shows the live OS state without us having to invalidate on toggle.
+  ipcMain.handle("app:getAutoStart", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const state = await getAutoStart();
+      return { ok: true, result: state };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  ipcMain.handle("app:setAutoStart", async (event, enabled: unknown) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    if (typeof enabled !== "boolean") {
+      return { ok: false, error: "enabled must be a boolean" };
+    }
+    try {
+      const state = await setAutoStart(enabled);
+      return { ok: true, result: state };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
 
   // setup:probeFirmware — best-effort discovery of a locally-reachable rud1
   // device. The renderer (cloud panel embedded in the BrowserWindow) calls

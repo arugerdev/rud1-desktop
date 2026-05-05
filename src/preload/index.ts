@@ -947,6 +947,46 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
     getPlatform: () =>
       ipcRenderer.invoke("app:platform") as Promise<NodeJS.Platform>,
+
+    /**
+     * Read the OS-level "launch at login" preference plus a feature-
+     * gating flag. `unsupported: true` means the desktop is running
+     * unpackaged (dev) or on an exotic platform; the renderer should
+     * disable the toggle and show `reason` as a tooltip.
+     */
+    getAutoStart: () =>
+      ipcRenderer.invoke("app:getAutoStart") as Promise<
+        | {
+            ok: true;
+            result: {
+              enabled: boolean;
+              unsupported: boolean;
+              reason?: string;
+              platform: NodeJS.Platform;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    /**
+     * Toggle "launch at login". Returns the OS-confirmed state — the
+     * renderer should mirror that value rather than its optimistic
+     * pre-flip, so a refusal (sandbox, missing perms) shows up as a
+     * snap-back of the switch.
+     */
+    setAutoStart: (enabled: boolean) =>
+      ipcRenderer.invoke("app:setAutoStart", enabled) as Promise<
+        | {
+            ok: true;
+            result: {
+              enabled: boolean;
+              unsupported: boolean;
+              reason?: string;
+              platform: NodeJS.Platform;
+            };
+          }
+        | { ok: false; error: string }
+      >,
   },
 
   setup: {

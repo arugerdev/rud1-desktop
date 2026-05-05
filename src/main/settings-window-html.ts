@@ -278,6 +278,70 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--muted-fg); }
+
+  /* Pastel-pill toggle (iOS-style) used by the Auto-start preference. */
+  .pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 14px;
+    margin: 0 0 12px 0;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    backdrop-filter: blur(20px) saturate(170%);
+    -webkit-backdrop-filter: blur(20px) saturate(170%);
+    box-shadow: 0 4px 18px var(--shadow);
+  }
+  .pref-row .pref-text { flex: 1; min-width: 0; }
+  .pref-row .pref-text .label { font-weight: 500; color: var(--fg); }
+  .pref-row .pref-text .hint {
+    font-size: 12px;
+    color: var(--muted-fg);
+    margin-top: 2px;
+    line-height: 1.4;
+  }
+  .toggle {
+    position: relative;
+    display: inline-block;
+    width: 42px;
+    height: 24px;
+    flex-shrink: 0;
+  }
+  .toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    margin: 0;
+  }
+  .toggle .slider {
+    position: absolute;
+    inset: 0;
+    background: var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .toggle .slider::before {
+    content: "";
+    position: absolute;
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    top: 3px;
+    background: #ffffff;
+    border-radius: 999px;
+    transition: transform 0.15s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  }
+  .toggle input:checked + .slider { background: var(--primary); }
+  .toggle input:checked + .slider::before { transform: translateX(18px); }
+  .toggle input:disabled + .slider { opacity: 0.5; cursor: not-allowed; }
+  .toggle input:focus-visible + .slider {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
 </style>
 </head>
 <body>
@@ -286,6 +350,18 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
 
   <h2>Updates</h2>
   <div id="updates"><p class="muted">Loading…</p></div>
+
+  <h2>Startup</h2>
+  <div id="auto-start" class="pref-row">
+    <div class="pref-text">
+      <div class="label">Launch rud1 at login</div>
+      <div class="hint" id="auto-start-hint">Loading…</div>
+    </div>
+    <label class="toggle" aria-label="Toggle launch at login">
+      <input type="checkbox" id="auto-start-toggle" disabled />
+      <span class="slider"></span>
+    </label>
+  </div>
 
   <h2>First-boot notifications</h2>
   <p class="muted">Manage hosts the desktop app has already notified you about.</p>
@@ -834,6 +910,55 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
     // pretending we can launch it from a sibling panel.
     toast('Open from the tray menu → First-boot notifications');
   });
+
+  // Auto-start preference. The toggle reflects the OS state — we read
+  // it on mount and re-read after every flip so a sandbox / permission
+  // refusal snaps the switch back instead of leaving it lying.
+  var autoStartToggle = document.getElementById('auto-start-toggle');
+  var autoStartHint = document.getElementById('auto-start-hint');
+  function autoStartHintFor(state) {
+    if (state.unsupported) {
+      return state.reason || 'Auto-start is not available on this build.';
+    }
+    if (state.platform === 'win32') {
+      return 'rud1 launches minimized into the tray on Windows sign-in.';
+    }
+    if (state.platform === 'darwin') {
+      return 'rud1 starts hidden on macOS login (Login Items entry).';
+    }
+    if (state.platform === 'linux') {
+      return 'Manages an entry in ~/.config/autostart/. Effective on next login.';
+    }
+    return '';
+  }
+  function applyAutoStart(state) {
+    autoStartToggle.checked = !!state.enabled;
+    autoStartToggle.disabled = !!state.unsupported;
+    autoStartHint.textContent = autoStartHintFor(state);
+  }
+  if (window.electronAPI && window.electronAPI.app && typeof window.electronAPI.app.getAutoStart === 'function') {
+    window.electronAPI.app.getAutoStart().then(function(res) {
+      if (res && res.ok) applyAutoStart(res.result);
+      else autoStartHint.textContent = 'Auto-start state unavailable.';
+    });
+    autoStartToggle.addEventListener('change', function() {
+      var desired = !!autoStartToggle.checked;
+      autoStartToggle.disabled = true;
+      window.electronAPI.app.setAutoStart(desired).then(function(res) {
+        if (res && res.ok) {
+          applyAutoStart(res.result);
+          toast(res.result.enabled ? 'Auto-start enabled' : 'Auto-start disabled');
+        } else {
+          // Revert optimistic flip; surface the underlying error.
+          autoStartToggle.checked = !desired;
+          autoStartToggle.disabled = false;
+          toast('Could not change auto-start: ' + (res && res.error ? res.error : 'unknown'));
+        }
+      });
+    });
+  } else {
+    autoStartHint.textContent = 'Auto-start API unavailable in this build.';
+  }
 </script>
 </body>
 </html>`;
