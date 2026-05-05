@@ -332,16 +332,14 @@ describe("parseAttachPort", () => {
 // ─── 7. parseUsbipPort ──────────────────────────────────────────────────────
 
 describe("parseUsbipPort", () => {
-  // The existing regex is `Port N: <Port in Use> at WORD speed...\nTEXT(host) busId`
-  // with the `speed` keyword in LOWERCASE. Real `usbip port` output on
-  // modern distros uses capital-S "Speed", so this regex matches the
-  // legacy lowercase form. These fixtures use the lowercase variant so
-  // we exercise what the parser actually accepts — treat them as
-  // regression pins for the current regex shape, not aspirational
-  // "match every distro" coverage. Broadening the regex is a separate
-  // change.
+  // Two wire formats, both shipped under the `usbip` name and both
+  // targeted by the desktop manager: kernel.org usbip-utils on Linux
+  // (host + busId on the line after the `Port N:` header) and
+  // usbip-win2 on Windows (host + busId in a `-> usbip://host:port/busId`
+  // line). Coverage hits both plus a couple of edge cases the old
+  // single-regex parser silently dropped.
 
-  it("parses a single attached device block into one AttachedDevice", () => {
+  it("parses the kernel.org Linux format (lowercase 'speed')", () => {
     const stdout = [
       "Imported USB devices",
       "====================",
@@ -353,35 +351,56 @@ describe("parseUsbipPort", () => {
     expect(devices[0]).toEqual({ port: 0, host: "10.0.0.5", busId: "1-1.2" });
   });
 
+  it("parses the modern Linux format with capital-S 'Speed'", () => {
+    // Old single-regex parser silently dropped this; line-based scan
+    // doesn't care about the speed-line wording.
+    const stdout = [
+      "Port 00: <Port in Use> at High Speed(480Mbps)",
+      "       descA (10.0.0.5) 1-1",
+    ].join("\n");
+    expect(parseUsbipPort(stdout)).toEqual([
+      { port: 0, host: "10.0.0.5", busId: "1-1" },
+    ]);
+  });
+
+  it("parses the usbip-win2 format with `-> usbip://host:port/busId`", () => {
+    const stdout = [
+      "Imported USB devices",
+      "====================",
+      "Port 01: device in use at Full Speed(12Mbps)",
+      "         dog hunter AG : Arduino Uno Rev3 (2a03:0043)",
+      "           -> usbip://10.99.91.243:3240/1-1.5",
+      "           -> remote bus/dev 001/004",
+    ].join("\n");
+    expect(parseUsbipPort(stdout)).toEqual([
+      { port: 1, host: "10.99.91.243", busId: "1-1.5" },
+    ]);
+  });
+
   it("returns [] when no port-in-use block is present", () => {
     expect(parseUsbipPort("")).toEqual([]);
     expect(parseUsbipPort("Imported USB devices\n====================\n")).toEqual([]);
   });
 
-  it("parses multiple attached devices into separate entries", () => {
+  it("parses multiple attached devices into separate entries (mixed formats)", () => {
     const stdout = [
       "Port 00: <Port in Use> at High speed(480Mbps)",
       "       descA (10.0.0.5) 1-1",
-      "Port 01: <Port in Use> at Super speed(5000Mbps)",
-      "       descB (10.0.0.6) 2-3.4",
+      "Port 01: device in use at Super Speed(5000Mbps)",
+      "         vendor : product (1234:5678)",
+      "           -> usbip://10.0.0.6:3240/2-3.4",
     ].join("\n");
     const devices = parseUsbipPort(stdout);
     expect(devices).toHaveLength(2);
-    expect(devices[0]!.host).toBe("10.0.0.5");
-    expect(devices[0]!.busId).toBe("1-1");
-    expect(devices[1]!.host).toBe("10.0.0.6");
-    expect(devices[1]!.busId).toBe("2-3.4");
+    expect(devices[0]).toEqual({ port: 0, host: "10.0.0.5", busId: "1-1" });
+    expect(devices[1]).toEqual({ port: 1, host: "10.0.0.6", busId: "2-3.4" });
   });
 
-  it("silently skips blocks that don't match the regex (no throw)", () => {
-    // Modern `usbip port` (with capital S "Speed") is NOT matched by the
-    // current regex — documented here so any future regex tightening is
-    // a deliberate, test-visible change.
-    const stdout = [
-      "Port 00: <Port in Use> at High Speed(480Mbps)", // capital S
-      "       descA (10.0.0.5) 1-1",
-    ].join("\n");
-    expect(parseUsbipPort(stdout)).toEqual([]);
+  it("ignores `Port N:` blocks where neither host nor busId line ever arrives", () => {
+    // Truncated output (process killed mid-print, partial pipe) shouldn't
+    // produce a half-formed AttachedDevice — the kernel snapshot is
+    // either authoritative or absent.
+    expect(parseUsbipPort("Port 00: device in use at High Speed\n")).toEqual([]);
   });
 });
 

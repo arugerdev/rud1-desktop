@@ -143,19 +143,57 @@ export function parseAttachPort(stdout: string): number {
  * port-in-use block. Tolerant of extra whitespace; skips unparseable
  * blocks silently (the returned list is a diagnostic view, not a
  * transactional source of truth).
+ *
+ * Two formats are supported because both ship under the `usbip` name
+ * and the desktop targets both:
+ *
+ *   • kernel.org usbip-utils (Linux): host + busId appear on the line
+ *     after the `Port N:` header in the form `... (host) busId`.
+ *   • usbip-win2 (Windows): host + busId appear on a separate
+ *     `-> usbip://host:port/busId` line.
+ *
+ * The single rigid multiline regex this used to be only matched the
+ * Linux variant AND only the lowercase-`speed` spelling, so on Windows
+ * it returned `[]` for every snapshot — which made the renderer's
+ * post-attach reconcile loop ALWAYS drop the just-attached entry and
+ * show "Disconnected" within one poll tick. Switching to a line-based
+ * scan tolerates both wire formats and survives modern Linux builds
+ * that emit capital-S `Speed`.
  */
 export function parseUsbipPort(stdout: string): AttachedDevice[] {
-  const devices: AttachedDevice[] = [];
-  const portRe = /Port\s+(\d+):\s+<Port in Use>\s+at\s+[\w.]+\s+speed.+\n.+\((\S+)\)\s+(\d+-[\d.]+)/gm;
-  let m: RegExpExecArray | null;
-  while ((m = portRe.exec(stdout)) !== null) {
-    devices.push({
-      port: parseInt(m[1]!, 10),
-      host: m[2]!,
-      busId: m[3]!,
-    });
+  const out: AttachedDevice[] = [];
+  let cur: { port: number; host?: string; busId?: string } | null = null;
+  const flush = () => {
+    if (cur && cur.host && cur.busId) {
+      out.push({ port: cur.port, host: cur.host, busId: cur.busId });
+    }
+    cur = null;
+  };
+  for (const line of stdout.split(/\r?\n/)) {
+    const header = line.match(/^\s*Port\s+(\d+):/i);
+    if (header) {
+      flush();
+      cur = { port: parseInt(header[1]!, 10) };
+      continue;
+    }
+    if (!cur) continue;
+    // usbip-win2: `-> usbip://10.99.91.243:3240/1-1.5`
+    const win = line.match(/usbip:\/\/([^:/\s]+)(?::\d+)?\/(\d+-[\d.]+)/);
+    if (win) {
+      cur.host = win[1]!;
+      cur.busId = win[2]!;
+      continue;
+    }
+    // kernel.org: `... (host) busId` where busId is `<bus>-<port>[.<sub>...]`
+    const linux = line.match(/\(([^)]+)\)\s+(\d+-[\d.]+)\s*$/);
+    if (linux) {
+      cur.host = linux[1]!;
+      cur.busId = linux[2]!;
+      continue;
+    }
   }
-  return devices;
+  flush();
+  return out;
 }
 
 // ─── Linux ────────────────────────────────────────────────────────────────────
@@ -185,24 +223,65 @@ async function listLinux(): Promise<AttachedDevice[]> {
 
 // ─── Windows (usbip-win) ──────────────────────────────────────────────────────
 
+// usbip-win2 routes both the success line ("succesfully attached to port N")
+// and most error text to stderr — promisified execFile only resolves with
+// stdout/stderr together when the process exits 0, so we always feed both
+// streams to the parsers and (on error) lift stderr into the thrown message.
+type ExecFileError = Error & { stdout?: string; stderr?: string };
+
 async function attachWindows(host: string, busId: string): Promise<number> {
   const usbip = usbipPath();
-  const { stdout } = await execFileAsync(usbip, ["attach", "-r", host, "-b", busId]);
-  return parseAttachPort(stdout);
+  let stdout = "";
+  let stderr = "";
+  try {
+    const r = await execFileAsync(usbip, ["attach", "-r", host, "-b", busId]);
+    stdout = r.stdout;
+    stderr = r.stderr;
+  } catch (err) {
+    const e = err as ExecFileError;
+    const detail = (e.stderr || e.stdout || e.message).trim();
+    throw new Error(detail);
+  }
+  const port = parseAttachPort(`${stdout}\n${stderr}`);
+  if (port > 0) return port;
+  // Parser came up empty. usbip-win2 sometimes exits 0 without echoing
+  // a port number even when the kernel attach succeeded; cross-check
+  // with `usbip port` before pretending success — otherwise the
+  // renderer flips to "attached", fires the toast, and the next
+  // reconcile poll erases the entry because nothing's actually live.
+  const live = await listWindows();
+  const match = live.find((d) => d.busId === busId);
+  if (match) return match.port;
+  throw new Error(
+    `usbip attach for ${busId} returned no port and the device is not in 'usbip port' output. ` +
+    (stderr.trim() || stdout.trim() || "no diagnostic from usbip"),
+  );
 }
 
 async function detachWindows(port: number): Promise<void> {
   const usbip = usbipPath();
-  await execFileAsync(usbip, ["detach", "-p", String(port)]);
+  try {
+    await execFileAsync(usbip, ["detach", "-p", String(port)]);
+  } catch (err) {
+    const e = err as ExecFileError;
+    throw new Error((e.stderr || e.stdout || e.message).trim());
+  }
 }
 
 async function listWindows(): Promise<AttachedDevice[]> {
   const usbip = usbipPath();
   try {
-    const { stdout } = await execFileAsync(usbip, ["port"]);
-    return parseUsbipPort(stdout);
-  } catch {
-    return [];
+    const { stdout, stderr } = await execFileAsync(usbip, ["port"]);
+    return parseUsbipPort(`${stdout}\n${stderr}`);
+  } catch (err) {
+    // Honour the previous "best-effort" contract for the renderer's
+    // reconcile loop, but salvage any rows we can scrape from the
+    // captured streams before swallowing the failure — usbip-win2's
+    // `port` exits 0 normally, so this branch is only hit on a
+    // genuinely broken install.
+    const e = err as ExecFileError;
+    const buf = `${e.stdout ?? ""}\n${e.stderr ?? ""}`;
+    return parseUsbipPort(buf);
   }
 }
 
@@ -298,6 +377,45 @@ async function bindOnPi(host: string, busId: string): Promise<void> {
   );
 }
 
+/**
+ * Symmetric counterpart to bindOnPi. Detach used to be local-only — Windows
+ * released the VHCI port but the Pi never ran `usbip unbind`, so the kernel
+ * kept the device attached to `usbip-host` and `s.exported[busId]` stayed
+ * true. The next Attach click hit the Pi's idempotent early-return
+ * (usbip_linux.go Export → `if s.exported[busId] return nil`) without
+ * actually rebinding, so a device that landed in a degraded state after
+ * a Code 10 / I/O timeout never recovered: every subsequent attach on
+ * Windows succeeded the protocol handshake but the device failed to
+ * enumerate, the post-attach `usbip port` verification came up empty,
+ * and the panel flipped back to "Disconnected" a few seconds later.
+ *
+ * Calling DELETE /api/usbip/attach on every Disconnect tears down the
+ * Pi-side bind so the next Connect runs a fresh `usbip bind` cycle.
+ * That returns the device to its native kernel driver (e.g. cdc_acm
+ * for an Arduino), which usually clears any USB-level error state too.
+ *
+ * Best-effort: network failures, timeouts, and "not bound" responses
+ * from the Pi are swallowed. The local detach already succeeded; we
+ * never want a flaky Pi unbind to surface as a Disconnect failure to
+ * the user.
+ */
+async function unbindOnPi(host: string, busId: string): Promise<void> {
+  const url = `http://${host}:7070/api/usbip/attach`;
+  try {
+    await fetch(url, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ busId }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    // Network unreachable / timed out / DNS failure / Pi already unbound.
+    // All non-fatal: the user clicked Disconnect, the Windows side is
+    // already torn down, and a stale Pi binding self-heals on the next
+    // Connect (which kicks off a fresh bind cycle).
+  }
+}
+
 export async function usbAttach(host: string, busId: string): Promise<number> {
   assertHost(host);
   assertBusId(busId);
@@ -324,18 +442,33 @@ export async function usbAttach(host: string, busId: string): Promise<number> {
 export async function usbDetach(port: number): Promise<void> {
   assertPort(port);
   ensureUsbipAvailable();
+  // Resolve host+busId BEFORE the local detach so we can mirror the unbind
+  // on the Pi side. Once `usbip detach -p <port>` runs the VHCI port is
+  // gone and the live snapshot won't carry it any more.
+  let pi: { host: string; busId: string } | null = null;
   try {
-    if (process.platform === "win32") return await detachWindows(port);
-    return await detachLinux(port);
+    const live = await usbList();
+    const match = live.find((d) => d.port === port);
+    if (match) pi = { host: match.host, busId: match.busId };
+  } catch {
+    // Best-effort: lookup failure shouldn't block the local detach.
+  }
+  try {
+    if (process.platform === "win32") await detachWindows(port);
+    else await detachLinux(port);
   } catch (err) {
     const msg = err instanceof Error ? err.message.toLowerCase() : String(err);
     // Same idempotency principle: if the port wasn't attached, treat
     // detach as a no-op rather than surfacing an error.
     if (msg.includes("not exist") || msg.includes("not attached") || msg.includes("invalid port")) {
-      return;
+      // fall through to the Pi unbind anyway — the operator's intent was
+      // "release this device", and a stale Pi binding is the exact
+      // condition we want to clear.
+    } else {
+      throw err;
     }
-    throw err;
   }
+  if (pi) await unbindOnPi(pi.host, pi.busId);
 }
 
 export async function usbList(): Promise<AttachedDevice[]> {
@@ -360,7 +493,16 @@ export async function usbDetachByBusId(busId: string): Promise<void> {
   ensureUsbipAvailable();
   const attachments = await usbList();
   const match = attachments.find((d) => d.busId === busId);
-  if (!match) return;
+  if (!match) {
+    // No local attachment — the renderer's request still expresses intent
+    // to release the device. The Pi may still have it bound from a past
+    // session that crashed before detach, so issue the unbind anyway.
+    // We don't know the host here, so this branch is a no-op; the next
+    // Connect's bindOnPi cycle will clear stale state instead.
+    return;
+  }
+  // usbDetach handles the symmetric unbindOnPi call internally; no need to
+  // duplicate it here.
   await usbDetach(match.port);
 }
 
