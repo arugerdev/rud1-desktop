@@ -987,6 +987,43 @@ contextBridge.exposeInMainWorld("electronAPI", {
           }
         | { ok: false; error: string }
       >,
+
+    /**
+     * Read the persisted preferences blob (theme override + per-category
+     * notification toggles). The Settings window calls this on mount and
+     * after every toggle to mirror the canonical post-merge shape.
+     */
+    getPreferences: () =>
+      ipcRenderer.invoke("app:getPreferences") as Promise<
+        | {
+            ok: true;
+            result: {
+              theme: "system" | "light" | "dark";
+              notifications: { firstBoot: boolean; vpn: boolean; usb: boolean };
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    /**
+     * Patch the persisted preferences. Fields omitted from the patch are
+     * preserved; the response carries the post-merge state so the renderer
+     * can render the canonical shape rather than its optimistic prediction.
+     */
+    setPreferences: (patch: {
+      theme?: "system" | "light" | "dark";
+      notifications?: Partial<{ firstBoot: boolean; vpn: boolean; usb: boolean }>;
+    }) =>
+      ipcRenderer.invoke("app:setPreferences", patch) as Promise<
+        | {
+            ok: true;
+            result: {
+              theme: "system" | "light" | "dark";
+              notifications: { firstBoot: boolean; vpn: boolean; usb: boolean };
+            };
+          }
+        | { ok: false; error: string }
+      >,
   },
 
   setup: {

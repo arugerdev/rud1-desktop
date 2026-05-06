@@ -44,6 +44,11 @@
 
 import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
 import { getAutoStart, setAutoStart } from "./auto-start-manager";
+import {
+  getPreferences,
+  setPreferences,
+  type PreferencesPatch,
+} from "./preferences-manager";
 import { vpnConnect, vpnDisconnect, vpnStatus, inspectConfig, formatUptimeMs } from "./vpn-manager";
 import {
   usbAttach,
@@ -1214,6 +1219,50 @@ export function registerIpcHandlers(opts: {
     try {
       const state = await setAutoStart(enabled);
       return { ok: true, result: state };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  // Persisted user preferences (theme + per-category notification
+  // toggles). The Settings window reads on mount and writes on every
+  // toggle. Validation is shape-only here; preferences-manager re-
+  // validates and falls back to safe defaults so a malformed patch
+  // can't corrupt the cache.
+  ipcMain.handle("app:getPreferences", (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    return { ok: true, result: getPreferences() };
+  });
+
+  ipcMain.handle("app:setPreferences", async (event, rawPatch: unknown) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    if (!rawPatch || typeof rawPatch !== "object") {
+      return { ok: false, error: "patch must be an object" };
+    }
+    const patch = rawPatch as Record<string, unknown>;
+    const cleaned: PreferencesPatch = {};
+    if (
+      patch.theme === "system" ||
+      patch.theme === "light" ||
+      patch.theme === "dark"
+    ) {
+      cleaned.theme = patch.theme;
+    }
+    const rawN = patch.notifications;
+    if (rawN && typeof rawN === "object") {
+      const n = rawN as Record<string, unknown>;
+      const partial: PreferencesPatch["notifications"] = {};
+      if (typeof n.firstBoot === "boolean") partial.firstBoot = n.firstBoot;
+      if (typeof n.vpn === "boolean") partial.vpn = n.vpn;
+      if (typeof n.usb === "boolean") partial.usb = n.usb;
+      if (Object.keys(partial).length > 0) cleaned.notifications = partial;
+    }
+    try {
+      const result = await setPreferences(cleaned);
+      return { ok: true, result };
     } catch (err) {
       return {
         ok: false,

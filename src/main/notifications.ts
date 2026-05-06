@@ -11,6 +11,11 @@
 
 import { Notification } from "electron";
 
+import {
+  isNotificationEnabled,
+  type NotificationToggles,
+} from "./preferences-manager";
+
 const SUPPORTED = Notification.isSupported();
 
 const MAX_TITLE = 80;
@@ -21,8 +26,16 @@ function clamp(s: string, max: number): string {
   return s.slice(0, max - 1) + "…";
 }
 
-function show(title: string, body: string, opts?: { silent?: boolean }) {
+function show(
+  title: string,
+  body: string,
+  opts?: { silent?: boolean; category?: keyof NotificationToggles },
+) {
   if (!SUPPORTED) return;
+  // Per-category mute. The category is an optional hint so legacy callers
+  // that don't pass one keep firing — only category-tagged toasts can be
+  // silenced from the Settings UI.
+  if (opts?.category && !isNotificationEnabled(opts.category)) return;
   try {
     const n = new Notification({
       title: clamp(title, MAX_TITLE),
@@ -47,6 +60,7 @@ export function notifyVpnConnected(deviceName?: string) {
   show(
     "VPN Connected",
     deviceName ? `Tunnel up to ${deviceName}.` : "Tunnel is up.",
+    { category: "vpn" },
   );
 }
 
@@ -66,6 +80,7 @@ export function notifyVpnCgnatWarning(deviceName?: string) {
     deviceName
       ? `${deviceName} sits behind carrier-grade NAT — handshake is unlikely to complete.`
       : "Device sits behind carrier-grade NAT — handshake is unlikely to complete.",
+    { category: "vpn" },
   );
 }
 
@@ -84,7 +99,7 @@ export function notifyVpnDisconnected(
   show(
     "VPN Disconnected",
     `${target}${suffix}.`,
-    { silent: true },
+    { silent: true, category: "vpn" },
   );
 }
 
@@ -92,7 +107,7 @@ export function notifyVpnDisconnected(
  *  successful state transition. Kept distinct so the UX can pick a
  *  louder presentation later (icon, action button to open logs). */
 export function notifyVpnError(message: string) {
-  show("VPN Error", message);
+  show("VPN Error", message, { category: "vpn" });
 }
 
 // ─── USB ────────────────────────────────────────────────────────────────────
@@ -107,7 +122,9 @@ export function notifyVpnError(message: string) {
  */
 export function notifyUsbAttached(label: string | null, busId: string) {
   const subject = label && label.trim() ? label.trim() : `USB ${busId}`;
-  show("USB Attached", `${subject} is now mounted on this machine.`);
+  show("USB Attached", `${subject} is now mounted on this machine.`, {
+    category: "usb",
+  });
 }
 
 /**
@@ -117,7 +134,10 @@ export function notifyUsbAttached(label: string | null, busId: string) {
  */
 export function notifyUsbDetached(label: string | null, busId: string) {
   const subject = label && label.trim() ? label.trim() : `USB ${busId}`;
-  show("USB Detached", `${subject} was unmounted.`, { silent: true });
+  show("USB Detached", `${subject} was unmounted.`, {
+    silent: true,
+    category: "usb",
+  });
 }
 
 /** True when the platform supports notifications and the constructor

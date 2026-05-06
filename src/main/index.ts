@@ -63,6 +63,12 @@ import {
   buildSettingsWindowHtmlWithRuntimeVersion,
 } from "./settings-window-html";
 import {
+  PREFERENCES_FILENAME,
+  getPreferences,
+  isNotificationEnabled,
+  loadPreferences,
+} from "./preferences-manager";
+import {
   isAutoUpdateEnabled,
   isRolloutForceEnabled,
   isSigStrictEnabled,
@@ -847,7 +853,10 @@ function showSettingsWindow(): void {
   // and update-available) so a future call site can't forget the
   // override on any one of them.
   settingsWindow.loadURL(
-    buildSettingsWindowHtmlWithRuntimeVersion(app.getVersion()),
+    buildSettingsWindowHtmlWithRuntimeVersion(
+      app.getVersion(),
+      getPreferences().theme,
+    ),
   );
   settingsWindow.on("closed", () => {
     unmarkWebContentsTrusted(trustedId);
@@ -870,6 +879,9 @@ function showSettingsWindow(): void {
 // graceful degradation, not an error.
 function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
   if (!Notification.isSupported()) return;
+  // Per-category mute. The lifecycle still drives the tray badge + dedupe
+  // file regardless; only the OS toast is suppressed.
+  if (!isNotificationEnabled("firstBoot")) return;
   const note = new Notification({
     title: "rud1 device ready to configure",
     body: `A first-boot device is on the LAN at ${probe.host}. Click to open the setup wizard.`,
@@ -923,6 +935,11 @@ app.whenReady().then(() => {
   // tick after launch may re-notify a host we already knew about, which is
   // strictly better than blocking startup on disk I/O.
   dedupeFilepath = path.join(app.getPath("userData"), DEDUPE_FILENAME);
+  // Load persisted user preferences (theme + per-category notification
+  // toggles) before notifications start firing. The Settings window
+  // reads/writes through this same module via IPC.
+  const preferencesPath = path.join(app.getPath("userData"), PREFERENCES_FILENAME);
+  void loadPreferences(preferencesPath);
   void loadNotifiedHosts(dedupeFilepath, new Date()).then((loaded) => {
     notifiedHosts = loaded;
     // Refresh the tray menu so the "First-boot notifications (N)" badge

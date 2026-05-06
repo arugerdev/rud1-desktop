@@ -52,7 +52,10 @@
  * version override is wired in by name rather than by passing
  * `app.getVersion()` positionally.
  */
-export function buildSettingsWindowHtml(currentVersion: string): string {
+export function buildSettingsWindowHtml(
+  currentVersion: string,
+  currentTheme: "system" | "light" | "dark" = "system",
+): string {
   // CSP mirrors the dedupe inspector — deny everything by default,
   // allow inline scripts/styles only (the bridge runs in the isolated
   // preload context unaffected by document CSP). No connect-src — the
@@ -63,8 +66,16 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
   // so the renderer can't read it off `state`). Mirrors the iter-43
   // helper contract in version-check-manager.ts byte-for-byte.
   const currentVersionLiteral = JSON.stringify(currentVersion);
+  // Initial theme attribute — "system" omits the attribute so the OS
+  // `prefers-color-scheme` query drives the theme. "light"/"dark" pin
+  // the rendered theme regardless of OS appearance.
+  const themeAttr =
+    currentTheme === "light" || currentTheme === "dark"
+      ? ` data-theme="${currentTheme}"`
+      : "";
+  const initialThemeLiteral = JSON.stringify(currentTheme);
   const html = `<!doctype html>
-<html lang="en">
+<html lang="en"${themeAttr}>
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
@@ -116,8 +127,17 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
     --mesh-4: rgba(255, 226, 197, 0.45);
   }
 
+  /*
+   * Dark theme — applied when EITHER:
+   *   - the OS is in dark mode AND the user hasn't pinned light
+   *     (prefers-color-scheme: dark + :root:not([data-theme="light"]))
+   *   - the user pinned the dark override (:root[data-theme="dark"])
+   * The vars duplicate by selector because CSS can't combine an at-rule
+   * with a regular selector in one block. The light vars on :root
+   * above stay the default for "system" + "light" + an OS in light mode.
+   */
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --bg: #0a0e17;
       --fg: #e6eaf2;
       --muted-fg: #93a0b8;
@@ -153,6 +173,41 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
       --mesh-3: rgba(40, 110, 95, 0.32);
       --mesh-4: rgba(130, 80, 50, 0.32);
     }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0e17;
+    --fg: #e6eaf2;
+    --muted-fg: #93a0b8;
+    --surface: rgba(28, 36, 50, 0.55);
+    --surface-strong: rgba(28, 36, 50, 0.78);
+    --edge: rgba(180, 200, 230, 0.12);
+    --border: rgba(120, 140, 175, 0.22);
+    --shadow: rgba(0, 0, 0, 0.55);
+
+    --primary: #92c8ff;
+    --primary-soft: rgba(110, 172, 230, 0.32);
+    --primary-fg: #0e1a2a;
+
+    --success-bg: rgba(143, 214, 176, 0.22);
+    --success-border: rgba(143, 214, 176, 0.45);
+    --success-fg: #b9ecd0;
+
+    --warning-bg: rgba(245, 185, 98, 0.22);
+    --warning-border: rgba(245, 185, 98, 0.45);
+    --warning-fg: #f4d59c;
+
+    --danger-bg: rgba(241, 144, 138, 0.22);
+    --danger-border: rgba(241, 144, 138, 0.45);
+    --danger-fg: #f3bcb7;
+
+    --hash-fg: #f4d59c;
+    --link: #92c8ff;
+    --link-hover: #c8e2ff;
+
+    --mesh-1: rgba(40, 80, 130, 0.4);
+    --mesh-2: rgba(80, 60, 130, 0.36);
+    --mesh-3: rgba(40, 110, 95, 0.32);
+    --mesh-4: rgba(130, 80, 50, 0.32);
   }
 
   * { box-sizing: border-box; }
@@ -279,6 +334,45 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--muted-fg); }
 
+  /* Theme picker — pastel segmented control (Liquid Glass). */
+  .theme-picker {
+    display: inline-flex;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 3px;
+    gap: 2px;
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+  }
+  .theme-picker label {
+    cursor: pointer;
+    padding: 6px 12px;
+    border-radius: 9px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted-fg);
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .theme-picker input { display: none; }
+  .theme-picker label:hover { color: var(--fg); }
+  .theme-picker input:checked + span {
+    color: var(--primary-fg);
+  }
+  .theme-picker label:has(input:checked) {
+    background: var(--primary);
+    color: var(--primary-fg);
+    box-shadow: 0 2px 8px rgba(109, 179, 245, 0.28);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .theme-picker label:has(input:checked) {
+      color: var(--primary-fg);
+    }
+  }
+  :root[data-theme="dark"] .theme-picker label:has(input:checked) {
+    color: var(--primary-fg);
+  }
+
   /* Pastel-pill toggle (iOS-style) used by the Auto-start preference. */
   .pref-row {
     display: flex;
@@ -350,6 +444,51 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
 
   <h2>Updates</h2>
   <div id="updates"><p class="muted">Loading…</p></div>
+
+  <h2>Appearance</h2>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">Theme</div>
+      <div class="hint">Pick how the Settings panel looks. Other surfaces follow the cloud dashboard.</div>
+    </div>
+    <div class="theme-picker" role="radiogroup" aria-label="Theme">
+      <label><input type="radio" name="theme-pick" value="system" /><span>System</span></label>
+      <label><input type="radio" name="theme-pick" value="light" /><span>Light</span></label>
+      <label><input type="radio" name="theme-pick" value="dark" /><span>Dark</span></label>
+    </div>
+  </div>
+
+  <h2>Notifications</h2>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">First-boot devices</div>
+      <div class="hint">Toast when a freshly-flashed rud1 appears on the LAN.</div>
+    </div>
+    <label class="toggle" aria-label="Toggle first-boot notifications">
+      <input type="checkbox" id="notif-firstBoot" />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">VPN events</div>
+      <div class="hint">Tunnel connect / disconnect / CGNAT-warning toasts.</div>
+    </div>
+    <label class="toggle" aria-label="Toggle VPN notifications">
+      <input type="checkbox" id="notif-vpn" />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">USB events</div>
+      <div class="hint">Device attach / detach toasts after a USB/IP session change.</div>
+    </div>
+    <label class="toggle" aria-label="Toggle USB notifications">
+      <input type="checkbox" id="notif-usb" />
+      <span class="slider"></span>
+    </label>
+  </div>
 
   <h2>Startup</h2>
   <div id="auto-start" class="pref-row">
@@ -959,6 +1098,84 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
   } else {
     autoStartHint.textContent = 'Auto-start API unavailable in this build.';
   }
+
+  // Persisted preferences (theme + per-category notification toggles).
+  // INITIAL_THEME is baked at HTML build time so the very first paint
+  // matches the user's pinned theme without a flash; the JS below
+  // reconciles with the IPC-fetched canonical state and wires the
+  // controls.
+  var INITIAL_THEME = ${initialThemeLiteral};
+  function applyThemeToDom(theme) {
+    if (theme === 'light' || theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', theme);
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+  }
+  function syncThemePicker(theme) {
+    var radios = document.querySelectorAll('input[name="theme-pick"]');
+    for (var i = 0; i < radios.length; i++) {
+      radios[i].checked = radios[i].value === theme;
+    }
+  }
+  function syncNotifToggles(notifs) {
+    document.getElementById('notif-firstBoot').checked = !!notifs.firstBoot;
+    document.getElementById('notif-vpn').checked = !!notifs.vpn;
+    document.getElementById('notif-usb').checked = !!notifs.usb;
+  }
+  syncThemePicker(INITIAL_THEME);
+
+  if (window.electronAPI && window.electronAPI.app && typeof window.electronAPI.app.getPreferences === 'function') {
+    window.electronAPI.app.getPreferences().then(function(res) {
+      if (!res || !res.ok) return;
+      applyThemeToDom(res.result.theme);
+      syncThemePicker(res.result.theme);
+      syncNotifToggles(res.result.notifications);
+    });
+
+    var themeRadios = document.querySelectorAll('input[name="theme-pick"]');
+    for (var i = 0; i < themeRadios.length; i++) {
+      themeRadios[i].addEventListener('change', function(e) {
+        var nextTheme = e.target.value;
+        applyThemeToDom(nextTheme);
+        window.electronAPI.app.setPreferences({ theme: nextTheme }).then(function(res) {
+          if (res && res.ok) {
+            // Server-confirmed value wins — usually identical to the
+            // optimistic flip, but a malformed value would snap back.
+            applyThemeToDom(res.result.theme);
+            syncThemePicker(res.result.theme);
+            toast('Theme: ' + res.result.theme);
+          } else {
+            toast('Could not save theme: ' + (res && res.error ? res.error : 'unknown'));
+          }
+        });
+      });
+    }
+
+    function bindNotifToggle(id, key) {
+      var el = document.getElementById(id);
+      el.addEventListener('change', function() {
+        var desired = !!el.checked;
+        var patch = { notifications: {} };
+        patch.notifications[key] = desired;
+        el.disabled = true;
+        window.electronAPI.app.setPreferences(patch).then(function(res) {
+          el.disabled = false;
+          if (res && res.ok) {
+            syncNotifToggles(res.result.notifications);
+            toast(key + ' notifications: ' + (res.result.notifications[key] ? 'on' : 'off'));
+          } else {
+            // Revert optimistic flip.
+            el.checked = !desired;
+            toast('Could not save: ' + (res && res.error ? res.error : 'unknown'));
+          }
+        });
+      });
+    }
+    bindNotifToggle('notif-firstBoot', 'firstBoot');
+    bindNotifToggle('notif-vpn', 'vpn');
+    bindNotifToggle('notif-usb', 'usb');
+  }
 </script>
 </body>
 </html>`;
@@ -1010,6 +1227,7 @@ export function buildSettingsWindowHtml(currentVersion: string): string {
  */
 export function buildSettingsWindowHtmlWithRuntimeVersion(
   runtimeAppVersion: string,
+  initialTheme: "system" | "light" | "dark" = "system",
 ): string {
-  return buildSettingsWindowHtml(runtimeAppVersion);
+  return buildSettingsWindowHtml(runtimeAppVersion, initialTheme);
 }
