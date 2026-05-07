@@ -156,6 +156,29 @@ export interface VersionCheckAccessor {
   recheck: () => void;
 }
 
+/**
+ * Iter 7 — accessor for the persisted USB/IP attach state used by the
+ * auto-reattach flow. The handler hooks into `usb:attach` /
+ * `usb:detach` to keep the file in sync, and into `vpn:connect` to
+ * trigger a sweep that re-attaches every persisted session after the
+ * tunnel comes back up.
+ *
+ * `onVpnConnected` is fire-and-forget from the handler's perspective:
+ * the VPN connect resolver doesn't wait on the attach sweep so a
+ * single misbehaving USB doesn't block the connect notification.
+ */
+export interface UsbSessionStateAccessor {
+  recordAttach: (entry: {
+    host: string;
+    busId: string;
+    label?: string;
+    port?: number;
+  }) => Promise<void>;
+  recordDetachByPort: (port: number) => Promise<void>;
+  recordDetachByBusId: (busId: string) => Promise<void>;
+  onVpnConnected: () => Promise<void>;
+}
+
 // Allowlist of origins the renderer frame can present and still be trusted
 // for IPC. Comma-separated `RUD1_APP_ORIGIN` lets ops pin a single origin
 // per environment (staging, dev, on-prem) without code changes.
@@ -373,6 +396,7 @@ export const __test = {
 export function registerIpcHandlers(opts: {
   firstBootDedupe?: FirstBootDedupeAccessor;
   versionCheck?: VersionCheckAccessor;
+  usbSessionState?: UsbSessionStateAccessor;
 } = {}): void {
   // Per-port label cache for detach notifications. The renderer already
   // knows the human-readable name when it calls attach (vendor + product
@@ -411,6 +435,12 @@ export function registerIpcHandlers(opts: {
       } else {
         notifyVpnConnected();
       }
+      // Auto-reattach persisted USB/IP sessions. Fire-and-forget so a
+      // hung kernel module on one device doesn't block the connect
+      // resolver — the sweep logs per-device errors and moves on.
+      if (opts.usbSessionState) {
+        void opts.usbSessionState.onVpnConnected().catch(() => undefined);
+      }
       return {
         ok: true,
         endpoint: preflight.endpoint,
@@ -447,6 +477,11 @@ export function registerIpcHandlers(opts: {
       // entry doesn't surface in a future detach notification.
       for (const dev of sweep.detached) {
         usbLabelByPort.delete(dev.port);
+        if (opts.usbSessionState) {
+          await opts.usbSessionState
+            .recordDetachByPort(dev.port)
+            .catch(() => undefined);
+        }
       }
       usbCleanup = {
         detached: sweep.detached.length,
@@ -522,6 +557,11 @@ export function registerIpcHandlers(opts: {
         const port = await usbAttach(host, busId);
         rememberUsbLabel(port, label);
         notifyUsbAttached(label ?? null, busId);
+        if (opts.usbSessionState) {
+          await opts.usbSessionState
+            .recordAttach({ host, busId, label, port })
+            .catch(() => undefined);
+        }
         return { ok: true, port };
       } catch (err) {
         // UsbipMissingError carries a structured `installerPath` so the
@@ -550,6 +590,9 @@ export function registerIpcHandlers(opts: {
       // pass an empty string and let the helper render "USB detached"
       // when the cached label is also missing.
       notifyUsbDetached(label ?? null, "");
+      if (opts.usbSessionState) {
+        await opts.usbSessionState.recordDetachByPort(port).catch(() => undefined);
+      }
       return { ok: true };
     } catch (err) {
       if (err instanceof UsbipMissingError) {
@@ -583,6 +626,9 @@ export function registerIpcHandlers(opts: {
       // notification's label string. Worst case: that notification
       // reads "USB device detached" instead of "Arduino Uno detached".
       notifyUsbDetached(null, busId);
+      if (opts.usbSessionState) {
+        await opts.usbSessionState.recordDetachByBusId(busId).catch(() => undefined);
+      }
       return { ok: true };
     } catch (err) {
       if (err instanceof UsbipMissingError) {

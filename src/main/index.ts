@@ -70,6 +70,16 @@ import {
 } from "./preferences-manager";
 import { NotificationStreamManager } from "./notification-stream-manager";
 import {
+  USB_SESSION_FILENAME,
+  addSession as addUsbSessionEntry,
+  loadSessions as loadUsbSessions,
+  removeSessionByBusId as removeUsbSessionByBusId,
+  removeSessionByPort as removeUsbSessionByPort,
+  saveSessions as saveUsbSessions,
+  type AttachedUsbSession,
+} from "./usb-session-state";
+import { usbAttach } from "./usb-manager";
+import {
   isAutoUpdateEnabled,
   isRolloutForceEnabled,
   isSigStrictEnabled,
@@ -117,6 +127,12 @@ let firmwareProbeTimer: NodeJS.Timeout | null = null;
 // falling edges only.
 let notifiedHosts: NotifiedHost[] = [];
 let dedupeFilepath: string | null = null;
+// Persisted USB/IP attach state (iter 7) — driven by usb:attach /
+// usb:detach IPC handlers. Replayed on every successful vpn:connect
+// so a transient tunnel drop doesn't force the user to re-attach
+// every device by hand. Atomic disk writes go through saveUsbSessions.
+let usbSessions: AttachedUsbSession[] = [];
+let usbSessionFilepath: string | null = null;
 // Iter 28 — the most-recently-applied tray attention count. Used by
 // `setTrayAttention` to compute a no-op-when-unchanged diff via
 // `computeTrayState`. Resets to 0 at startup; the first probe transitions
@@ -539,6 +555,42 @@ function broadcastDedupeUpdate(): void {
 }
 
 /**
+ * Iter 7 — replay every persisted USB/IP attach after a successful
+ * VPN connect. Each attach runs in series so the kernel doesn't see
+ * a burst of `usbip attach` calls; per-device failures are logged
+ * and the rest of the sweep continues. Successes refresh the row's
+ * port (the kernel re-numbers freely on reattach).
+ */
+async function reattachStoredUsbSessions(): Promise<void> {
+  if (usbSessions.length === 0) return;
+  const snapshot = [...usbSessions];
+  for (const session of snapshot) {
+    try {
+      const port = await usbAttach(session.host, session.busId);
+      // Refresh the port + attachedAt so the file reflects the live
+      // state after the sweep. The dedupe via (host, busId) keeps the
+      // row count stable.
+      usbSessions = addUsbSessionEntry(usbSessions, {
+        host: session.host,
+        busId: session.busId,
+        label: session.label,
+        port,
+        attachedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn(
+        "[usb-session-state] reattach failed:",
+        session.busId,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+  if (usbSessionFilepath) {
+    void saveUsbSessions(usbSessionFilepath, usbSessions);
+  }
+}
+
+/**
  * Iter 28 — small modal window listing notified hosts. Built as a plain
  * `data:` URL HTML page rather than a separate file under `resources/` to
  * avoid a build-step change for one trivial UI surface; the document is
@@ -927,6 +979,41 @@ app.whenReady().then(() => {
         void versionCheckManager?.checkOnce();
       },
     },
+    // Iter 7 — USB/IP auto-reattach. The IPC handlers call into these
+    // closures so the in-memory `usbSessions` array (mutated only here
+    // in main) stays the source of truth, and disk writes are
+    // serialised through saveUsbSessions.
+    usbSessionState: {
+      recordAttach: async (entry) => {
+        usbSessions = addUsbSessionEntry(usbSessions, {
+          host: entry.host,
+          busId: entry.busId,
+          label: entry.label,
+          port: entry.port,
+          attachedAt: new Date().toISOString(),
+        });
+        if (usbSessionFilepath) {
+          await saveUsbSessions(usbSessionFilepath, usbSessions);
+        }
+      },
+      recordDetachByPort: async (port) => {
+        const before = usbSessions.length;
+        usbSessions = removeUsbSessionByPort(usbSessions, port);
+        if (usbSessions.length !== before && usbSessionFilepath) {
+          await saveUsbSessions(usbSessionFilepath, usbSessions);
+        }
+      },
+      recordDetachByBusId: async (busId) => {
+        const before = usbSessions.length;
+        usbSessions = removeUsbSessionByBusId(usbSessions, busId);
+        if (usbSessions.length !== before && usbSessionFilepath) {
+          await saveUsbSessions(usbSessionFilepath, usbSessions);
+        }
+      },
+      onVpnConnected: async () => {
+        await reattachStoredUsbSessions();
+      },
+    },
   });
   mainWindow = createWindow();
   createTray();
@@ -959,11 +1046,18 @@ app.whenReady().then(() => {
   // tick after launch may re-notify a host we already knew about, which is
   // strictly better than blocking startup on disk I/O.
   dedupeFilepath = path.join(app.getPath("userData"), DEDUPE_FILENAME);
+  usbSessionFilepath = path.join(app.getPath("userData"), USB_SESSION_FILENAME);
   // Load persisted user preferences (theme + per-category notification
   // toggles) before notifications start firing. The Settings window
   // reads/writes through this same module via IPC.
   const preferencesPath = path.join(app.getPath("userData"), PREFERENCES_FILENAME);
   void loadPreferences(preferencesPath);
+  // Hydrate the persisted USB/IP attach state. Best-effort: a parse
+  // failure leaves `usbSessions` empty, the auto-reattach feature
+  // simply no-ops until the user attaches something fresh.
+  void loadUsbSessions(usbSessionFilepath, new Date()).then((loaded) => {
+    usbSessions = loaded;
+  });
   void loadNotifiedHosts(dedupeFilepath, new Date()).then((loaded) => {
     notifiedHosts = loaded;
     // Refresh the tray menu so the "First-boot notifications (N)" badge
