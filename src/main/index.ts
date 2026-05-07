@@ -68,6 +68,7 @@ import {
   isNotificationEnabled,
   loadPreferences,
 } from "./preferences-manager";
+import { NotificationStreamManager } from "./notification-stream-manager";
 import {
   isAutoUpdateEnabled,
   isRolloutForceEnabled,
@@ -100,6 +101,7 @@ const FIRMWARE_PROBE_INTERVAL_MS = 60_000;
 
 let mainWindow: BrowserWindow | null = null;
 let dedupeWindow: BrowserWindow | null = null;
+let notificationStream: NotificationStreamManager | null = null;
 // Iter 37 — singleton Settings/About inspector window. Opened from the
 // tray's "Settings & About" entry; reused on subsequent clicks. The
 // renderer subscribes to `versionCheck:update` events broadcast from
@@ -929,6 +931,28 @@ app.whenReady().then(() => {
   mainWindow = createWindow();
   createTray();
 
+  // Cloud→Desktop SSE stream for native OS notifications. The
+  // dashboard cookie session is shared via Electron's default session,
+  // so net.fetch carries auth automatically — no extra wiring beyond
+  // resolving the origin from APP_URL.
+  try {
+    const origin = new URL(APP_URL).origin;
+    notificationStream = new NotificationStreamManager({
+      baseUrl: origin,
+      onNotificationClick: (url: string) => {
+        if (mainWindow) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+          void mainWindow.webContents.loadURL(url);
+        }
+      },
+    });
+    notificationStream.start();
+  } catch {
+    // Malformed APP_URL — skip the stream rather than crash the boot.
+  }
+
   // Resolve userData and prime the persisted first-boot dedupe set BEFORE
   // the probe loop fires. If the load is slow (cold disk, network drive)
   // the loop still starts on time — a cache miss just means the very first
@@ -1030,6 +1054,7 @@ app.on("before-quit", () => {
     firmwareProbeTimer = null;
   }
   versionCheckManager?.stop();
+  notificationStream?.stop();
   tray?.destroy();
 });
 
