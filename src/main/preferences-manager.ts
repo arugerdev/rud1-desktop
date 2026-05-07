@@ -37,6 +37,12 @@ export interface NotificationToggles {
 export interface Preferences {
   theme: ThemePreference;
   notifications: NotificationToggles;
+  /**
+   * Iter 8 — auto-reconnect when the WireGuard handshake goes stale
+   * (>3 min without traffic). Default true; the renderer can flip it
+   * off from Settings for users who prefer manual control.
+   */
+  vpnAutoReconnect: boolean;
 }
 
 export const PREFERENCES_FILENAME = "preferences.json";
@@ -45,6 +51,7 @@ const SCHEMA_VERSION = 1;
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",
   notifications: { firstBoot: true, vpn: true, usb: true },
+  vpnAutoReconnect: true,
 };
 
 interface PersistedFile {
@@ -60,6 +67,7 @@ function clonePreferences(p: Preferences): Preferences {
   return {
     theme: p.theme,
     notifications: { ...p.notifications },
+    vpnAutoReconnect: p.vpnAutoReconnect,
   };
 }
 
@@ -89,6 +97,10 @@ export function sanitizePreferences(parsed: unknown): Preferences {
       usb:
         typeof rawN.usb === "boolean" ? rawN.usb : DEFAULT_PREFERENCES.notifications.usb,
     },
+    vpnAutoReconnect:
+      typeof raw.vpnAutoReconnect === "boolean"
+        ? raw.vpnAutoReconnect
+        : DEFAULT_PREFERENCES.vpnAutoReconnect,
   };
 }
 
@@ -124,6 +136,7 @@ async function persist(targetPath: string, prefs: Preferences): Promise<void> {
 export interface PreferencesPatch {
   theme?: ThemePreference;
   notifications?: Partial<NotificationToggles>;
+  vpnAutoReconnect?: boolean;
 }
 
 /**
@@ -153,6 +166,10 @@ export async function setPreferences(patch: PreferencesPatch): Promise<Preferenc
   const next: Preferences = {
     theme: isThemePreference(patch.theme) ? patch.theme : current.theme,
     notifications: nextNotifications,
+    vpnAutoReconnect:
+      typeof patch.vpnAutoReconnect === "boolean"
+        ? patch.vpnAutoReconnect
+        : current.vpnAutoReconnect,
   };
   cached = next;
   if (activePath) {

@@ -311,14 +311,33 @@ async function statusUnix(): Promise<{ connected: boolean; ip?: string }> {
 let lastConnectedAt: number | null = null;
 let lastDisconnectedAt: number | null = null;
 
+// Iter 8 (auto-reconnect): the most recent wgConfig string the renderer
+// passed to vpnConnect. Held in memory ONLY — never persisted, since
+// it embeds the user's WireGuard private key. Cleared on disconnect so
+// a stale config can't be reused after the user explicitly tore down.
+let lastWgConfig: string | null = null;
+
 /**
  * Test-only helper: reset the lifecycle freshness signals back to their
- * initial nulls. The module's only mutable state is two timestamps; vitest
- * `beforeEach`s use this to avoid one test bleeding state into the next.
+ * initial nulls. The module's only mutable state is two timestamps + the
+ * cached config; vitest `beforeEach`s use this to avoid one test bleeding
+ * state into the next.
  */
 export function __resetVpnLifecycleStateForTests(): void {
   lastConnectedAt = null;
   lastDisconnectedAt = null;
+  lastWgConfig = null;
+}
+
+/**
+ * Iter 8: returns the most recent wgConfig string the renderer issued
+ * to vpnConnect, or null when no connect has succeeded this session.
+ * Used by the auto-reconnect monitor to re-install the tunnel after a
+ * stale-handshake detection without bouncing the user through the
+ * cloud peer-registration flow again.
+ */
+export function getLastWgConfig(): string | null {
+  return lastWgConfig;
 }
 
 export async function vpnConnect(wgConfig: string): Promise<void> {
@@ -363,6 +382,11 @@ export async function vpnConnect(wgConfig: string): Promise<void> {
   // paths must not move the freshness signal — the operator should see
   // "no successful install yet" rather than a misleading "synced 12s ago".
   lastConnectedAt = Date.now();
+  // Cache the config in memory so the auto-reconnect monitor can
+  // re-install the tunnel without bouncing through the cloud again.
+  // Cleared by vpnDisconnect so an explicit teardown leaves no
+  // resurrectable state behind.
+  lastWgConfig = wgConfig;
 }
 
 /**
@@ -393,7 +417,29 @@ export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
     await disconnectUnix();
   }
   lastDisconnectedAt = Date.now();
+  // Discard the cached config: the user explicitly tore down, so the
+  // auto-reconnect monitor must NOT bring the tunnel back without
+  // another connect call.
+  lastWgConfig = null;
   return { uptimeMs };
+}
+
+/**
+ * Iter 8: read the latest WireGuard handshake age via
+ * `wg show <iface> latest-handshakes`. Returns the raw stdout so the
+ * pure parser in `vpn-health-monitor.ts` can classify it. Throws on
+ * any platform error so the monitor's tick can swallow and retry.
+ */
+export async function fetchHandshakeStdout(): Promise<string> {
+  ensureWireguardAvailable();
+  assertTunnelName(TUNNEL_NAME);
+  const wg = wgPath();
+  const { stdout } = await execFileAsync(wg, [
+    "show",
+    TUNNEL_NAME,
+    "latest-handshakes",
+  ]);
+  return stdout;
 }
 
 /**

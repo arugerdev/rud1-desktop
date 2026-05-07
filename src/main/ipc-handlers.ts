@@ -49,7 +49,19 @@ import {
   setPreferences,
   type PreferencesPatch,
 } from "./preferences-manager";
-import { vpnConnect, vpnDisconnect, vpnStatus, inspectConfig, formatUptimeMs } from "./vpn-manager";
+import {
+  fetchHandshakeStdout,
+  getLastWgConfig,
+  vpnConnect,
+  vpnDisconnect,
+  vpnStatus,
+  inspectConfig,
+  formatUptimeMs,
+} from "./vpn-manager";
+import {
+  VpnHealthMonitor,
+  parseHandshakeSnapshot,
+} from "./vpn-health-monitor";
 import {
   usbAttach,
   usbDetach,
@@ -414,6 +426,45 @@ export function registerIpcHandlers(opts: {
     usbLabelByPort.set(port, label);
   }
 
+  // Iter 8 — auto-reconnect monitor. Polls `wg show … latest-handshakes`
+  // every 30 s after a successful connect; if the handshake age
+  // crosses the stale threshold (3 min) it tears down + re-installs
+  // the tunnel using the cached wgConfig in vpn-manager. The renderer
+  // controls the kill switch via the `vpnAutoReconnect` preference;
+  // the monitor reads it on every tick so a Settings flip takes
+  // immediate effect without restarting the loop.
+  const vpnHealthMonitor = new VpnHealthMonitor({
+    fetchSnapshot: async () => {
+      try {
+        const stdout = await fetchHandshakeStdout();
+        return parseHandshakeSnapshot(stdout, Date.now());
+      } catch {
+        // `wg show` failed (binary missing, tunnel torn down between
+        // ticks). Treat as no-tunnel so the FSM doesn't pretend
+        // the tunnel is stale and trigger a wasted reconnect.
+        return { kind: "no-tunnel" };
+      }
+    },
+    reconnect: async () => {
+      const cfg = getLastWgConfig();
+      if (!cfg) return;
+      try {
+        await vpnDisconnect();
+      } catch {
+        // Disconnect can fail if the service was already gone;
+        // continue to the connect attempt anyway.
+      }
+      await vpnConnect(cfg);
+    },
+    enabled: () => {
+      // Default: opted in. The renderer can flip the preference
+      // off via Settings; getPreferences().vpnAutoReconnect ===
+      // false short-circuits the loop.
+      const prefs = getPreferences();
+      return prefs.vpnAutoReconnect !== false;
+    },
+  });
+
   ipcMain.handle("vpn:connect", async (event, wgConfig: string) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
     // Pre-flight: parse the config and surface non-fatal warnings (CGNAT,
@@ -441,6 +492,9 @@ export function registerIpcHandlers(opts: {
       if (opts.usbSessionState) {
         void opts.usbSessionState.onVpnConnected().catch(() => undefined);
       }
+      // Iter 8 — kick off the auto-reconnect health monitor. Idempotent:
+      // start() is a no-op when the timer is already armed.
+      vpnHealthMonitor.start();
       return {
         ok: true,
         endpoint: preflight.endpoint,
@@ -506,6 +560,10 @@ export function registerIpcHandlers(opts: {
       // notification toast can render "Tunnel dropped after 2h 14m".
       // Preserves the prior `{ok:true}` shape — `uptimeMs` is additive.
       const result = await vpnDisconnect();
+      // Iter 8 — explicit user disconnect: stop the auto-reconnect
+      // monitor so it doesn't immediately pull the tunnel back up.
+      // Re-armed by the next vpn:connect.
+      vpnHealthMonitor.stop();
       notifyVpnDisconnected(undefined, formatUptimeMs(result.uptimeMs));
       return {
         ok: true,
@@ -1305,6 +1363,9 @@ export function registerIpcHandlers(opts: {
       if (typeof n.vpn === "boolean") partial.vpn = n.vpn;
       if (typeof n.usb === "boolean") partial.usb = n.usb;
       if (Object.keys(partial).length > 0) cleaned.notifications = partial;
+    }
+    if (typeof patch.vpnAutoReconnect === "boolean") {
+      cleaned.vpnAutoReconnect = patch.vpnAutoReconnect;
     }
     try {
       const result = await setPreferences(cleaned);
