@@ -840,18 +840,11 @@ function buildDedupeWindowHtml(): string {
   return "data:text/html;charset=utf-8," + encodeURIComponent(html);
 }
 
-// ─── Iter 37 — Settings/About panel ────────────────────────────────────────
-//
-// Surfaces the live `VersionCheckState` (in particular the iter-36
-// `update-blocked-by-min-bootstrap` verdict) in a small inspector window.
-// Reuses the iter-28 data:-URL + trustedWebContentsIds pattern so the
-// origin allowlist isn't weakened. The renderer is a dumb template that
-// reads the state on open, subscribes to push updates, and supports two
-// operations:
-//   • "Copy download URL" → IPC clipboard:writeText (avoids the
-//     navigator.clipboard permission grant for data: origins)
-//   • "What's new" link    → IPC shell:openExternal (allowlisted to
-//     http/https main-side)
+// Iter 37 — Settings/About inspector. Shows live VersionCheckState
+// (incl. iter-36 update-blocked verdicts) using the iter-28 data:-URL
+// + trustedWebContentsIds pattern. Two IPC ops: clipboard:writeText
+// (data: origins lack navigator.clipboard) and shell:openExternal
+// (http/https allowlist on main).
 
 function broadcastVersionCheckUpdate(state: VersionCheckState): void {
   if (!settingsWindow || settingsWindow.isDestroyed()) return;
@@ -893,19 +886,11 @@ function showSettingsWindow(): void {
   // process opened this window and controls its HTML byte-for-byte.
   const trustedId = settingsWindow.webContents.id;
   markWebContentsTrusted(trustedId);
-  // Iter 44 — thread app.getVersion() into the panel HTML so the
-  // renderer-side "Copy diagnostics" inline rebuild can populate
-  // `currentVersion` on the `error` envelope (the error state shape
-  // doesn't carry it). Captured at HTML build time as a JSON-encoded
-  // constant — same idea as `installId` below; safe to call here
-  // because `app.whenReady()` has already resolved by the time the
-  // tray opens this window.
-  // Iter 46 — go through the named-wrapper helper rather than the
-  // raw `buildSettingsWindowHtml`. The wrapper bakes `app.getVersion()`
-  // into all four diagnostic-blob surfaces (the inline APP_VERSION
-  // constant + the three renderer-side rebuilds for error, blocked,
-  // and update-available) so a future call site can't forget the
-  // override on any one of them.
+  // Iter 44+46 — go through the named-wrapper helper so app.getVersion()
+  // gets baked into all four diagnostic surfaces (inline APP_VERSION +
+  // the three renderer-side rebuilds for error/blocked/update-available);
+  // the raw buildSettingsWindowHtml lets a call site forget one. Safe
+  // here: app.whenReady() has resolved by the time the tray opens.
   settingsWindow.loadURL(
     buildSettingsWindowHtmlWithRuntimeVersion(
       app.getVersion(),
@@ -918,19 +903,12 @@ function showSettingsWindow(): void {
   });
 }
 
-// notifyFirstBootDevice fires a single OS notification when a first-boot
-// rud1 appears on the LAN. Clicking the notification opens the device's
-// setup URL in the system browser — same destination as the tray entry,
-// just discoverable without the operator hunting for the tray icon.
-//
-// Notification.isSupported() is false on:
-//   - Linux without notify-send / libnotify       (silent no-op)
-//   - Windows when toast notifications are off in OS settings
-//   - Production builds without an app User Model ID set on first run
-//
-// We swallow the support gap silently rather than logging — the tray menu
-// already surfaces the same affordance, so notification absence is a
-// graceful degradation, not an error.
+// notifyFirstBootDevice — single OS notification when a first-boot rud1
+// appears on LAN; click opens the setup URL (same destination as the
+// tray entry). Notification.isSupported() is false on Linux without
+// libnotify, Windows with toasts disabled, and prod builds missing an
+// AppUserModelID — we swallow silently because the tray surfaces the
+// same affordance (graceful degradation, not an error).
 function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
   if (!Notification.isSupported()) return;
   // Per-category mute. The lifecycle still drives the tray badge + dedupe
