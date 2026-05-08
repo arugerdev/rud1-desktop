@@ -106,10 +106,13 @@ describe("shouldReconnect FSM", () => {
   });
 
   it("does NOT reconnect within the cooldown window after a recent attempt", () => {
+    // PLC-7 hardening: default cooldown for the FIRST retry is 20 s
+    // (consecutiveFailures=0 → first ladder rung). 10 s ago is still
+    // inside that window.
     expect(
       shouldReconnect({
         ...baseInput,
-        lastReconnectAt: baseInput.now - 30_000, // 30 s ago
+        lastReconnectAt: baseInput.now - 10_000, // 10 s ago
         snapshot: { kind: "stale", handshakeAgeMs: 5 * 60_000 },
       }),
     ).toBe(false);
@@ -121,6 +124,31 @@ describe("shouldReconnect FSM", () => {
         ...baseInput,
         lastReconnectAt: baseInput.now - 120_000, // 2 min ago
         snapshot: { kind: "stale", handshakeAgeMs: 5 * 60_000 },
+      }),
+    ).toBe(true);
+  });
+
+  it("backoff stretches with consecutiveFailures: 5 attempts later, 60 s is still inside the window", () => {
+    // PLC-7: after 5 consecutive failed reconnects the cooldown is
+    // capped at 5 min. 60 s ago is therefore still inside the window
+    // even though it would clear the iter-8 default of 20 s.
+    expect(
+      shouldReconnect({
+        ...baseInput,
+        lastReconnectAt: baseInput.now - 60_000, // 1 min ago
+        consecutiveFailures: 5,
+        snapshot: { kind: "stale", handshakeAgeMs: 10 * 60_000 },
+      }),
+    ).toBe(false);
+  });
+
+  it("backoff respects the 5-min cap: 6 min after the last attempt fires regardless of failures", () => {
+    expect(
+      shouldReconnect({
+        ...baseInput,
+        lastReconnectAt: baseInput.now - 6 * 60_000, // 6 min ago
+        consecutiveFailures: 99, // saturated
+        snapshot: { kind: "stale", handshakeAgeMs: 10 * 60_000 },
       }),
     ).toBe(true);
   });

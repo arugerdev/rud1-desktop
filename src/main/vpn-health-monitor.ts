@@ -20,10 +20,55 @@
  * a real tunnel.
  */
 
-export const POLL_INTERVAL_MS = 30_000;
-export const STALE_THRESHOLD_MS = 3 * 60_000; // 3 min
-export const RECONNECT_COOLDOWN_MS = 60_000;
-export const RECONNECT_GRACE_MS = 60_000;
+// PLC-7 hardening: pre-PLC defaults were poll=30s / stale=3min / cool=60s
+// / grace=60s, giving a worst-case "first attempt" of 5.5 min between a
+// real loss and a recovery attempt. The new defaults bring that down
+// to ~95 s peak (poll=15s + stale=75s + cool=20s on first retry,
+// then exponential up to 5 min on persistent failures).
+//
+// Why these values:
+//   - POLL_INTERVAL_MS=15s: the kernel's wg handshake interval is 25s
+//     (PersistentKeepalive); polling at 15s means the snapshot is at
+//     most one keepalive cycle behind the kernel. Going under 10s
+//     just burns CPU on the laptop without seeing fresher data.
+//   - STALE_THRESHOLD_MS=75s: 3× keepalive. A real disconnect makes
+//     the device skip 2 keepalives in a row, this declares stale on
+//     the 3rd missed one.
+//   - RECONNECT_COOLDOWN_MS_INITIAL=20s: first retry is fast — most
+//     "stale" episodes are a transient ISP blip the next handshake
+//     fixes immediately. Starting with 20s lets the user recover
+//     before the human even notices.
+//   - RECONNECT_BACKOFF_MAX_MS=300_000: when something is genuinely
+//     broken (e.g. Pi is offline for 10 min), we stop hammering it
+//     and reconnect every 5 min until it comes back.
+//   - RECONNECT_GRACE_MS=45s: the freshly-installed tunnel needs
+//     at MOST one keepalive (25s) + two RTTs to handshake. 45s gives
+//     the kernel comfortable room without pinning a "warming up"
+//     status forever.
+export const POLL_INTERVAL_MS = 15_000;
+export const STALE_THRESHOLD_MS = 75_000;
+export const RECONNECT_COOLDOWN_MS_INITIAL = 20_000;
+export const RECONNECT_BACKOFF_MAX_MS = 5 * 60_000;
+export const RECONNECT_GRACE_MS = 45_000;
+
+// Legacy alias kept for any external callers that imported the
+// pre-PLC-7 constant by name. Prefer RECONNECT_COOLDOWN_MS_INITIAL.
+export const RECONNECT_COOLDOWN_MS = RECONNECT_COOLDOWN_MS_INITIAL;
+
+// nextCooldownMs returns the cooldown window for the Nth consecutive
+// failed reconnect attempt (1-indexed). Doubling sequence with a hard
+// cap so a long outage doesn't keep retrying every 20 s for an hour.
+//
+//   attempt=1 → 20 s
+//   attempt=2 → 40 s
+//   attempt=3 → 80 s
+//   attempt=4 → 160 s
+//   attempt≥5 → 300 s (cap)
+export function nextCooldownMs(consecutiveFailures: number): number {
+  if (consecutiveFailures <= 0) return RECONNECT_COOLDOWN_MS_INITIAL;
+  const doubled = RECONNECT_COOLDOWN_MS_INITIAL * Math.pow(2, consecutiveFailures - 1);
+  return Math.min(doubled, RECONNECT_BACKOFF_MAX_MS);
+}
 
 export type HandshakeSnapshot =
   | { kind: "no-tunnel" }
@@ -36,8 +81,13 @@ export interface ShouldReconnectInput {
   lastReconnectAt: number; // 0 when never reconnected
   reconnectInFlight: boolean;
   now: number;
+  // PLC-7: number of consecutive reconnect attempts that did NOT
+  // restore a fresh handshake. Drives the exponential backoff via
+  // nextCooldownMs(consecutiveFailures). 0 on the first attempt or
+  // after a successful recovery.
+  consecutiveFailures?: number;
   staleThresholdMs?: number;
-  cooldownMs?: number;
+  cooldownMs?: number; // explicit override; ignores backoff schedule when set
   graceMs?: number;
 }
 
@@ -49,8 +99,13 @@ export interface ShouldReconnectInput {
  */
 export function shouldReconnect(input: ShouldReconnectInput): boolean {
   const stale = input.staleThresholdMs ?? STALE_THRESHOLD_MS;
-  const cooldown = input.cooldownMs ?? RECONNECT_COOLDOWN_MS;
   const grace = input.graceMs ?? RECONNECT_GRACE_MS;
+  // Cooldown ladder: explicit override > exponential schedule keyed on
+  // consecutiveFailures. The schedule starts at the first-retry value
+  // (20 s) so a successful flow reads identically to the iter-8 fast-
+  // recovery path that tests assert against.
+  const cooldown =
+    input.cooldownMs ?? nextCooldownMs(input.consecutiveFailures ?? 0);
 
   if (input.reconnectInFlight) return false;
 
@@ -154,6 +209,15 @@ export class VpnHealthMonitor {
   private timer: NodeJS.Timeout | null = null;
   private reconnectInFlight = false;
   private lastReconnectAt = 0;
+  // PLC-7: number of consecutive reconnects that did NOT restore a
+  // fresh handshake. Reset to 0 the next tick the snapshot reports
+  // `fresh`. Drives the exponential backoff via nextCooldownMs.
+  private consecutiveFailures = 0;
+  // PLC-7: human-readable summary of the last reconnect outcome.
+  // Surfaced via `lastDiagnostic()` so the renderer (panel banner)
+  // can show "intentando reconectar — endpoint no responde (intento 3)"
+  // instead of a silent "Stale" with no signal.
+  private lastDiagnostic: string = "";
   private readonly deps: MonitorDeps;
 
   constructor(deps: MonitorDeps) {
@@ -177,6 +241,16 @@ export class VpnHealthMonitor {
     this.reconnectInFlight = false;
   }
 
+  /** Read-only accessor for the latest reconnect outcome description. */
+  getLastDiagnostic(): string {
+    return this.lastDiagnostic;
+  }
+
+  /** Read-only accessor for the consecutive-failure counter. */
+  getConsecutiveFailures(): number {
+    return this.consecutiveFailures;
+  }
+
   /** Force one tick — exposed for tests; not called from production. */
   async tick(): Promise<void> {
     if (!this.deps.enabled()) return;
@@ -186,25 +260,50 @@ export class VpnHealthMonitor {
     } catch {
       // A failed `wg show` (binary missing, permission flap) shouldn't
       // panic the loop — the next tick retries.
+      this.lastDiagnostic = "wg show falló (¿permisos?)";
       return;
     }
+
+    // Fresh handshake observed: clear the failure streak so the next
+    // genuine outage starts the cooldown ladder from 20 s again
+    // instead of inheriting a stale 5-min back-off.
+    if (snapshot.kind === "fresh") {
+      if (this.consecutiveFailures > 0) {
+        this.lastDiagnostic = `Conexión estable tras ${this.consecutiveFailures} reintentos`;
+      } else {
+        this.lastDiagnostic = "Conectado (handshake fresco)";
+      }
+      this.consecutiveFailures = 0;
+    }
+
     const now = (this.deps.now ?? Date.now)();
     const fire = shouldReconnect({
       snapshot,
       lastReconnectAt: this.lastReconnectAt,
       reconnectInFlight: this.reconnectInFlight,
+      consecutiveFailures: this.consecutiveFailures,
       now,
     });
     if (!fire) return;
 
     this.reconnectInFlight = true;
     this.lastReconnectAt = now;
+    const attempt = this.consecutiveFailures + 1;
+    this.lastDiagnostic = `Reconectando (intento ${attempt})…`;
     try {
       await this.deps.reconnect();
-    } catch {
-      // Reconnect itself failed. The cooldown ticks from
-      // `lastReconnectAt` regardless so we don't hammer a broken
-      // upstream — the next attempt is at least cooldownMs away.
+      // Reconnect call succeeded at the API level. We DON'T zero
+      // consecutiveFailures here — only an actual fresh handshake on
+      // the next tick proves recovery. A `wg-quick up` that returns 0
+      // but never hands-shakes (e.g. wrong endpoint, blocked by
+      // firewall) still needs to count as a failure so the ladder
+      // stretches.
+      this.consecutiveFailures = attempt;
+      this.lastDiagnostic = `Tunel re-instalado (intento ${attempt}); esperando handshake`;
+    } catch (err) {
+      this.consecutiveFailures = attempt;
+      const reason = err instanceof Error ? err.message : "error desconocido";
+      this.lastDiagnostic = `Reconexión falló (intento ${attempt}): ${reason}`;
     } finally {
       this.reconnectInFlight = false;
     }
