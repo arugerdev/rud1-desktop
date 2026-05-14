@@ -54,8 +54,6 @@ import { createTray as createTrayInstance, setTrayIcon } from "./tray";
 import {
   VersionCheckManager,
   buildVersionCheckMenuItems,
-  formatBlockedStateMessage,
-  formatVersionCheckSummary,
   applySignatureFetchGate,
   type VersionCheckState,
 } from "./version-check-manager";
