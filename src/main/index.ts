@@ -91,6 +91,11 @@ import {
   subscribeAutoUpdate,
   resetAutoUpdateState,
 } from "./auto-updater";
+import {
+  DeviceListManager,
+  statusGlyph,
+  type DeviceSummary,
+} from "./device-list-manager";
 
 const APP_URL = process.env.RUD1_APP_URL ?? "https://www.rud1.es/dashboard";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
@@ -142,6 +147,11 @@ let trayAttentionCount = 0;
 // "Update available" affordance without a manual trigger.
 let versionCheckManager: VersionCheckManager | null = null;
 let lastVersionCheckState: VersionCheckState = { kind: "idle" };
+// Polls /api/user/devices on the cloud so the tray submenu stays fresh
+// without the renderer doing it. Started in app.whenReady() after the
+// main window is created (the cookie jar is shared via the default
+// session, so net.fetch carries auth automatically).
+let deviceListManager: DeviceListManager | null = null;
 // Iter 30 — captured from the last successful manifest fetch (when present)
 // so `applyAndRestart` can verify the downloaded artifact's SHA-256.
 // Iter 51 — both this AND the new `lastManifestVersion` are populated
@@ -274,9 +284,19 @@ function createTray(): void {
 // so the badge state machine is the sole writer.
 function rebuildTrayMenu(): void {
   if (!tray) return;
+  // Header: product + version as a disabled label so the tray identifies
+  // itself even on a packed taskbar. Common Electron-app pattern;
+  // operators expect the first row to be informational, not actionable.
   const items: Electron.MenuItemConstructorOptions[] = [
+    { label: `rud1 v${app.getVersion()}`, enabled: false },
+    { type: "separator" },
     { label: "Open rud1", click: () => { showOrCreateMainWindow(); } },
   ];
+
+  // My devices submenu — the operator's full device roster across every
+  // org they're a member of, with at-a-glance ONLINE/OFFLINE state.
+  // Click jumps the main window to that device's detail page.
+  appendMyDevicesSubmenu(items);
   if (lastFirmwareProbe && isFirstBoot(lastFirmwareProbe)) {
     const url = lastFirmwareProbe.setupUrl;
     items.push({ type: "separator" });
@@ -401,6 +421,117 @@ function rebuildTrayMenu(): void {
   items.push({ type: "separator" });
   items.push({ label: "Quit", click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
+/**
+ * Append the "My devices" submenu using the latest poll from
+ * `deviceListManager`. Three shapes:
+ *
+ *   - no manager yet / loading on first start → "Loading devices…" (disabled)
+ *   - signed out (HTTP 401) → "Sign in to view your devices" (opens the
+ *     main window so the user can authenticate)
+ *   - other error → "Couldn't load devices (reason)" + a recheck entry
+ *   - success → 1 disabled summary row + 1 row per device, plus a
+ *     "View all in dashboard" anchor at the bottom
+ *
+ * Capped at 12 visible device rows to keep the submenu navigable; the
+ * "View all" entry routes users with bigger fleets to the dashboard.
+ */
+function appendMyDevicesSubmenu(
+  items: Electron.MenuItemConstructorOptions[],
+): void {
+  const state = deviceListManager?.getState() ?? { kind: "idle" as const };
+  const lastDevices = deviceListManager?.getLastDevices() ?? null;
+
+  if (state.kind === "idle" || state.kind === "loading") {
+    if (lastDevices == null) {
+      items.push({ type: "separator" });
+      items.push({ label: "Loading devices…", enabled: false });
+      return;
+    }
+    // Fall through with the last successful snapshot to avoid a blink.
+  }
+  if (state.kind === "error") {
+    items.push({ type: "separator" });
+    if (state.reason === "signed-out") {
+      items.push({
+        label: "Sign in to view your devices",
+        click: () => { showOrCreateMainWindow(); },
+      });
+      return;
+    }
+    items.push({
+      label: `Couldn't load devices (${state.reason})`,
+      enabled: false,
+    });
+    items.push({
+      label: "Retry now",
+      click: () => { void deviceListManager?.refreshNow(); },
+    });
+    if (lastDevices == null) return;
+    // else fall through — still render the cached list below
+  }
+
+  const devices = lastDevices ?? [];
+  if (devices.length === 0) {
+    items.push({ type: "separator" });
+    items.push({ label: "No devices yet", enabled: false });
+    items.push({
+      label: "Open dashboard to add one",
+      click: () => { showOrCreateMainWindow(); },
+    });
+    return;
+  }
+
+  const MAX_VISIBLE = 12;
+  const visible = devices.slice(0, MAX_VISIBLE);
+  const onlineCount = devices.filter((d) => d.status === "ONLINE").length;
+
+  items.push({ type: "separator" });
+  items.push({
+    label: `My devices — ${onlineCount}/${devices.length} online`,
+    submenu: [
+      ...visible.map<Electron.MenuItemConstructorOptions>((d) => ({
+        label: `${d.name}  ·  ${statusGlyph(d.status)}`,
+        toolTip: `${d.organization.name} · ${d.id}`,
+        click: () => openDeviceInMainWindow(d),
+      })),
+      ...(devices.length > MAX_VISIBLE
+        ? [
+            { type: "separator" as const },
+            {
+              label: `…and ${devices.length - MAX_VISIBLE} more`,
+              enabled: false,
+            },
+          ]
+        : []),
+      { type: "separator" },
+      {
+        label: "View all in dashboard",
+        click: () => {
+          if (mainWindow) {
+            showOrCreateMainWindow();
+            void mainWindow.webContents.loadURL(`${APP_URL.replace(/\/dashboard.*$/, "")}/dashboard/devices`);
+          } else {
+            showOrCreateMainWindow();
+          }
+        },
+      },
+      {
+        label: "Refresh now",
+        click: () => { void deviceListManager?.refreshNow(); },
+      },
+    ],
+  });
+}
+
+function openDeviceInMainWindow(d: DeviceSummary): void {
+  showOrCreateMainWindow();
+  if (!mainWindow) return;
+  // Strip whatever trailing path APP_URL pointed at (probably /dashboard)
+  // and route to the device detail page directly.
+  const origin = APP_URL.replace(/\/dashboard.*$/, "");
+  void mainWindow.webContents.loadURL(`${origin}/dashboard/devices/${d.id}`);
 }
 
 /**
@@ -1097,6 +1228,21 @@ app.whenReady().then(() => {
   configureAutoUpdaterRuntime({});
   subscribeAutoUpdate(() => { rebuildTrayMenu(); });
 
+  // Devices submenu on the tray. Cloud URL origin only — we strip any
+  // trailing /dashboard from APP_URL so the API call lands on the same
+  // origin the BrowserWindow loaded (cookie scope match).
+  try {
+    const cloudOrigin = new URL(APP_URL).origin;
+    deviceListManager = new DeviceListManager({
+      baseUrl: cloudOrigin,
+      onStateChange: () => { rebuildTrayMenu(); },
+    });
+    deviceListManager.start();
+  } catch {
+    // Malformed APP_URL — skip the devices submenu rather than crash.
+    deviceListManager = null;
+  }
+
   // Resume opt-in periodic diagnosis snapshots if the operator had them
   // enabled. Fire-and-forget: startup must not block on disk I/O, and
   // resume failures are recoverable — the next configure() call overwrites
@@ -1124,6 +1270,7 @@ app.on("before-quit", () => {
     firmwareProbeTimer = null;
   }
   versionCheckManager?.stop();
+  deviceListManager?.stop();
   notificationStream?.stop();
   tray?.destroy();
 });
