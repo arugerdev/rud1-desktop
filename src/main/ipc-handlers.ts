@@ -409,6 +409,18 @@ export function registerIpcHandlers(opts: {
   firstBootDedupe?: FirstBootDedupeAccessor;
   versionCheck?: VersionCheckAccessor;
   usbSessionState?: UsbSessionStateAccessor;
+  /**
+   * Invoked from `app:setPreferences` AFTER the patch has been
+   * persisted, with the canonical post-merge `Preferences`. Used by
+   * the main-process boot path to mirror the theme picker into
+   * `nativeTheme.themeSource` so windows opened after the change pick
+   * up the resolved colour mode immediately, without an app restart.
+   *
+   * Optional — wiring is single-consumer today (main `index.ts`); we
+   * keep the optionality so future entry points (tests, e2e) don't
+   * have to stub a no-op.
+   */
+  onPreferencesUpdated?: (prefs: import("./preferences-manager").Preferences) => void;
 } = {}): void {
   // Per-port label cache for detach notifications. The renderer already
   // knows the human-readable name when it calls attach (vendor + product
@@ -1369,6 +1381,19 @@ export function registerIpcHandlers(opts: {
     }
     try {
       const result = await setPreferences(cleaned);
+      // Notify the main-process boot path so side-effects (the
+      // nativeTheme mirror, future tray rebuilds, etc.) run with the
+      // canonical post-merge preferences. Wrapped in try/catch because
+      // a thrown callback shouldn't fail the save the user already
+      // saw succeed.
+      try {
+        opts.onPreferencesUpdated?.(result);
+      } catch (cbErr) {
+        console.warn(
+          "[preferences] onPreferencesUpdated callback threw:",
+          cbErr instanceof Error ? cbErr.message : cbErr,
+        );
+      }
       return { ok: true, result };
     } catch (err) {
       return {

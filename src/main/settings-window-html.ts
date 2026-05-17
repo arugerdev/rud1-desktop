@@ -100,9 +100,15 @@ export function buildSettingsWindowHtml(
     --border: rgba(180, 195, 220, 0.55);
     --shadow: rgba(60, 80, 120, 0.18);
 
-    --primary: #6db3f5;
-    --primary-soft: #d0e8ff;
-    --primary-fg: #0d2540;
+    /* Primary pinned to the rud1.es design-system pastel-blue
+     * (#A8C4FF) with the accent (#86A8FF) reserved for hover /
+     * pressed states. Matches rud1-es + rud1-app for cross-surface
+     * brand parity — keep this in sync when the cloud palette
+     * evolves. */
+    --primary: #a8c4ff;
+    --primary-accent: #86a8ff;
+    --primary-soft: #e0eaff;
+    --primary-fg: #122a55;
 
     --success-bg: #c8efd9;
     --success-border: #8fd6b0;
@@ -117,12 +123,13 @@ export function buildSettingsWindowHtml(
     --danger-fg: #5a1a17;
 
     --hash-fg: #b87a16;
-    --link: #3a86c4;
-    --link-hover: #1f6eaa;
+    --link: #5a87e8;
+    --link-hover: #3d6cd0;
 
-    /* Mesh tints — light */
-    --mesh-1: rgba(189, 219, 255, 0.55);
-    --mesh-2: rgba(228, 207, 255, 0.5);
+    /* Mesh tints — light. Pastel-blue dominates so the panel reads
+     * as a coherent extension of the rud1.es marketing surface. */
+    --mesh-1: rgba(168, 196, 255, 0.55);
+    --mesh-2: rgba(208, 195, 255, 0.5);
     --mesh-3: rgba(196, 240, 224, 0.45);
     --mesh-4: rgba(255, 226, 197, 0.45);
   }
@@ -147,8 +154,9 @@ export function buildSettingsWindowHtml(
       --border: rgba(120, 140, 175, 0.22);
       --shadow: rgba(0, 0, 0, 0.55);
 
-      --primary: #92c8ff;
-      --primary-soft: rgba(110, 172, 230, 0.32);
+      --primary: #a8c4ff;
+      --primary-accent: #86a8ff;
+      --primary-soft: rgba(168, 196, 255, 0.28);
       --primary-fg: #0e1a2a;
 
       --success-bg: rgba(143, 214, 176, 0.22);
@@ -164,7 +172,7 @@ export function buildSettingsWindowHtml(
       --danger-fg: #f3bcb7;
 
       --hash-fg: #f4d59c;
-      --link: #92c8ff;
+      --link: #a8c4ff;
       --link-hover: #c8e2ff;
 
       /* Mesh tints — dark */
@@ -184,8 +192,9 @@ export function buildSettingsWindowHtml(
     --border: rgba(120, 140, 175, 0.22);
     --shadow: rgba(0, 0, 0, 0.55);
 
-    --primary: #92c8ff;
-    --primary-soft: rgba(110, 172, 230, 0.32);
+    --primary: #a8c4ff;
+    --primary-accent: #86a8ff;
+    --primary-soft: rgba(168, 196, 255, 0.28);
     --primary-fg: #0e1a2a;
 
     --success-bg: rgba(143, 214, 176, 0.22);
@@ -201,7 +210,7 @@ export function buildSettingsWindowHtml(
     --danger-fg: #f3bcb7;
 
     --hash-fg: #f4d59c;
-    --link: #92c8ff;
+    --link: #a8c4ff;
     --link-hover: #c8e2ff;
 
     --mesh-1: rgba(40, 80, 130, 0.4);

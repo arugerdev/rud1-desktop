@@ -65,6 +65,7 @@ import {
   getPreferences,
   isNotificationEnabled,
   loadPreferences,
+  type ThemePreference,
 } from "./preferences-manager";
 import { NotificationStreamManager } from "./notification-stream-manager";
 import {
@@ -172,6 +173,34 @@ let lastManifestSha256: string | null = null;
 // support blob whether the publisher needed to upgrade to v3 or fix
 // their existing v3 sidecar.
 let lastManifestVersion: number | null = null;
+
+/**
+ * Push the user's theme preference into Electron's `nativeTheme`.
+ *
+ *   - `"system"` (default) → follow the OS dark-mode toggle.
+ *   - `"light"` / `"dark"` → override the OS regardless of its current
+ *     setting.
+ *
+ * Every place that asks `nativeTheme.shouldUseDarkColors` (window
+ * backgroundColors, the inline CSS of the Settings window) will see the
+ * new resolved value on the next read — this is what makes the Liquid
+ * Glass panel flip from light to dark when the user toggles their
+ * Windows theme, and also what makes our "Settings → Theme" picker
+ * actually take effect.
+ *
+ * Note on the Win32 tray ContextMenu: this CANNOT be styled by
+ * Electron because the menu is rendered by the OS itself (the same
+ * Win32 menu that File Explorer uses). On Windows 10/11 the menu's
+ * background is governed by the system "Apps" colour mode and a small
+ * registry flag that Electron doesn't toggle. So even after the
+ * `nativeTheme.themeSource` change here, the tray menu may still
+ * render in the system default (often light). Fully matching it to
+ * the rud1 Liquid Glass palette would require replacing the native
+ * menu with a custom BrowserWindow popup — tracked separately.
+ */
+function applyThemeFromPreference(pref: ThemePreference): void {
+  nativeTheme.themeSource = pref;
+}
 
 // Resuelve el icono empaquetado para la BrowserWindow + taskbar.
 //   Dev:    resources/<platform>/  →  <repo>/resources/icon.{ico,png}
@@ -1072,6 +1101,15 @@ app.whenReady().then(() => {
       clearHost: (host) => clearNotifiedHost(host),
       clearAll: () => clearAllNotifiedHosts(),
     },
+    // Side-effect hook invoked by the `app:setPreferences` handler
+    // after a successful save. We use it to thread the theme picker
+    // through `nativeTheme` so the new value takes effect immediately
+    // — without it, the Settings panel checkbox would flip but
+    // BrowserWindows opened later would still pick up the previous
+    // resolved theme until app restart.
+    onPreferencesUpdated: (prefs) => {
+      applyThemeFromPreference(prefs.theme);
+    },
     // Iter 37 — Settings/About panel surface. Late-bound: the manager is
     // constructed a few lines below inside this same whenReady block, so
     // the accessor closures snapshot `versionCheckManager` at call time
@@ -1158,7 +1196,15 @@ app.whenReady().then(() => {
   // toggles) before notifications start firing. The Settings window
   // reads/writes through this same module via IPC.
   const preferencesPath = path.join(app.getPath("userData"), PREFERENCES_FILENAME);
-  void loadPreferences(preferencesPath);
+  // Apply the persisted theme to nativeTheme as soon as the load resolves.
+  // The default Electron behaviour is `themeSource = "system"` which
+  // honours Windows' dark-mode toggle for `nativeTheme.shouldUseDarkColors`,
+  // but a user who picked "light" or "dark" explicitly from our Settings
+  // panel expects that to override the OS. Re-applying on every change
+  // happens in the `onPreferencesUpdated` callback below.
+  void loadPreferences(preferencesPath).then((prefs) => {
+    applyThemeFromPreference(prefs.theme);
+  });
   // Hydrate the persisted USB/IP attach state. Best-effort: a parse
   // failure leaves `usbSessions` empty, the auto-reattach feature
   // simply no-ops until the user attaches something fresh.
