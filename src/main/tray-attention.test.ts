@@ -25,6 +25,7 @@ import {
   computeTrayState,
   formatTrayTitle,
   formatTrayTooltip,
+  formatTrayTooltipWithVpn,
 } from "./tray-attention";
 
 describe("formatTrayTitle", () => {
@@ -131,5 +132,54 @@ describe("computeTrayState — transitions", () => {
     expect(t.changed).toBe(true);
     expect(t.next.title).toBe(" 9+");
     expect(t.next.tooltip).toBe("rud1 Desktop — 10 devices ready to configure");
+  });
+});
+
+// Iter 71: VPN overlay on the tray tooltip. Composes the existing
+// first-boot count formatter with a "VPN desconectada" / "reconectando"
+// suffix so the user sees both signals without leaving the menubar.
+describe("formatTrayTooltipWithVpn (iter 71)", () => {
+  it("returns the bare tooltip when VPN is up", () => {
+    expect(formatTrayTooltipWithVpn(0, "up")).toBe("rud1 Desktop");
+    expect(formatTrayTooltipWithVpn(1, "up")).toBe(
+      "rud1 Desktop — 1 device ready to configure",
+    );
+  });
+
+  it("returns the bare tooltip when VPN state is unknown (initial / never connected)", () => {
+    // "unknown" must NEVER paint a scary suffix — a desktop that
+    // opened without the user clicking Connect yet would otherwise
+    // permanently look as if something was broken.
+    expect(formatTrayTooltipWithVpn(0, "unknown")).toBe("rud1 Desktop");
+    expect(formatTrayTooltipWithVpn(3, "unknown")).toBe(
+      "rud1 Desktop — 3 devices ready to configure",
+    );
+  });
+
+  it("appends 'VPN desconectada' on a down state", () => {
+    expect(formatTrayTooltipWithVpn(0, "down")).toBe(
+      "rud1 Desktop — VPN desconectada",
+    );
+    expect(formatTrayTooltipWithVpn(2, "down")).toBe(
+      "rud1 Desktop — 2 devices ready to configure — VPN desconectada",
+    );
+  });
+
+  it("appends 'VPN reconectando…' on a recovering state", () => {
+    expect(formatTrayTooltipWithVpn(0, "recovering")).toBe(
+      "rud1 Desktop — VPN reconectando…",
+    );
+    expect(formatTrayTooltipWithVpn(1, "recovering")).toBe(
+      "rud1 Desktop — 1 device ready to configure — VPN reconectando…",
+    );
+  });
+
+  it("treats non-finite / negative counts the same as the base helper", () => {
+    expect(formatTrayTooltipWithVpn(Number.NaN, "down")).toBe(
+      "rud1 Desktop — VPN desconectada",
+    );
+    expect(formatTrayTooltipWithVpn(-1, "recovering")).toBe(
+      "rud1 Desktop — VPN reconectando…",
+    );
   });
 });

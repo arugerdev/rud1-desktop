@@ -34,7 +34,69 @@ contextBridge.exposeInMainWorld("electronAPI", {
         // ISO stamps. Older desktop builds (< iter 58) omit this field;
         // renderers should feature-detect with `??`.
         tunnelUptimeMs: number | null;
+        // Iter 71: real-time handshake state. Independent of `connected`
+        // (which only reflects "the OS has a tunnel service"). A pre-iter71
+        // bug surfaced "connected: true" forever when the peer went silent;
+        // the renderer must consult `handshakeStatus` to draw the live
+        // signal. Null on platform error — fall back to `connected` then.
+        //   "no-tunnel"        → interface gone
+        //   "no-handshake-yet" → service exists, warming up
+        //   "fresh"            → handshake within ~75 s (working)
+        //   "stale"            → handshake too old (peer unreachable)
+        handshakeStatus:
+          | "no-tunnel"
+          | "no-handshake-yet"
+          | "fresh"
+          | "stale"
+          | null;
+        // Iter 71: milliseconds since the last successful handshake.
+        // Null when no handshake yet OR the snapshot couldn't be read.
+        handshakeAgeMs: number | null;
       }>,
+
+    /**
+     * Iter 71: push subscription to VPN health transitions (silent
+     * disconnects, auto-reconnect attempts, recoveries). Pre-iter71 the
+     * renderer had to poll `vpn:status` on a timer to notice a dead
+     * tunnel; the bug "still says connected when it isn't" was the
+     * direct user-visible result. The desktop now emits a `vpn:health`
+     * IPC event on every observable transition and the renderer
+     * subscribes via this surface — `onHealthChange` returns an
+     * unsubscribe handle (same pattern as `firstBootDedupe.onUpdate` /
+     * `versionCheck.onUpdate`). Older desktops (< iter71) don't expose
+     * this method; renderers should feature-detect with
+     * `typeof window.electronAPI?.vpn?.onHealthChange === "function"`.
+     */
+    onHealthChange: (
+      cb: (event: {
+        transition: "up" | "down" | "recovering";
+        snapshot:
+          | { kind: "no-tunnel" }
+          | { kind: "no-handshake-yet" }
+          | { kind: "fresh"; handshakeAgeMs: number }
+          | { kind: "stale"; handshakeAgeMs: number };
+        diagnostic: string;
+        consecutiveFailures: number;
+        at: number;
+      }) => void,
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: {
+          transition: "up" | "down" | "recovering";
+          snapshot:
+            | { kind: "no-tunnel" }
+            | { kind: "no-handshake-yet" }
+            | { kind: "fresh"; handshakeAgeMs: number }
+            | { kind: "stale"; handshakeAgeMs: number };
+          diagnostic: string;
+          consecutiveFailures: number;
+          at: number;
+        },
+      ) => cb(payload);
+      ipcRenderer.on("vpn:health", listener);
+      return () => ipcRenderer.removeListener("vpn:health", listener);
+    },
   },
 
   usb: {

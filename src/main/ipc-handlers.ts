@@ -61,6 +61,7 @@ import {
 import {
   VpnHealthMonitor,
   parseHandshakeSnapshot,
+  type VpnHealthChangeEvent,
 } from "./vpn-health-monitor";
 import {
   usbAttach,
@@ -189,6 +190,30 @@ export interface UsbSessionStateAccessor {
   recordDetachByPort: (port: number) => Promise<void>;
   recordDetachByBusId: (busId: string) => Promise<void>;
   onVpnConnected: () => Promise<void>;
+}
+
+/**
+ * Iter 71 — main-process hook for surfacing VPN health transitions to
+ * the renderer panel and the tray. Pre-iter71 the only feedback path was
+ * the in-flight `vpn:connect` / `vpn:disconnect` resolver — a tunnel
+ * that died on its own (peer offline, ISP renegotiation) left the panel
+ * showing "connected" until the user manually refreshed.
+ *
+ * Implementations (currently `index.ts` only) are expected to:
+ *   - broadcast `vpn:health` to the main BrowserWindow so the embedded
+ *     panel can re-render without polling `vpn:status`.
+ *   - update the tray tooltip so the user sees "VPN reconnecting…"
+ *     even when the panel window is hidden.
+ *
+ * Native OS notifications are handled inside this file (we already own
+ * the `notifyVpn*` imports) so a no-op accessor still triggers the
+ * toast. The accessor is purely about UI surfaces main-process owns.
+ */
+export interface VpnHealthAccessor {
+  /** Invoked on every observable VPN health transition. Implementer
+   *  must be cheap + non-throwing — main's polling loop swallows
+   *  errors but a noisy log is undesirable. */
+  onTransition: (event: VpnHealthChangeEvent) => void;
 }
 
 // Allowlist of origins the renderer frame can present and still be trusted
@@ -409,6 +434,10 @@ export function registerIpcHandlers(opts: {
   firstBootDedupe?: FirstBootDedupeAccessor;
   versionCheck?: VersionCheckAccessor;
   usbSessionState?: UsbSessionStateAccessor;
+  /** Iter 71 — see VpnHealthAccessor doc for the rationale. Optional so
+   *  unit tests that don't care about the broadcast surface can keep
+   *  constructing the registrar without stubbing it. */
+  vpnHealth?: VpnHealthAccessor;
   /**
    * Invoked from `app:setPreferences` AFTER the patch has been
    * persisted, with the canonical post-merge `Preferences`. Used by
@@ -474,6 +503,52 @@ export function registerIpcHandlers(opts: {
       // false short-circuits the loop.
       const prefs = getPreferences();
       return prefs.vpnAutoReconnect !== false;
+    },
+    // Iter 71: surface health transitions to the user. Two layers:
+    //   1. Native OS notification — handled here because we already own
+    //      the notifyVpn* imports and the per-category mute toggle.
+    //      The "vpn" category covers all three transitions so a single
+    //      Settings switch silences them coherently.
+    //   2. Renderer/tray broadcast — delegated to the iter-71 accessor
+    //      so main owns the BrowserWindow + Tray refs the broadcast
+    //      needs. Bare-test harnesses pass no accessor and only the
+    //      notification side-effect runs.
+    onHealthChange: (event) => {
+      if (event.transition === "down") {
+        // The tunnel just died (peer lost handshake, ISP rotated NAT,
+        // device powered off). Mirrors the user-initiated disconnect
+        // toast but with a distinctive title so the operator knows
+        // this happened without their action.
+        notifyVpnDisconnected();
+      } else if (event.transition === "up") {
+        // Reached "up" from a non-"up" state (covers both the initial
+        // good handshake and any post-failure recovery). The monitor's
+        // own consecutiveFailures counter is already zeroed by this
+        // point, so the diagnostic ("Conexión estable…") is set
+        // correctly when the renderer asks for it.
+        if (event.consecutiveFailures === 0 && event.snapshot.kind === "fresh") {
+          // Only fire the "connected" toast for an actual recovery
+          // (not the every-session-start steady-state edge). We detect
+          // recovery by the diagnostic text the monitor sets — it only
+          // mentions "tras N reintentos" after a non-zero failure run.
+          if (event.diagnostic.includes("reintentos")) {
+            notifyVpnConnected();
+          }
+        }
+      } else if (event.transition === "recovering") {
+        // No toast here — surfacing a notification every 20-30 s during
+        // a backoff sequence would be noise. The renderer + tray
+        // tooltip pick up the "recovering" state via the broadcast
+        // below and paint a spinner instead.
+      }
+      if (opts.vpnHealth) {
+        try {
+          opts.vpnHealth.onTransition(event);
+        } catch {
+          // A throwing accessor must not wedge the monitor's tick.
+          // Best-effort; consumers own their error reporting.
+        }
+      }
     },
   });
 

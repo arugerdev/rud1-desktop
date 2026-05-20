@@ -49,7 +49,11 @@ import {
   saveNotifiedHosts,
   type NotifiedHost,
 } from "./first-boot-dedupe";
-import { computeTrayState } from "./tray-attention";
+import {
+  computeTrayState,
+  formatTrayTooltipWithVpn,
+  type TrayVpnHealth,
+} from "./tray-attention";
 import { createTray as createTrayInstance, setTrayIcon } from "./tray";
 import {
   VersionCheckManager,
@@ -591,11 +595,34 @@ function setTrayAttention(count: number): void {
   if (process.platform === "darwin") {
     tray.setTitle(transition.next.title);
   }
-  tray.setToolTip(transition.next.tooltip);
+  // Iter 71: compose the tooltip with the current VPN health so that
+  // both signals share the same surface. `setTrayVpnHealth` re-runs
+  // this when the VPN state alone changes (count unchanged → the
+  // `transition.changed` short-circuit at the top of this function
+  // skips the repaint, but the dedicated path below does it).
+  tray.setToolTip(formatTrayTooltipWithVpn(transition.next.count, trayVpnHealth));
   // Iter 30 — swap the actual tray pixels on the rising/falling edge
   // so Win/Linux operators get a visible signal (the macOS title is
   // redundant here, but `setTrayIcon` no-ops when the state is unchanged).
   setTrayIcon(transition.next.count > 0 ? "attention" : "idle");
+}
+
+// Iter 71: VPN health surfaced on the tray tooltip + relayed to the
+// renderer. Module-scoped (like trayAttentionCount) because there is
+// exactly one tray + one tunnel per desktop instance.
+let trayVpnHealth: TrayVpnHealth = "unknown";
+
+/**
+ * Iter 71: refresh the tray tooltip when the VPN health changes
+ * independently of the first-boot count. We deliberately don't gate on
+ * "transition === previous" here — the consumer (ipc-handlers.ts) only
+ * fires us on actual transitions, and re-applying the same tooltip
+ * string is a no-op for Electron's Tray API.
+ */
+function setTrayVpnHealth(health: TrayVpnHealth): void {
+  trayVpnHealth = health;
+  if (!tray) return;
+  tray.setToolTip(formatTrayTooltipWithVpn(trayAttentionCount, trayVpnHealth));
 }
 
 /**
@@ -1122,6 +1149,39 @@ app.whenReady().then(() => {
         versionCheckManager ? versionCheckManager.getState() : lastVersionCheckState,
       recheck: () => {
         void versionCheckManager?.checkOnce();
+      },
+    },
+    // Iter 71 — fan-out of VPN health transitions to renderer + tray.
+    // Native OS notifications already fire inside ipc-handlers.ts (it
+    // owns the notifyVpn* imports and the per-category mute toggle);
+    // this accessor handles only the two surfaces that need main-
+    // process refs: the BrowserWindow (push-broadcast so the panel
+    // re-renders without polling) and the Tray (tooltip overlay so
+    // the user sees the state with the window minimised).
+    vpnHealth: {
+      onTransition: (event) => {
+        setTrayVpnHealth(event.transition);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          try {
+            // Send a structured-clonable subset of the event. The
+            // `snapshot` field is a discriminated union that's already
+            // structured-clone safe; we re-pack it explicitly so a
+            // future addition to VpnHealthChangeEvent that's NOT
+            // clonable (e.g. an Error instance) doesn't break the IPC
+            // serialiser silently.
+            mainWindow.webContents.send("vpn:health", {
+              transition: event.transition,
+              snapshot: event.snapshot,
+              diagnostic: event.diagnostic,
+              consecutiveFailures: event.consecutiveFailures,
+              at: event.at,
+            });
+          } catch {
+            // Best-effort — a closed/disposed window between the null
+            // check and the send is the typical failure mode and
+            // shouldn't propagate into the monitor's tick.
+          }
+        }
       },
     },
     // Iter 7 — USB/IP auto-reattach. The IPC handlers call into these

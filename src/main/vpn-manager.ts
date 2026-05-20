@@ -23,6 +23,10 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { isBinaryAvailable, wgPath, wgQuickPath } from "./binary-helper";
+import {
+  parseHandshakeSnapshot,
+  type HandshakeSnapshot,
+} from "./vpn-health-monitor";
 
 const WIREGUARD_INSTALL_URL = "https://www.wireguard.com/install/";
 
@@ -467,6 +471,30 @@ export function formatUptimeMs(ms: number | null | undefined): string | null {
  * it uses for `lan.lastAppliedAt` from the cloud — keeps "synced Xs ago"
  * formatting consistent across the desktop UI.
  */
+/**
+ * Iter 71: surfaced separately from `connected` because the two answer
+ * different operator questions:
+ *   - `connected` (boolean) — does a WireGuard service / interface exist
+ *     in the OS? Used by the panel to decide whether to render Connect or
+ *     Disconnect. A tunnel that's installed but the peer is unreachable
+ *     still counts as `connected: true` here so the user can tear down
+ *     stale services.
+ *   - `handshake` — has WireGuard exchanged keys recently? Drives the UX
+ *     signal ("VPN active" vs "VPN unreachable") and the disconnect-
+ *     detection notification. Pre-iter71 the desktop conflated these two
+ *     and reported "connected" forever even when the link was dead.
+ *
+ *   "no-tunnel"          → interface gone (rare; usually connected=false too)
+ *   "no-handshake-yet"   → service exists, no handshake ever (warming up)
+ *   "fresh"              → handshake within STALE_THRESHOLD_MS (working)
+ *   "stale"              → service exists but handshake is too old (broken)
+ */
+export type VpnHandshakeStatus =
+  | "no-tunnel"
+  | "no-handshake-yet"
+  | "fresh"
+  | "stale";
+
 export interface VpnStatusResult {
   connected: boolean;
   ip?: string;
@@ -489,6 +517,22 @@ export interface VpnStatusResult {
    *     than emit a misleading negative number)
    */
   tunnelUptimeMs: number | null;
+  /**
+   * Iter 71: real-time handshake classification. Polled via `wg show
+   * <iface> latest-handshakes` on every `vpnStatus` call. Independent of
+   * `connected` (which only reflects service existence). Null on the
+   * platform error path (binary missing, exec failure) — the renderer
+   * should treat null as "unknown" and fall back to `connected` alone.
+   */
+  handshakeStatus: VpnHandshakeStatus | null;
+  /**
+   * Iter 71: milliseconds since the last successful handshake, derived
+   * from `wg show … latest-handshakes`. Null when there is no handshake
+   * yet, when the snapshot couldn't be read, or when the tunnel doesn't
+   * exist. Lets the renderer paint a "Handshake 32s ago" chip without
+   * shelling out itself.
+   */
+  handshakeAgeMs: number | null;
 }
 
 /**
@@ -514,9 +558,59 @@ export function computeTunnelUptimeMs(
   return delta;
 }
 
+/**
+ * Iter 71: classifies the active tunnel's handshake. Wraps the existing
+ * `fetchHandshakeStdout` + `parseHandshakeSnapshot` pair so callers
+ * (vpnStatus + the health monitor's fetchSnapshot dep) share one
+ * code path. Returns null on any platform error so the caller can
+ * decide whether to omit the field or fall back to `connected`.
+ */
+export async function fetchHandshakeSnapshot(
+  nowMs: number = Date.now(),
+): Promise<HandshakeSnapshot | null> {
+  try {
+    const stdout = await fetchHandshakeStdout();
+    return parseHandshakeSnapshot(stdout, nowMs);
+  } catch {
+    // Binary missing, tunnel torn down between status calls, perms flap.
+    // Surface as null so vpnStatus can degrade gracefully — the operator
+    // still sees the lifecycle stamps + the `connected` boolean.
+    return null;
+  }
+}
+
+/**
+ * Derives the {handshakeStatus, handshakeAgeMs} pair the renderer
+ * consumes from a parsed snapshot. Pure so the unit tests can pin the
+ * mapping without spawning wg.
+ */
+export function classifyHandshakeSnapshot(
+  snapshot: HandshakeSnapshot | null,
+): { handshakeStatus: VpnHandshakeStatus | null; handshakeAgeMs: number | null } {
+  if (snapshot == null) {
+    return { handshakeStatus: null, handshakeAgeMs: null };
+  }
+  switch (snapshot.kind) {
+    case "no-tunnel":
+      return { handshakeStatus: "no-tunnel", handshakeAgeMs: null };
+    case "no-handshake-yet":
+      return { handshakeStatus: "no-handshake-yet", handshakeAgeMs: null };
+    case "fresh":
+      return { handshakeStatus: "fresh", handshakeAgeMs: snapshot.handshakeAgeMs };
+    case "stale":
+      return { handshakeStatus: "stale", handshakeAgeMs: snapshot.handshakeAgeMs };
+  }
+}
+
 export async function vpnStatus(): Promise<VpnStatusResult> {
   const platformStatus =
     process.platform === "win32" ? await statusWindows() : await statusUnix();
+  // Iter 71: handshake snapshot in parallel with the platform probe.
+  // We don't gate on `connected` here — if the service exists we want
+  // the handshake state regardless, and if it doesn't `fetchHandshake`
+  // returns "no-tunnel" so the renderer gets a consistent answer.
+  const snapshot = await fetchHandshakeSnapshot();
+  const { handshakeStatus, handshakeAgeMs } = classifyHandshakeSnapshot(snapshot);
   return {
     ...platformStatus,
     lastConnectedAt: lastConnectedAt
@@ -530,6 +624,8 @@ export async function vpnStatus(): Promise<VpnStatusResult> {
       lastConnectedAt,
       Date.now(),
     ),
+    handshakeStatus,
+    handshakeAgeMs,
   };
 }
 

@@ -188,6 +188,36 @@ export function parseHandshakeSnapshot(
   return { kind: "fresh", handshakeAgeMs: ageMs };
 }
 
+/**
+ * Iter 71: observable transitions emitted by `onHealthChange`. Pre-iter71
+ * the monitor's only output was the auto-reconnect side-effect and an
+ * internal `lastDiagnostic` string nothing consumed — the OS-level
+ * notification + the renderer's panel had no way to know the tunnel had
+ * died until the user pulled `vpn:status`. The callback fires only on
+ * *transitions* so steady-state ticks don't spam consumers.
+ *
+ *   "down"        → handshake just went stale OR the tunnel disappeared
+ *                   while the monitor thought it was healthy.
+ *   "recovering"  → reconnect attempted but no fresh handshake yet.
+ *   "up"          → fresh handshake observed after a previous down/recovering.
+ */
+export type VpnHealthTransition = "down" | "recovering" | "up";
+
+export interface VpnHealthChangeEvent {
+  transition: VpnHealthTransition;
+  /** Latest snapshot the FSM saw. Useful for the renderer to render
+   *  precise text ("Handshake 4m ago" on a "down" event). */
+  snapshot: HandshakeSnapshot;
+  /** Same `lastDiagnostic` string the monitor surfaces internally — kept
+   *  in sync with the transition so the caller doesn't have to compose
+   *  the message themselves. */
+  diagnostic: string;
+  /** Consecutive failed reconnects at the time of the event (0 on `up`). */
+  consecutiveFailures: number;
+  /** Wall-clock ms when the event was emitted (`deps.now()` value). */
+  at: number;
+}
+
 export interface MonitorDeps {
   /** Reads the latest handshake state. The platform-specific shell-
    *  out lives in vpn-manager; injection keeps this module testable. */
@@ -203,6 +233,14 @@ export interface MonitorDeps {
   now?: () => number;
   /** Override the cadence — primarily useful in tests. */
   pollIntervalMs?: number;
+  /**
+   * Iter 71: invoked on every observable health transition (NOT on every
+   * tick — steady state stays quiet). The handler runs synchronously
+   * inside `tick()`; throw / reject is swallowed so a broken consumer
+   * never wedges the monitor. Optional — pre-iter71 callers (tests,
+   * legacy entry points) keep the same behaviour when this is omitted.
+   */
+  onHealthChange?: (event: VpnHealthChangeEvent) => void;
 }
 
 export class VpnHealthMonitor {
@@ -218,6 +256,13 @@ export class VpnHealthMonitor {
   // can show "intentando reconectar — endpoint no responde (intento 3)"
   // instead of a silent "Stale" with no signal.
   private lastDiagnostic: string = "";
+  // Iter 71: high-level health classification carried across ticks so
+  // we can detect *transitions* and emit `onHealthChange` only when the
+  // user-visible signal changes (steady ticks stay quiet). "unknown"
+  // is the initial state — the very first tick after `start()` always
+  // emits something concrete (up/down/recovering) so consumers can
+  // paint their initial banner without waiting for a real transition.
+  private lastHealth: "unknown" | VpnHealthTransition = "unknown";
   private readonly deps: MonitorDeps;
 
   constructor(deps: MonitorDeps) {
@@ -277,6 +322,12 @@ export class VpnHealthMonitor {
     }
 
     const now = (this.deps.now ?? Date.now)();
+    // Iter 71: emit a health transition BEFORE deciding whether to
+    // reconnect. We want the "tunnel dropped" notification to land as
+    // soon as we observe the stale signal, not after a 20-30 s
+    // reconnect attempt completes.
+    this.maybeEmitTransition(snapshot, now);
+
     const fire = shouldReconnect({
       snapshot,
       lastReconnectAt: this.lastReconnectAt,
@@ -290,6 +341,10 @@ export class VpnHealthMonitor {
     this.lastReconnectAt = now;
     const attempt = this.consecutiveFailures + 1;
     this.lastDiagnostic = `Reconectando (intento ${attempt})…`;
+    // Iter 71: surface the "recovering" transition before the actual
+    // wg-quick call so the renderer can paint a spinner while the
+    // reconnect is in flight (typically 1-3 s on Windows, less on Unix).
+    this.emitTransition("recovering", snapshot, now);
     try {
       await this.deps.reconnect();
       // Reconnect call succeeded at the API level. We DON'T zero
@@ -307,5 +362,74 @@ export class VpnHealthMonitor {
     } finally {
       this.reconnectInFlight = false;
     }
+  }
+
+  // Iter 71: maps a snapshot to a transition label and emits via the
+  // optional `onHealthChange` callback. Only emits when the resolved
+  // transition differs from `lastHealth` so the consumer sees one
+  // event per *change* rather than one per tick. Initial transition
+  // from "unknown" always fires so consumers get an anchor state.
+  private maybeEmitTransition(
+    snapshot: HandshakeSnapshot,
+    now: number,
+  ): void {
+    let next: VpnHealthTransition;
+    if (snapshot.kind === "fresh") {
+      next = "up";
+    } else if (
+      snapshot.kind === "stale" ||
+      snapshot.kind === "no-tunnel" ||
+      // "no-handshake-yet" after the grace window is "down" too. We
+      // approximate the boundary by checking whether a previous
+      // reconnect anchored the timeline; identical to shouldReconnect's
+      // grace logic so the events line up with the reconnect attempts.
+      (snapshot.kind === "no-handshake-yet" && this.lastReconnectAt > 0)
+    ) {
+      next = "down";
+    } else {
+      // Initial "no-handshake-yet" with no prior reconnect: we don't
+      // know if the tunnel is warming up or genuinely broken. Treat as
+      // recovering so the renderer shows a neutral spinner rather than
+      // a scary "disconnected" banner during the first 30 s of a
+      // legitimate connect.
+      next = "recovering";
+    }
+    if (this.lastHealth === next) return;
+    this.emitTransition(next, snapshot, now);
+  }
+
+  // Always-fire emit (callers gate on transition logic upstream). Pulls
+  // the diagnostic string + failure count so the consumer doesn't have
+  // to call two more getters to render the notification body.
+  private emitTransition(
+    transition: VpnHealthTransition,
+    snapshot: HandshakeSnapshot,
+    now: number,
+  ): void {
+    this.lastHealth = transition;
+    const cb = this.deps.onHealthChange;
+    if (!cb) return;
+    try {
+      cb({
+        transition,
+        snapshot,
+        diagnostic: this.lastDiagnostic,
+        consecutiveFailures: this.consecutiveFailures,
+        at: now,
+      });
+    } catch {
+      // A broken renderer-side listener must never wedge the polling
+      // loop. We deliberately swallow without logging — the consumer
+      // owns its own error reporting.
+    }
+  }
+
+  /** Iter 71: read-only view of the most recent transition the monitor
+   *  emitted. Returns "unknown" before the first tick has run. Used by
+   *  consumers (tray tooltip) that come online after the monitor has
+   *  been ticking and want to render the current state without waiting
+   *  for the next transition. */
+  getLastHealth(): "unknown" | VpnHealthTransition {
+    return this.lastHealth;
   }
 }

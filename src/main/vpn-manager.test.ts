@@ -44,6 +44,7 @@ import {
   inspectConfig,
   computeTunnelUptimeMs,
   formatUptimeMs,
+  classifyHandshakeSnapshot,
   __test,
 } from "./vpn-manager";
 
@@ -581,5 +582,49 @@ describe("formatUptimeMs", () => {
   it("renders multi-day durations as `d h` (48h tipping point)", () => {
     expect(formatUptimeMs(48 * 3_600_000)).toBe("2d 0h");
     expect(formatUptimeMs(3 * 24 * 3_600_000 + 4 * 3_600_000)).toBe("3d 4h");
+  });
+});
+
+// ─── 13. classifyHandshakeSnapshot (iter 71) ────────────────────────────────
+//
+// Pure mapping that translates the `parseHandshakeSnapshot` result into
+// the `{handshakeStatus, handshakeAgeMs}` pair the renderer consumes
+// via `vpn:status`. Pre-iter71 this mapping didn't exist and `vpnStatus`
+// only reported the boolean `connected` flag — the renderer had no way
+// to distinguish "service installed, peer reachable" from "service
+// installed, peer silent for 3 days".
+
+describe("classifyHandshakeSnapshot (iter 71)", () => {
+  it("returns nulls for the null sentinel (platform error path)", () => {
+    expect(classifyHandshakeSnapshot(null)).toEqual({
+      handshakeStatus: null,
+      handshakeAgeMs: null,
+    });
+  });
+
+  it("maps 'no-tunnel' to status=no-tunnel, age=null", () => {
+    expect(classifyHandshakeSnapshot({ kind: "no-tunnel" })).toEqual({
+      handshakeStatus: "no-tunnel",
+      handshakeAgeMs: null,
+    });
+  });
+
+  it("maps 'no-handshake-yet' to status=no-handshake-yet, age=null", () => {
+    expect(classifyHandshakeSnapshot({ kind: "no-handshake-yet" })).toEqual({
+      handshakeStatus: "no-handshake-yet",
+      handshakeAgeMs: null,
+    });
+  });
+
+  it("preserves the handshake age for the 'fresh' branch", () => {
+    expect(
+      classifyHandshakeSnapshot({ kind: "fresh", handshakeAgeMs: 12_345 }),
+    ).toEqual({ handshakeStatus: "fresh", handshakeAgeMs: 12_345 });
+  });
+
+  it("preserves the handshake age for the 'stale' branch", () => {
+    expect(
+      classifyHandshakeSnapshot({ kind: "stale", handshakeAgeMs: 5 * 60_000 }),
+    ).toEqual({ handshakeStatus: "stale", handshakeAgeMs: 5 * 60_000 });
   });
 });

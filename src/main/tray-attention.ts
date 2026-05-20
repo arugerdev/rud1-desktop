@@ -47,6 +47,32 @@ export function formatTrayTooltip(count: number): string {
   return `rud1 Desktop — ${n} devices ready to configure`;
 }
 
+/**
+ * Iter 71: VPN health overlay for the tray tooltip. Pre-iter71 the
+ * tooltip only carried the first-boot host count — a silent VPN
+ * disconnect left no surface at all when the panel window was hidden.
+ * The overlay is appended after the base tooltip so the existing
+ * "N devices ready" signal stays the lead.
+ *
+ *   "up" / "unknown" → no suffix (steady state; the tooltip is the
+ *                       generic "rud1 Desktop" or first-boot count).
+ *   "down"           → "VPN desconectada" so the user sees it at a
+ *                       glance even with the panel closed.
+ *   "recovering"     → "VPN reconectando…" so the user knows the
+ *                       monitor is actively trying.
+ */
+export type TrayVpnHealth = "unknown" | "up" | "down" | "recovering";
+
+export function formatTrayTooltipWithVpn(
+  count: number,
+  vpn: TrayVpnHealth,
+): string {
+  const base = formatTrayTooltip(count);
+  if (vpn === "down") return `${base} — VPN desconectada`;
+  if (vpn === "recovering") return `${base} — VPN reconectando…`;
+  return base;
+}
+
 export function computeTrayState(
   prevCount: number,
   newCount: number,

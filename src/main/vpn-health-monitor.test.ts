@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   STALE_THRESHOLD_MS,
+  VpnHealthMonitor,
   parseHandshakeSnapshot,
   shouldReconnect,
+  type HandshakeSnapshot,
+  type VpnHealthChangeEvent,
 } from "./vpn-health-monitor";
 
 describe("parseHandshakeSnapshot", () => {
@@ -189,5 +192,136 @@ describe("shouldReconnect FSM", () => {
         staleThresholdMs: 200_000,
       }),
     ).toBe(false);
+  });
+});
+
+// Iter 71: the monitor's `onHealthChange` callback is the surface main
+// uses to drive notifications + tray tooltip + renderer broadcasts.
+// These tests pin: (a) one event per transition (no per-tick spam),
+// (b) the initial transition fires, (c) the synthetic "recovering"
+// event lands between the stale-detection tick and the actual reconnect.
+describe("VpnHealthMonitor.onHealthChange transitions", () => {
+  // Build a monitor with deterministic snapshot + reconnect deps. The
+  // snapshot value is mutated between ticks so the FSM sees the
+  // operator-visible scenario play out.
+  function makeMonitor(opts: {
+    initialSnapshot: HandshakeSnapshot;
+    reconnect?: () => Promise<void>;
+    onHealthChange?: (event: VpnHealthChangeEvent) => void;
+    enabled?: () => boolean;
+  }) {
+    let snap = opts.initialSnapshot;
+    const monitor = new VpnHealthMonitor({
+      fetchSnapshot: async () => snap,
+      reconnect: opts.reconnect ?? (async () => undefined),
+      enabled: opts.enabled ?? (() => true),
+      onHealthChange: opts.onHealthChange,
+      now: () => 5_000_000, // anchored; tests that exercise time can stub
+    });
+    const setSnapshot = (next: HandshakeSnapshot) => {
+      snap = next;
+    };
+    return { monitor, setSnapshot };
+  }
+
+  it("fires a single 'up' event on the first fresh tick and stays quiet afterwards", async () => {
+    const events: VpnHealthChangeEvent[] = [];
+    const { monitor } = makeMonitor({
+      initialSnapshot: { kind: "fresh", handshakeAgeMs: 5_000 },
+      onHealthChange: (e) => events.push(e),
+    });
+    await monitor.tick();
+    await monitor.tick();
+    await monitor.tick();
+    expect(events.length).toBe(1);
+    expect(events[0]?.transition).toBe("up");
+  });
+
+  it("fires 'down' when a fresh handshake goes stale", async () => {
+    const events: VpnHealthChangeEvent[] = [];
+    const { monitor, setSnapshot } = makeMonitor({
+      initialSnapshot: { kind: "fresh", handshakeAgeMs: 5_000 },
+      onHealthChange: (e) => events.push(e),
+    });
+    await monitor.tick(); // first "up"
+    setSnapshot({ kind: "stale", handshakeAgeMs: 4 * 60_000 });
+    await monitor.tick(); // observes stale → "down" then "recovering" (reconnect fires)
+    const transitions = events.map((e) => e.transition);
+    expect(transitions[0]).toBe("up");
+    expect(transitions).toContain("down");
+    // "recovering" lands BEFORE the reconnect resolves because the FSM
+    // gates on shouldReconnect() which sees an anchor-less stale → fires.
+    expect(transitions).toContain("recovering");
+  });
+
+  it("fires 'up' when a previously-stale tunnel recovers", async () => {
+    const events: VpnHealthChangeEvent[] = [];
+    const { monitor, setSnapshot } = makeMonitor({
+      // Pretend the desktop opened mid-outage — first observable state
+      // is stale. consecutiveFailures stays 0 because the monitor only
+      // bumps it inside tick() after a reconnect attempt.
+      initialSnapshot: { kind: "stale", handshakeAgeMs: 4 * 60_000 },
+      onHealthChange: (e) => events.push(e),
+    });
+    await monitor.tick();
+    setSnapshot({ kind: "fresh", handshakeAgeMs: 2_000 });
+    await monitor.tick();
+    const transitions = events.map((e) => e.transition);
+    expect(transitions[transitions.length - 1]).toBe("up");
+  });
+
+  it("does NOT re-emit the same transition on consecutive ticks", async () => {
+    const events: VpnHealthChangeEvent[] = [];
+    const { monitor } = makeMonitor({
+      initialSnapshot: { kind: "fresh", handshakeAgeMs: 5_000 },
+      onHealthChange: (e) => events.push(e),
+    });
+    for (let i = 0; i < 10; i++) {
+      await monitor.tick();
+    }
+    expect(events).toHaveLength(1);
+  });
+
+  it("a throwing handler does not wedge the polling loop", async () => {
+    let calls = 0;
+    const { monitor } = makeMonitor({
+      initialSnapshot: { kind: "fresh", handshakeAgeMs: 1_000 },
+      onHealthChange: () => {
+        calls++;
+        throw new Error("boom");
+      },
+    });
+    // Each tick should complete cleanly. The handler is called once
+    // (transition fires only on the initial "up") and the second tick
+    // is steady-state so it doesn't call the handler at all.
+    await expect(monitor.tick()).resolves.toBeUndefined();
+    await expect(monitor.tick()).resolves.toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
+  it("getLastHealth() reports the most recently emitted transition", async () => {
+    const { monitor, setSnapshot } = makeMonitor({
+      initialSnapshot: { kind: "fresh", handshakeAgeMs: 1_000 },
+    });
+    expect(monitor.getLastHealth()).toBe("unknown");
+    await monitor.tick();
+    expect(monitor.getLastHealth()).toBe("up");
+    setSnapshot({ kind: "stale", handshakeAgeMs: 5 * 60_000 });
+    await monitor.tick();
+    // The stale tick emits "down" first then "recovering" (because the
+    // FSM fires a reconnect attempt). getLastHealth therefore reports
+    // the most recent of the two — "recovering".
+    expect(monitor.getLastHealth()).toBe("recovering");
+  });
+
+  it("does NOT call the handler when enabled() returns false", async () => {
+    const handler = vi.fn();
+    const { monitor } = makeMonitor({
+      initialSnapshot: { kind: "stale", handshakeAgeMs: 9 * 60_000 },
+      onHealthChange: handler,
+      enabled: () => false,
+    });
+    await monitor.tick();
+    expect(handler).not.toHaveBeenCalled();
   });
 });
