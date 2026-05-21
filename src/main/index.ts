@@ -72,6 +72,7 @@ import {
   type ThemePreference,
 } from "./preferences-manager";
 import { NotificationStreamManager } from "./notification-stream-manager";
+import { notifyDeviceReady } from "./notifications";
 import {
   USB_SESSION_FILENAME,
   addSession as addUsbSessionEntry,
@@ -1342,6 +1343,7 @@ app.whenReady().then(() => {
     deviceListManager = new DeviceListManager({
       baseUrl: cloudOrigin,
       onStateChange: () => { rebuildTrayMenu(); },
+      onDeviceReady: (device) => { notifyDeviceReady(device.name); },
     });
     deviceListManager.start();
   } catch {

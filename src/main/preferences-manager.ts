@@ -32,6 +32,13 @@ export interface NotificationToggles {
   vpn: boolean;
   /** USB attach / detach toasts. */
   usb: boolean;
+  /**
+   * "Device connected and ready" toast — fired when a device the user
+   * just claimed transitions to ONLINE for the first time, or when an
+   * existing device recovers from OFFLINE. Edge-triggered: the initial
+   * status seen on app start is not announced.
+   */
+  deviceReady: boolean;
 }
 
 export interface Preferences {
@@ -50,7 +57,7 @@ const SCHEMA_VERSION = 1;
 
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",
-  notifications: { firstBoot: true, vpn: true, usb: true },
+  notifications: { firstBoot: true, vpn: true, usb: true, deviceReady: true },
   vpnAutoReconnect: true,
 };
 
@@ -96,6 +103,10 @@ export function sanitizePreferences(parsed: unknown): Preferences {
         typeof rawN.vpn === "boolean" ? rawN.vpn : DEFAULT_PREFERENCES.notifications.vpn,
       usb:
         typeof rawN.usb === "boolean" ? rawN.usb : DEFAULT_PREFERENCES.notifications.usb,
+      deviceReady:
+        typeof rawN.deviceReady === "boolean"
+          ? rawN.deviceReady
+          : DEFAULT_PREFERENCES.notifications.deviceReady,
     },
     vpnAutoReconnect:
       typeof raw.vpnAutoReconnect === "boolean"
@@ -162,6 +173,10 @@ export async function setPreferences(patch: PreferencesPatch): Promise<Preferenc
       typeof patch.notifications?.usb === "boolean"
         ? patch.notifications.usb
         : current.notifications.usb,
+    deviceReady:
+      typeof patch.notifications?.deviceReady === "boolean"
+        ? patch.notifications.deviceReady
+        : current.notifications.deviceReady,
   };
   const next: Preferences = {
     theme: isThemePreference(patch.theme) ? patch.theme : current.theme,

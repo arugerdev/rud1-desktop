@@ -140,6 +140,21 @@ export function notifyUsbDetached(label: string | null, busId: string) {
   });
 }
 
+// ─── Device lifecycle ───────────────────────────────────────────────────────
+
+/**
+ * Fired when a device the tray is tracking transitions to ONLINE — most
+ * commonly the first heartbeat after the user finishes the pairing
+ * dialog in the dashboard. Edge-triggered by `DeviceListManager` so
+ * already-online devices don't bark on every app start.
+ */
+export function notifyDeviceReady(deviceName: string | null | undefined) {
+  const subject = deviceName && deviceName.trim() ? deviceName.trim() : "Device";
+  show(`${subject} connected`, `${subject} is online and ready to use.`, {
+    category: "deviceReady",
+  });
+}
+
 /** True when the platform supports notifications and the constructor
  *  worked. Exposed for diagnostics so the renderer can decide whether
  *  to fall back to in-app toasts. */

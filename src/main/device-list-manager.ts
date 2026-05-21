@@ -9,10 +9,18 @@
 // `net.fetch` here implicitly reuses that session — no extra wiring
 // or token management.
 //
-// Cadence: 60s under normal operation, doubled to 120s after a network
-// failure (capped at 5 min). The tray itself only shows up after a
-// successful response, so a failure on cold start renders an
-// inoffensive "—" until the next poll lands.
+// Cadence: 10s under normal operation, doubled after a network failure
+// (capped at 60s). Pre-2026-05 this was 60s/300s — but the firmware's
+// heartbeat dropped from 60s to 15s, so the tray was the slowest part
+// of the realtime chain. Matching the new fw cadence keeps the tray
+// inside the same "one missed beat" window as the dashboard.
+//
+// Why not SSE here: the `/api/v1/stream/devices` SSE the dashboard
+// uses is scoped to the active organization, but the tray shows
+// devices across every org the user belongs to. Until the cloud
+// exposes a multi-org SSE we keep polling — the cost is small at 10s
+// (one tiny JSON GET) and the manager already coalesces ticks while
+// one is in flight.
 //
 // Lifecycle: `start()` schedules an immediate fetch + an interval,
 // `stop()` cancels both. Both are idempotent.
@@ -50,6 +58,14 @@ export interface DeviceListManagerOptions {
   baseUrl: string;
   /** Notified on every state change so the tray rebuild can run. */
   onStateChange?: (state: DeviceListState) => void;
+  /**
+   * Fired exactly once per device per non-ONLINE → ONLINE transition.
+   * The initial status seen during the first successful poll is NOT
+   * announced — otherwise opening the app would bark for every device
+   * the user already had connected. Used by the main process to surface
+   * an OS-level "device connected" notification.
+   */
+  onDeviceReady?: (device: DeviceSummary) => void;
   /** Override for tests; defaults to electron's net.fetch. */
   fetchFn?: (url: string) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
   /** Override for tests; defaults to setInterval/clearInterval/etc. */
@@ -59,14 +75,20 @@ export interface DeviceListManagerOptions {
   };
 }
 
-const BASE_INTERVAL_MS = 60_000;
-const MAX_INTERVAL_MS = 5 * 60_000;
+const BASE_INTERVAL_MS = 10_000;
+const MAX_INTERVAL_MS = 60_000;
 
 export class DeviceListManager {
   private state: DeviceListState = { kind: "idle" };
   private intervalHandle: unknown = null;
   private currentDelay = BASE_INTERVAL_MS;
   private stopped = false;
+  // Per-device status from the previous successful poll. We seed this
+  // on the FIRST successful response so initial-state devices never
+  // trigger `onDeviceReady`; every subsequent transition is checked
+  // against the snapshot we held before the new poll arrived.
+  private lastStatusById = new Map<string, DeviceStatus>();
+  private seeded = false;
 
   constructor(private readonly opts: DeviceListManagerOptions) {}
 
@@ -143,6 +165,24 @@ export class DeviceListManager {
       }
       const body = (await res.json()) as { devices?: DeviceSummary[] };
       const devices = Array.isArray(body.devices) ? body.devices : [];
+      // Edge-detect non-ONLINE → ONLINE. Skipped on the first successful
+      // response so we don't bark on app start. A newly-paired device
+      // (not in `lastStatusById` yet) DOES fire — that's exactly the
+      // moment the user expects to hear about.
+      if (this.seeded && this.opts.onDeviceReady) {
+        for (const d of devices) {
+          const prev = this.lastStatusById.get(d.id);
+          if (d.status === "ONLINE" && prev !== "ONLINE") {
+            try {
+              this.opts.onDeviceReady(d);
+            } catch {
+              // never let the notifier kill the polling loop
+            }
+          }
+        }
+      }
+      this.lastStatusById = new Map(devices.map((d) => [d.id, d.status]));
+      this.seeded = true;
       this.setState({ kind: "ok", devices, fetchedAt: Date.now() });
       this.currentDelay = BASE_INTERVAL_MS;
     } catch (err) {
