@@ -1,12 +1,4 @@
-// Pure state machine for the tray-icon "attention" badge: given the
-// previous and new first-boot host counts, returns the tray fields the
-// caller in index.ts pushes to Electron. Kept side-effect-free so the
-// policy is exhaustively unit-testable without a real Tray.
-//
-// macOS uses `tray.setTitle()` for an always-visible count next to the
-// menu-bar icon; on Win/Linux setTitle no-ops, so the tooltip + the
-// idle/attention icon swap (in tray.ts) carry the signal.
-
+// Pure: macOS usa setTitle, Win/Linux usa tooltip + icon swap.
 export interface TrayAttentionState {
   count: number;
   title: string;
@@ -29,9 +21,7 @@ export function iconStateForCount(count: number): TrayIconKind {
   return Math.floor(count) > 0 ? "attention" : "idle";
 }
 
-// Leading space keeps the digit from rendering flush against the icon
-// (subscript-looking at menu-bar font sizes); cap at "9+" so the title
-// can't blow out menu-bar real estate on a fleet network.
+// Leading space + "9+" cap evita romper la menu-bar.
 export function formatTrayTitle(count: number): string {
   if (!Number.isFinite(count) || count <= 0) return "";
   const n = Math.floor(count);
@@ -47,20 +37,6 @@ export function formatTrayTooltip(count: number): string {
   return `rud1 Desktop — ${n} devices ready to configure`;
 }
 
-/**
- * Iter 71: VPN health overlay for the tray tooltip. Pre-iter71 the
- * tooltip only carried the first-boot host count — a silent VPN
- * disconnect left no surface at all when the panel window was hidden.
- * The overlay is appended after the base tooltip so the existing
- * "N devices ready" signal stays the lead.
- *
- *   "up" / "unknown" → no suffix (steady state; the tooltip is the
- *                       generic "rud1 Desktop" or first-boot count).
- *   "down"           → "VPN desconectada" so the user sees it at a
- *                       glance even with the panel closed.
- *   "recovering"     → "VPN reconectando…" so the user knows the
- *                       monitor is actively trying.
- */
 export type TrayVpnHealth = "unknown" | "up" | "down" | "recovering";
 
 export function formatTrayTooltipWithVpn(
@@ -77,9 +53,7 @@ export function computeTrayState(
   prevCount: number,
   newCount: number,
 ): TrayStateTransition {
-  // Coerce non-finite/negative to 0 — `NaN !== NaN` would otherwise pin
-  // `changed` to true on every tick. Probe loop never emits these, but
-  // the IPC surface might once a renderer-driven override lands.
+  // Coerce no-finite/neg a 0 (NaN!==NaN pinearía changed=true cada tick).
   const prev = clampCount(prevCount);
   const next = clampCount(newCount);
   const prevIcon = iconStateForCount(prev);

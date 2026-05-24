@@ -1,81 +1,19 @@
-/**
- * Version-check manager (iter 29).
- *
- * Lightweight nudge: the desktop app currently has no self-update flow.
- * This manager fetches a JSON manifest from a configured HTTPS URL,
- * compares the advertised `version` against `app.getVersion()` using the
- * existing semver helpers in `auto-updater.ts`, and surfaces an "Update
- * available" affordance via a callback. Wiring lives in `index.ts` —
- * the manager is pure plumbing so it can be unit-tested without the
- * Electron runtime.
- *
- * Design choices, briefly:
- *   • The full electron-updater download/install flow is intentionally
- *     out of scope here. Until we ship signed builds with a release
- *     channel we just let the operator click through to the published
- *     download page; the autoUpdater plumbing in `auto-updater.ts`
- *     stays parked behind feature flags for future activation.
- *   • The manifest URL and current version are injected so tests don't
- *     have to monkey-patch `app.getVersion()` or stub `fetch`.
- *   • `checkOnce` is a single-shot fetch + compare. The schedule is
- *     applied by `start()` which runs an immediate check then sets a
- *     `setInterval`. We never retry on failure — a transient outage
- *     simply leaves `state.kind = "error"` until the next tick fires
- *     successfully.
- *   • All inputs from the network are validated: the URL must be
- *     HTTPS (matches `auto-updater.ts` policy), the response body must
- *     be a small JSON object, and the version string runs through
- *     `parseSemver` before comparison. A malformed manifest never
- *     promotes the state out of "error".
- */
-
+// Fetch + semver compare; no retry, transient leaves state=error hasta next tick.
 import { createHash, createPublicKey, verify as cryptoVerify } from "crypto";
 
 import { __test as autoUpdaterInternals, type AutoUpdateState } from "./auto-updater";
 
 const { isValidFeedUrl, parseSemver, isNewerVersion, compareSemver } = autoUpdaterInternals;
 
-// Hard cap on the body we'll read from the manifest URL. A well-formed
-// release feed is a few hundred bytes; anything bigger is almost
-// certainly a misconfiguration (or an attempt to OOM the app).
 const MAX_MANIFEST_BYTES = 16 * 1024;
 
-// Iter 32 — manifest schema version cap. We accept legacy unversioned
-// manifests (treated as v1) and explicit v1; v2 layers in the requirement
-// that `sha256` be present and shaped like 64 lowercase-hex chars. Any
-// `manifestVersion` strictly greater than this constant is REFUSED as
-// "unsupported future schema" — failing closed beats silently treating an
-// unknown shape as if it were the latest known one. Bumping the cap is a
-// deliberate gate for future schema work.
-//
-// Iter 47 — bumped to 3 to accept the new `signatureUrl` optional field
-// (.sig sidecar URL for detached signature verification — pairs with
-// iter-31 strict-mode + iter-32 sha256 checksums). v3 is intentionally
-// a SUPERSET of v2: every v2 manifest is a valid v3 manifest, and v3
-// only adds an OPTIONAL `signatureUrl`. The v2 sha256 requirement
-// continues to apply (a v3 manifest without sha256 is still rejected).
-// v2 remains the canonical floor — we don't bump the manifest writer's
-// default emission, only the parser ceiling.
+// v1 = legacy/unversioned, v2 = sha256 required, v3 = + signatureUrl opcional. Falla cerrado en >3.
 const MAX_SUPPORTED_MANIFEST_VERSION = 3;
 
-// Iter 32 — sha256 hex shape: exactly 64 chars of [0-9a-f] (case-insensitive
-// input is accepted; we lowercase before storing). Anything else is
-// rejected so a manifest with `sha256: "deadbeef"` (too short) or
-// `sha256: "...zzz..."` (non-hex) can't slip past the v2 gate.
 const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/i;
 
-// Iter 36 — minBootstrapVersion shape gate. Anchored at start; the
-// sha256-style strictness ("malformed → reject the whole manifest") is the
-// same as for `version` itself. We deliberately keep the regex permissive
-// enough to accept prerelease / build-metadata suffixes (`1.2.3-rc.1+sha`)
-// but require the leading `MAJOR.MINOR.PATCH` triplet — anything else is a
-// server-side typo we'd rather surface than mask. The dedicated `parseSemver`
-// run a few lines later then performs the full RFC parse.
 const MIN_BOOTSTRAP_VERSION_SHAPE = /^\d+\.\d+\.\d+/;
 
-// Default poll cadence. Hourly is plenty — release announcements aren't
-// time-critical, and we want to be invisible on the network. Caller can
-// override.
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 
 // Per-fetch timeout. Short enough that a stuck CDN doesn't block app

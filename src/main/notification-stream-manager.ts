@@ -1,20 +1,4 @@
-/**
- * Cloud→Desktop SSE manager.
- *
- * Opens a long-lived `text/event-stream` GET against
- * `${baseUrl}/api/v1/notifications/stream` and fires a native OS
- * notification for every `notification` event the server pushes. The
- * dashboard cookie session shipped by `electron.net.fetch` carries
- * the auth — same way the BrowserWindow itself loads the dashboard,
- * so the manager doesn't need to know anything about login state.
- *
- * Reconnect strategy: 1 s → 2 s → 4 s → … capped at 60 s on errors,
- * and the same delay (starting fresh) when the server closes cleanly.
- * 401 backs off harder (60 s) because it almost always means "the
- * user hasn't logged into the dashboard yet" and hammering the
- * endpoint won't help.
- */
-
+// SSE persistente; reconnect 1→2→4…60s; 401 backs off duro 60s.
 import { Notification, net } from "electron";
 
 import { isNotificationEnabled } from "./preferences-manager";
@@ -46,18 +30,9 @@ function isCloudNotification(value: unknown): value is CloudNotification {
 }
 
 export interface NotificationStreamManagerDeps {
-  /**
-   * Origin to dial — typically `https://www.rud1.es` (or the
-   * `RUD1_APP_URL` host the BrowserWindow points at). Must NOT
-   * include a trailing slash.
-   */
+  /** Origin sin trailing slash. */
   baseUrl: string;
-  /**
-   * Called when a notification fires and the user clicks the OS
-   * toast. Receives the absolute URL the dashboard should navigate
-   * to. The implementation lives in index.ts so it can show/focus
-   * the main window before navigation.
-   */
+  /** Disparado al click; recibe URL absoluta para navegar. */
   onNotificationClick: (url: string) => void;
 }
 

@@ -1,12 +1,4 @@
-/**
- * Preload script — runs in an isolated context before the renderer page loads.
- * Exposes the native API to the web app via contextBridge.
- *
- * The web app accesses these methods via window.electronAPI.
- * Type declarations for window.electronAPI are in src/types/electron.d.ts
- * (or defined in the web app itself).
- */
-
+// Preload aislado; exposes native API vía contextBridge. Types en electron.d.ts.
 import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("electronAPI", {
@@ -21,52 +13,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("vpn:status") as Promise<{
         connected: boolean;
         ip?: string;
-        // Iter 57: lifecycle freshness signals. ISO 8601 (UTC) so the
-        // renderer can format them the same way it formats the cloud's
-        // lan.lastAppliedAt chip. Null until the corresponding action
-        // (connect/disconnect) has succeeded at least once this session.
+        /** ISO 8601 UTC; null hasta primer connect/disconnect this session. */
         lastConnectedAt: string | null;
         lastDisconnectedAt: string | null;
-        // Iter 58: derived convenience field — `Date.now() - lastConnectedAt`
-        // when the tunnel is up AND we have a connect stamp from this
-        // session. Null otherwise (disconnected, no stamp, or clock skew).
-        // Lets the renderer paint "Tunnel up 12m" without re-parsing the
-        // ISO stamps. Older desktop builds (< iter 58) omit this field;
-        // renderers should feature-detect with `??`.
+        /** Date.now()-lastConnectedAt cuando up + stamp; null otherwise. */
         tunnelUptimeMs: number | null;
-        // Iter 71: real-time handshake state. Independent of `connected`
-        // (which only reflects "the OS has a tunnel service"). A pre-iter71
-        // bug surfaced "connected: true" forever when the peer went silent;
-        // the renderer must consult `handshakeStatus` to draw the live
-        // signal. Null on platform error — fall back to `connected` then.
-        //   "no-tunnel"        → interface gone
-        //   "no-handshake-yet" → service exists, warming up
-        //   "fresh"            → handshake within ~75 s (working)
-        //   "stale"            → handshake too old (peer unreachable)
+        // handshakeStatus es independiente de `connected` (OS service flag).
         handshakeStatus:
           | "no-tunnel"
           | "no-handshake-yet"
           | "fresh"
           | "stale"
           | null;
-        // Iter 71: milliseconds since the last successful handshake.
-        // Null when no handshake yet OR the snapshot couldn't be read.
         handshakeAgeMs: number | null;
       }>,
 
-    /**
-     * Iter 71: push subscription to VPN health transitions (silent
-     * disconnects, auto-reconnect attempts, recoveries). Pre-iter71 the
-     * renderer had to poll `vpn:status` on a timer to notice a dead
-     * tunnel; the bug "still says connected when it isn't" was the
-     * direct user-visible result. The desktop now emits a `vpn:health`
-     * IPC event on every observable transition and the renderer
-     * subscribes via this surface — `onHealthChange` returns an
-     * unsubscribe handle (same pattern as `firstBootDedupe.onUpdate` /
-     * `versionCheck.onUpdate`). Older desktops (< iter71) don't expose
-     * this method; renderers should feature-detect with
-     * `typeof window.electronAPI?.vpn?.onHealthChange === "function"`.
-     */
+    // Push subscription a VPN health transitions; returns unsubscribe handle.
     onHealthChange: (
       cb: (event: {
         transition: "up" | "down" | "recovering";

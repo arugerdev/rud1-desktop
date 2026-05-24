@@ -1,15 +1,4 @@
-// Persisted dedupe of the first-boot OS notification. The in-memory rising
-// edge in firmware-discovery survives only as long as the app stays running,
-// so a Pi still in first-boot mode the next morning re-notifies the operator
-// who already dismissed yesterday's toast — persisting across restarts fixes
-// that. Hosts drop on the falling edge (operator finished setup, or the Pi
-// got reflashed and is now paired) so the same host re-notifies if it re-
-// enters first-boot weeks later. A 30-day TTL prunes idle entries on load
-// (and a Pi stuck in first-boot for a month is genuinely worth re-flagging),
-// and a 50-entry FIFO cap by notifiedAt bounds disk size in the pathological
-// case. Pure helpers are exported separately from the I/O wrappers so the
-// dedupe semantics are testable without touching disk.
-
+// 30d TTL + 50-entry FIFO cap; falling-edge drops para que reflash re-notifique.
 import { promises as fsp } from "fs";
 import * as path from "path";
 
@@ -23,7 +12,7 @@ export interface PersistedDedupeFile {
   notifiedHosts: NotifiedHost[];
 }
 
-export const DEDUPE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+export const DEDUPE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const DEDUPE_CAP = 50;
 export const DEDUPE_FILENAME = "first-boot-notifications.json";
 
@@ -35,7 +24,7 @@ export function pruneExpiredHosts(
   const cutoff = now.getTime() - ttlMs;
   return hosts.filter((h) => {
     const t = Date.parse(h.notifiedAt);
-    if (Number.isNaN(t)) return false; // garbage entries are silently dropped
+    if (Number.isNaN(t)) return false;
     return t >= cutoff;
   });
 }
@@ -45,7 +34,7 @@ export function enforceCap(
   cap: number = DEDUPE_CAP,
 ): NotifiedHost[] {
   if (hosts.length <= cap) return [...hosts];
-  // Sort ascending by notifiedAt; NaN (malformed) sorts as oldest so it gets evicted first.
+  // Asc por notifiedAt; NaN sorts oldest → evicted first.
   const sorted = [...hosts].sort((a, b) => {
     const ta = Date.parse(a.notifiedAt);
     const tb = Date.parse(b.notifiedAt);
@@ -56,7 +45,6 @@ export function enforceCap(
   return sorted.slice(sorted.length - cap);
 }
 
-// Re-adding an existing host refreshes its notifiedAt to now.
 export function addHost(
   hosts: readonly NotifiedHost[],
   host: string,
@@ -74,8 +62,6 @@ export function removeHost(
   return hosts.filter((h) => h.host !== host);
 }
 
-// Bad-shape entries return [] rather than throwing — dedupe is non-critical;
-// notify-once-too-often beats crashing main on a corrupt file.
 function sanitize(parsed: unknown): NotifiedHost[] {
   if (!parsed || typeof parsed !== "object") return [];
   const obj = parsed as Record<string, unknown>;
@@ -92,8 +78,6 @@ function sanitize(parsed: unknown): NotifiedHost[] {
   return out;
 }
 
-// Missing/corrupt/unreadable file all return [] — never propagate I/O errors,
-// dedupe is UX only, not load-bearing.
 export async function loadNotifiedHosts(
   filepath: string,
   now: Date,
@@ -123,8 +107,7 @@ export async function loadNotifiedHosts(
   return pruneExpiredHosts(sanitize(parsed), now, ttlMs);
 }
 
-// Atomic write via tmp+rename so a process kill mid-write can't truncate the
-// real file. Errors are logged-and-swallowed (same rationale as load).
+// Atomic write via tmp+rename evita ficheros truncados en process kill.
 export async function saveNotifiedHosts(
   filepath: string,
   hosts: readonly NotifiedHost[],
@@ -143,7 +126,6 @@ export async function saveNotifiedHosts(
     console.warn(
       `[first-boot-dedupe] write failed: ${err instanceof Error ? err.message : err}`,
     );
-    // Best-effort cleanup of a stale tmp file. Ignore secondary failures.
     try {
       await fsp.unlink(tmp);
     } catch {

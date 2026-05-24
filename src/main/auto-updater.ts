@@ -1,39 +1,4 @@
-/**
- * Auto-updater manager (iter 21).
- *
- * Thin wrapper over `electron-updater`'s `autoUpdater` singleton. The
- * feed URL, release channel, and any version strings that reach us from
- * the feed are treated as untrusted: a compromised update server could
- * otherwise induce the app to auto-install arbitrary payloads, and a
- * malicious IPC caller could flip the channel to a staging feed. All
- * inputs that cross a trust boundary run through the validators in
- * `__test` before anything touches `electron-updater`.
- *
- * Scope:
- *   • isValidFeedUrl        — allowlist-style URL validator; only https://
- *     with a bare host, no userinfo, no control characters, no shell
- *     metacharacters in the path.
- *   • isValidChannel        — allowlist of release channel names
- *     ("latest", "beta", "alpha"). Anything else is rejected.
- *   • parseSemver / compareSemver — best-effort semver parsing used to
- *     decide whether a remote "latest" is actually newer than the
- *     currently-installed app. electron-updater does its own comparison
- *     internally; ours is a defensive cross-check used by `isNewerVersion`
- *     so we never surface a "downgrade available" dialog.
- *   • isNewerVersion        — pure predicate used by the renderer-facing
- *     status handler.
- *
- * Runtime wiring (registerAutoUpdater / checkForUpdates) is intentionally
- * minimal: we delegate the actual download + staged install to
- * electron-updater. The test suite covers the validators + version logic
- * directly and uses `it.todo` for the event-emitter chain, matching the
- * pattern established in iter 17–20.
- */
-
-// The `autoUpdater` import is lazy: importing `electron-updater` at module
-// load time pulls in `electron.app` which is not available in a plain
-// Node vitest run. We only touch it from `registerAutoUpdater`, which is
-// called from the main process after `app.whenReady()`.
+// Wrapper sobre electron-updater; feed URL + channel + versiones validados antes de tocar el SDK.
 type ElectronUpdaterLike = {
   autoDownload: boolean;
   allowPrerelease: boolean;
@@ -46,44 +11,14 @@ type ElectronUpdaterLike = {
 const ALLOWED_CHANNELS = ["latest", "beta", "alpha"] as const;
 type Channel = (typeof ALLOWED_CHANNELS)[number];
 
-// A conservative host charset: ASCII letters/digits, dots, hyphens. No
-// userinfo (`user:pass@host`), no IP-literal brackets, no port-component
-// validation — electron-updater parses the URL itself and will refuse
-// non-HTTPS in signed builds. Our guard is a belt-and-braces pre-filter.
 const HOST_REGEX = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i;
 
-// Path + query charset: URL-safe characters only. Reject control chars,
-// whitespace, backslash, and the classic shell metacharacters. A feed URL
-// is embedded verbatim in HTTP requests — never in a shell — but we
-// defence-in-depth anyway in case a future refactor logs it through
-// execFile (see vpn-manager iter 19).
 const UNSAFE_PATH_CHARS = /[\s\\`$;&|<>"'(){}[\]]/;
 
-/**
- * Allowlist validator for an update feed URL.
- *
- * Rules:
- *   • must parse as a URL
- *   • protocol must be exactly `https:` — plain http would let a MITM
- *     attacker swap the update manifest; `file://` / `javascript:` etc.
- *     are obviously forbidden.
- *   • no `userinfo` component (e.g. `https://user:pass@evil/`) — those
- *     can be used to smuggle credentials or to bypass hostname checks
- *     in some URL parsers.
- *   • hostname must match HOST_REGEX (ASCII letters/digits, dots, hyphens)
- *   • path + search must not contain control characters, whitespace,
- *     backslash, or shell metacharacters.
- *   • hash fragment is not allowed (feed URLs don't use them; an
- *     unexpected `#` is probably an injection attempt).
- */
 function isValidFeedUrl(input: unknown): input is string {
   if (typeof input !== "string" || input.length === 0) return false;
-  if (input.length > 2048) return false; // hard cap — feed URLs are short
-  // Check the RAW input for unsafe characters BEFORE the URL parser
-  // canonicalises them away. The WHATWG URL parser silently
-  // percent-encodes backticks / quotes / spaces and even rewrites
-  // backslashes to forward slashes — that canonicalisation would
-  // otherwise hide shell metacharacters from the post-parse guard.
+  if (input.length > 2048) return false;
+  // Chequear raw ANTES de URL parser: percent-encoding ocultaría shell meta.
   if (UNSAFE_PATH_CHARS.test(input)) return false;
   let u: URL;
   try {
@@ -95,7 +30,6 @@ function isValidFeedUrl(input: unknown): input is string {
   if (u.username !== "" || u.password !== "") return false;
   if (u.hash !== "") return false;
   if (!u.hostname || !HOST_REGEX.test(u.hostname)) return false;
-  // Disallow trailing dot ("example.com.") and empty labels ("a..b").
   if (u.hostname.endsWith(".") || u.hostname.includes("..")) return false;
   const pathAndQuery = u.pathname + u.search;
   if (UNSAFE_PATH_CHARS.test(pathAndQuery)) return false;

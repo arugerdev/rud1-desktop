@@ -1,23 +1,4 @@
-/**
- * USB/IP client manager.
- *
- * Uses the usbip userspace tool to attach/detach USB devices exposed by
- * a remote host (typically a rud1 device running rud1-fw with USB/IP enabled).
- *
- * Linux is the primary supported platform. Windows support requires usbip-win
- * (https://github.com/vadimgrn/usbip-win2) to be bundled.
- *
- * Protocol: USB/IP (RFC 3538 / kernel.org usbip)
- * Default port: 3240
- *
- * Security: all user-supplied arguments (`host`, `busId`, `port`) are
- * validated with strict regexes BEFORE being forwarded to execFile, so
- * a crafted renderer message can never smuggle a flag (e.g. `busId="-h x"`)
- * or a shell metacharacter into the spawned usbip process. Guards throw
- * synchronously ahead of any spawn/fs call so a rejected input never
- * reaches the child_process binding at all.
- */
-
+// host/busId/port validados antes de execFile; sin shell.
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helper";
@@ -26,19 +7,8 @@ const execFileAsync = promisify(execFile);
 
 const USBIP_WIN_INSTALL_URL = "https://github.com/vadimgrn/usbip-win2/releases";
 
-/**
- * Stable error class for "USB/IP for Windows isn't installed" so the
- * IPC handler can recognise it and surface a structured response with
- * the bundled-installer path. The renderer turns that into an "Install
- * USB/IP" button instead of the generic Error.message string.
- *
- * On Linux/macOS we never bundle anything — the `wireguard-tools` /
- * `usbip-utils` packages are expected to be on PATH — so the message
- * is just an installation hint pointing at the platform package.
- */
 export class UsbipMissingError extends Error {
-  /** When non-null, the absolute path to the bundled NSIS installer
-   *  the renderer should offer to launch (Windows only). */
+  /** Absolute path al NSIS bundled (Win-only); null en otros. */
   readonly installerPath: string | null;
 
   constructor(installerPath: string | null = null) {
@@ -54,18 +24,6 @@ export class UsbipMissingError extends Error {
   }
 }
 
-/**
- * Preflight gate. Refuses to spawn anything when:
- *   - the platform binary lookup can't find usbip (PATH + bundled +
- *     well-known install dirs all empty), OR
- *   - on Windows specifically, the resolved usbip.exe path is bare
- *     (binary-helper falls back to the literal "usbip" string when
- *     nothing matched). A bare path means PATH lookup will be tried,
- *     and if that fails too the spawn surfaces ENOENT — but with a
- *     missing kernel driver `usbip.exe` could exist while still
- *     refusing to attach. That's a different failure mode handled
- *     by the per-call error parser below.
- */
 function ensureUsbipAvailable(): void {
   if (!isBinaryAvailable("usbip")) {
     throw new UsbipMissingError(usbipInstallerPath());
@@ -78,16 +36,7 @@ export interface AttachedDevice {
   busId: string;
 }
 
-// ─── Argument validators ──────────────────────────────────────────────────────
-//
-// HOST_REGEX — accepts hostnames, IPv4 literals, and IPv6 literals (colon is
-// whitelisted). Deliberately rejects spaces, shell metacharacters, path
-// separators, URL schemes, and any character that would let a crafted value
-// be interpreted as a usbip flag (no leading `-`).
-//
-// BUS_ID_REGEX — usbip bus IDs are of the form `<bus>-<port>[.<subport>...]`,
-// e.g. `1-1`, `1-1.2`, `2-3.4.5`. Strict dotted/dash shape only.
-
+// busId shape: `<bus>-<port>[.<subport>...]` (1-1, 1-1.2, 2-3.4.5).
 const HOST_REGEX = /^[a-zA-Z0-9.\-:]{1,253}$/;
 const BUS_ID_REGEX = /^[0-9]+-[0-9]+(?:\.[0-9]+)*$/;
 

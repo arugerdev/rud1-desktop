@@ -1,27 +1,4 @@
-/**
- * firmware-discovery — best-effort probe for a locally-reachable rud1 device.
- *
- * The rud1-fw agent always exposes its REST API on port 7070. Two host
- * candidates are tried in order:
- *
- *   1. `rud1.local`         (mDNS via avahi-daemon, present on a fully
- *                            installed Pi — survives DHCP lease changes).
- *   2. `192.168.50.1`       (the static IP the agent assigns to its setup
- *                            AP — only reachable while the operator is
- *                            associated with the device's `rud1-setup-XXXX`
- *                            SSID).
- *
- * The probe is intentionally cheap: a 1.2-second HEAD/GET for /api/setup/state
- * with `keepalive=false` so a hung box doesn't accumulate sockets. Both
- * candidates are tried in parallel and the first successful response wins.
- *
- * Why not auto-launch the wizard the moment we detect a first-boot device?
- * Because the desktop app's primary purpose is to load rud1.es (cloud panel)
- * — auto-redirecting to the LAN device URL would yank the operator out of
- * an unrelated workflow. We surface a CTA in the tray menu and let them
- * click into it explicitly.
- */
-
+// Probe paralelo a rud1.local + 192.168.50.1:7070, 1.2s timeout, first-success-wins.
 import http from "http";
 import { URL } from "url";
 
@@ -37,42 +14,20 @@ export interface FirmwareSetupState {
 
 export interface FirmwareProbeResult {
   reachable: boolean;
-  // The host the probe succeeded against (e.g. "rud1.local" or
-  // "192.168.50.1"). Empty when reachable=false.
   host: string;
-  // The base URL the operator should use to reach the device's panel.
-  // E.g. "http://rud1.local". Empty when reachable=false.
   panelUrl: string;
-  // The full /setup URL pre-built so the caller can hand it straight to
-  // shell.openExternal — saves the renderer from string-building the URL.
   setupUrl: string;
   setup: FirmwareSetupState | null;
   probedAt: number;
-  // Populated on `reachable=false` with the reason the last attempt
-  // failed; useful for diagnostics. NEVER an Error instance — must be
-  // serialisable across IPC.
+  /** Razón del último intento fallido; string serializable, no Error. */
   error?: string;
 }
 
 const DEFAULT_HOSTS = ["rud1.local", "192.168.50.1"] as const;
 const FIRMWARE_PORT = 7070;
 const PROBE_TIMEOUT_MS = 1200;
-// Path traversal / control-character guard for any host override an
-// integration test might pass — we never ship the override to operators.
 const SAFE_HOST_RE = /^[a-zA-Z0-9.\-]{1,253}$/;
 
-/**
- * probeFirmware — tries each candidate host in parallel and returns the
- * first successful response, or a structured `reachable=false` envelope
- * when all candidates fail.
- *
- * Pure I/O helper — no Electron / IPC dependencies so it can be unit-tested
- * with a mock listener.
- *
- * `port` is overridable for tests so the suite can bind to ephemeral ports
- * and avoid TIME_WAIT collisions on the firmware port (7070). Production
- * callers should always omit it.
- */
 export async function probeFirmware(
   hosts: readonly string[] = DEFAULT_HOSTS,
   port: number = FIRMWARE_PORT,
@@ -93,10 +48,7 @@ export async function probeFirmware(
   const attempts = validHosts.map((host) =>
     probeOne(host, port).then((result) => ({ host, result })),
   );
-  // Race semantics: as soon as any attempt resolves to a successful
-  // FirmwareSetupState, return it. If they all fail, return the LAST
-  // error message — earlier ones tend to be DNS misses on the alt host
-  // which aren't actionable.
+  // First success wins; en fallo total, devolver el ÚLTIMO error (DNS misses son menos accionables).
   const settled = await Promise.allSettled(attempts);
   let lastError = "no firmware detected";
   for (const s of settled) {

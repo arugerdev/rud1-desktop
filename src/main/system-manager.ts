@@ -1,28 +1,13 @@
-/**
- * System diagnostics manager.
- *
- * Exposes a read-only snapshot of the operator's machine — hostname,
- * platform, CPU count + load, memory pressure, network interface roll-up
- * — so rud1.es dashboards can sanity-check whether a suspicious VPN issue
- * is caused by the desktop side (CPU saturated, memory pressure, offline
- * adapter) before pointing fingers at the Pi.
- *
- * Everything here is local-only: no shell commands, no external calls,
- * no filesystem writes. It's a thin wrapper around Node's `os` module
- * plus a handful of derived convenience fields.
- */
-
+// Local-only: wrapper sobre os con campos derivados, sin shell/fs.
 import os from "os";
 
 export interface SystemStatsCpu {
   model: string;
   speedMhz: number;
   count: number;
-  // loadavg is [1m, 5m, 15m] on POSIX; all zeros on Windows (node-native).
+  /** [1m, 5m, 15m] en POSIX; 0s en Windows. */
   loadavg: [number, number, number];
-  // Normalised 0..1 utilisation computed from a pair of samples 250ms apart.
-  // `null` when the second sample failed (extremely rare, e.g. permission
-  // errors in a sandbox).
+  /** 0..1 utilisation desde 2 muestras 250ms apart; null si falla. */
   utilisation: number | null;
 }
 
@@ -30,7 +15,7 @@ export interface SystemStatsMemory {
   totalBytes: number;
   freeBytes: number;
   usedBytes: number;
-  usagePct: number; // 0..100, rounded to 1 decimal
+  usagePct: number;
 }
 
 export interface SystemStatsInterface {
@@ -51,21 +36,13 @@ export interface SystemStats {
   release: string;
   arch: string;
   uptimeSec: number;
-  // `process.uptime()` in seconds — how long the desktop app has been
-  // alive. Useful for detecting "the tunnel is flapping because the app
-  // keeps being killed" scenarios.
   appUptimeSec: number;
   cpu: SystemStatsCpu;
   memory: SystemStatsMemory;
   interfaces: SystemStatsInterface[];
-  capturedAt: string; // RFC3339 UTC — same format the Pi uses for timestamps
+  capturedAt: string;
 }
 
-/**
- * Samples aggregate CPU time from `os.cpus()` twice, `delayMs` apart, and
- * returns utilisation as (busyDelta / totalDelta). Returns null if either
- * sample is unavailable.
- */
 async function sampleCpuUtilisation(delayMs = 250): Promise<number | null> {
   const first = totalCpuTimes(os.cpus());
   if (!first) return null;

@@ -1,24 +1,4 @@
-/**
- * Auto-start manager — surfaces "launch rud1 at login" as a per-user
- * preference across the three desktop platforms.
- *
- * macOS / Windows: delegates to `app.setLoginItemSettings`. The Electron
- * helper writes to LSSharedFileList (mac) or
- * HKCU\Software\Microsoft\Windows\CurrentVersion\Run (Win) — both
- * scoped to the current user, so the operation never needs admin even
- * though the installer itself is `requireAdministrator`.
- *
- * Linux: Electron's `setLoginItemSettings` is a no-op, so we manage a
- * `~/.config/autostart/rud1.desktop` entry by hand. Honors
- * `$XDG_CONFIG_HOME` when set; falls back to `~/.config` per the XDG
- * Base Directory spec.
- *
- * Dev mode (`process.defaultApp`): we refuse to enable auto-start
- * because the launcher would resolve to `node + main script`, which
- * isn't a useful thing to fire at login. The renderer disables the
- * toggle and surfaces the reason.
- */
-
+// mac/Win: app.setLoginItemSettings. Linux: ~/.config/autostart/rud1.desktop.
 import { app } from "electron";
 import { promises as fs } from "fs";
 import os from "os";
@@ -31,12 +11,7 @@ const APP_NAME = "rud1";
 export interface AutoStartState {
   /** Whether the OS is configured to launch rud1 at login. */
   enabled: boolean;
-  /**
-   * True when toggling auto-start is unsupported in this build:
-   *   - dev/unpackaged builds (no stable launcher path)
-   *   - exotic platforms not in {win32, darwin, linux}
-   * The renderer disables the switch and shows `reason` as a tooltip.
-   */
+  /** True en dev builds o plataformas no soportadas. */
   unsupported: boolean;
   /** Human-readable explanation when `unsupported` is true. */
   reason?: string;
@@ -45,10 +20,6 @@ export interface AutoStartState {
 }
 
 function isDevBuild(): boolean {
-  // Electron exposes `app.isPackaged` (false in dev). `process.defaultApp`
-  // is also true when launched via `electron .`. Either is enough — we
-  // OR them so a forked Electron run that bypasses one signal still
-  // gets caught by the other.
   return !app.isPackaged || process.defaultApp === true;
 }
 
@@ -61,9 +32,6 @@ function linuxAutostartPath(): string {
 }
 
 function buildLinuxDesktopEntry(execPath: string): string {
-  // Quote the Exec path so spaces in install dirs (rare on Linux but
-  // possible) don't split arguments. Escape inner double-quotes for
-  // good measure — file path with `"` characters is theoretically legal.
   const safeExec = `"${execPath.replace(/"/g, '\\"')}"`;
   return [
     "[Desktop Entry]",
@@ -139,8 +107,6 @@ export async function setAutoStart(enabled: boolean): Promise<AutoStartState> {
   if (platform === "win32" || platform === "darwin") {
     app.setLoginItemSettings({
       openAtLogin: enabled,
-      // Start hidden so the user doesn't get a window on every boot —
-      // the tray icon is enough; they can click it to reopen.
       openAsHidden: true,
     });
     return {
@@ -178,9 +144,6 @@ export async function setAutoStart(enabled: boolean): Promise<AutoStartState> {
   };
 }
 
-// Test-only hooks. Exported so the vitest suite can poke the Linux
-// path-derivation + desktop-entry contents without spinning up an
-// Electron app context.
 export const __test = {
   linuxAutostartPath,
   buildLinuxDesktopEntry,

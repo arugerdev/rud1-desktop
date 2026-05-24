@@ -1,23 +1,4 @@
-/**
- * WireGuard tunnel diagnostics manager.
- *
- * Exposes two read-only diagnostic probes that the rud1.es dashboard can
- * invoke through the Electron bridge to help investigate "why is my tunnel
- * not working". The probes are intentionally side-effect free — they never
- * mutate kernel state, never touch /etc/wireguard/, and never request
- * elevation; they only observe.
- *
- * Exposed probes:
- *   wgStatus(tunnelName?)     — runs `wg show [tunnelName]` and parses the
- *                               result into a typed peer list. If the
- *                               wg binary is not installed, returns
- *                               {available: false, reason}.
- *   tunnelHealth(opts)        — runs ping(wgHost), ping(publicHost) and a
- *                               TCP portCheck(publicHost, publicPort) in
- *                               parallel and derives a verdict + actionable
- *                               hints for the UI.
- */
-
+// Probes read-only; nunca mutan kernel state ni piden elevación.
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { createHash } from "crypto";
@@ -30,14 +11,11 @@ import { getStats as getSystemStats, type SystemStats } from "./system-manager";
 
 const execFileAsync = promisify(execFile);
 
-// IPv4 header (20) + ICMP header (8) = 28 bytes of overhead that the OS
-// adds on top of the `-s <payloadSize>` / `-l <payloadSize>` argument.
+// IPv4 header (20) + ICMP header (8) = 28 bytes overhead sobre el payload arg.
 const ICMP_IP_OVERHEAD = 28;
 
 const TUNNEL_NAME_REGEX = /^[a-zA-Z0-9_-]{1,32}$/;
 const WG_WINDOWS_PATH = "C:\\Program Files\\WireGuard\\wg.exe";
-
-// ─── wgStatus ────────────────────────────────────────────────────────────────
 
 export interface WgPeer {
   publicKey: string;

@@ -1,47 +1,4 @@
-/**
- * Registers all Electron IPC handlers for the native bridge.
- * Called once from the main process after the app is ready.
- *
- * Channels (must match preload/index.ts):
- *   vpn:connect       — start WireGuard tunnel
- *   vpn:disconnect    — stop WireGuard tunnel
- *   vpn:status        — check tunnel status
- *   usb:attach        — attach a remote USB device via USB/IP
- *   usb:detach        — detach an attached USB device
- *   usb:list          — list currently attached devices
- *   net:ping          — ICMP reachability probe (LAN-route diagnostics)
- *   net:interfaces    — enumerate local NICs
- *   net:resolveRoute  — which local iface egresses packets to an IP
- *   net:traceroute    — hop-by-hop path with RTT per hop
- *   net:dnsLookup     — A / AAAA / CNAME records for a hostname
- *   net:publicIp      — detect operator's public IPv4 / IPv6 via ipify
- *   net:portCheck     — TCP connect probe with timeout + latency
- *   diag:wgStatus     — parsed `wg show` output (tunnels + peers)
- *   diag:tunnelHealth — combined WG/public ping + TCP probe + verdict
- *   diag:mtuProbe     — DF-flag bisect ping to discover path MTU
- *   diag:fullDiagnosis — consolidated wgStatus + tunnelHealth + systemStats (parallel)
- *   diag:exportReport — serialize fullDiagnosis to ~/.rud1/diag/ with sha256 integrity
- *   diag:listReports  — enumerate previously-written reports under ~/.rud1/diag/
- *   diag:readReport   — read + sha256 + JSON.parse a report (path-traversal guarded)
- *   diag:deleteReport — unlink a report file (path-traversal guarded)
- *   diag:openReportsFolder — reveal ~/.rud1/diag/ in the OS file explorer
- *   diag:saveReportCopy    — copy a report to a user-chosen location via Save As dialog
- *   diag:compareReports    — read two reports and return a structured diff (deltas, swapped flag)
- *   diag:autoSnapshotStatus    — return the persisted opt-in snapshot config + next-run timestamp
- *   diag:autoSnapshotConfigure — persist opt-in, interval, and diagnosis options; (re)start timer
- *   diag:autoSnapshotRunNow    — trigger a snapshot immediately (does not change the schedule)
- *   firstBootDedupe:list       — list persisted notified-host records (iter 28 Settings UI)
- *   firstBootDedupe:clearHost  — drop a single host from the persisted dedupe set
- *   firstBootDedupe:clearAll   — drop ALL hosts from the persisted dedupe set
- *   versionCheck:state         — snapshot the live VersionCheckState (iter 37 Settings/About)
- *   versionCheck:recheck       — trigger an immediate version-check refetch
- *   clipboard:writeText        — copy a string to the OS clipboard (iter 37, length-capped)
- *   shell:openExternal         — open an http/https URL in the system browser (iter 37, allowlisted)
- *   system:stats      — CPU/memory/interfaces/uptime snapshot for diagnostics
- *   app:version       — get app version
- *   app:platform      — get OS platform
- */
-
+// Canales IPC para el native bridge; deben coincidir con preload/index.ts.
 import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
 import { getAutoStart, setAutoStart } from "./auto-start-manager";
 import {

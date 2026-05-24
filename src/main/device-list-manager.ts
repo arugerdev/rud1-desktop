@@ -1,30 +1,4 @@
-// Polls /api/user/devices on rud1.es to keep the tray menu's "My
-// devices" submenu fresh. Hot-path lives in main process, not the
-// renderer — the tray menu is rebuilt every time `lastState` changes,
-// and the cached state is read synchronously from `getState()` on
-// every menu rebuild.
-//
-// Auth: the desktop loads rud1.es inside a `BrowserWindow` so the
-// default Electron session already carries the user's cookie. Calling
-// `net.fetch` here implicitly reuses that session — no extra wiring
-// or token management.
-//
-// Cadence: 10s under normal operation, doubled after a network failure
-// (capped at 60s). Pre-2026-05 this was 60s/300s — but the firmware's
-// heartbeat dropped from 60s to 15s, so the tray was the slowest part
-// of the realtime chain. Matching the new fw cadence keeps the tray
-// inside the same "one missed beat" window as the dashboard.
-//
-// Why not SSE here: the `/api/v1/stream/devices` SSE the dashboard
-// uses is scoped to the active organization, but the tray shows
-// devices across every org the user belongs to. Until the cloud
-// exposes a multi-org SSE we keep polling — the cost is small at 10s
-// (one tiny JSON GET) and the manager already coalesces ticks while
-// one is in flight.
-//
-// Lifecycle: `start()` schedules an immediate fetch + an interval,
-// `stop()` cancels both. Both are idempotent.
-
+// 10s poll (max 60s con backoff). SSE no aplica: tray cubre N orgs y la SSE de rud1-es es por-org.
 import { net } from "electron";
 
 export type DeviceStatus =
@@ -58,13 +32,7 @@ export interface DeviceListManagerOptions {
   baseUrl: string;
   /** Notified on every state change so the tray rebuild can run. */
   onStateChange?: (state: DeviceListState) => void;
-  /**
-   * Fired exactly once per device per non-ONLINE → ONLINE transition.
-   * The initial status seen during the first successful poll is NOT
-   * announced — otherwise opening the app would bark for every device
-   * the user already had connected. Used by the main process to surface
-   * an OS-level "device connected" notification.
-   */
+  /** Fires en transition non-ONLINE → ONLINE; primer poll inicial NO anuncia. */
   onDeviceReady?: (device: DeviceSummary) => void;
   /** Override for tests; defaults to electron's net.fetch. */
   fetchFn?: (url: string) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
@@ -83,10 +51,6 @@ export class DeviceListManager {
   private intervalHandle: unknown = null;
   private currentDelay = BASE_INTERVAL_MS;
   private stopped = false;
-  // Per-device status from the previous successful poll. We seed this
-  // on the FIRST successful response so initial-state devices never
-  // trigger `onDeviceReady`; every subsequent transition is checked
-  // against the snapshot we held before the new poll arrived.
   private lastStatusById = new Map<string, DeviceStatus>();
   private seeded = false;
 
@@ -112,9 +76,6 @@ export class DeviceListManager {
     return this.state;
   }
 
-  // Convenience: latest known devices regardless of state. The tray
-  // uses this so a transient fetch error doesn't blank out the submenu
-  // — we keep showing the last-known list with an "(error)" hint.
   getLastDevices(): DeviceSummary[] | null {
     if (this.state.kind === "ok") return this.state.devices;
     if (this.state.kind === "error") return this.state.lastDevices;
@@ -140,9 +101,6 @@ export class DeviceListManager {
     const fetcher =
       this.opts.fetchFn ??
       (async (u: string) => {
-        // Electron's `net.fetch` reuses the default session's cookie
-        // jar, which is what holds the user's signed-in state from
-        // the main BrowserWindow.
         const res = await net.fetch(u, { credentials: "include" });
         return {
           ok: res.ok,
@@ -165,10 +123,6 @@ export class DeviceListManager {
       }
       const body = (await res.json()) as { devices?: DeviceSummary[] };
       const devices = Array.isArray(body.devices) ? body.devices : [];
-      // Edge-detect non-ONLINE → ONLINE. Skipped on the first successful
-      // response so we don't bark on app start. A newly-paired device
-      // (not in `lastStatusById` yet) DOES fire — that's exactly the
-      // moment the user expects to hear about.
       if (this.seeded && this.opts.onDeviceReady) {
         for (const d of devices) {
           const prev = this.lastStatusById.get(d.id);
@@ -176,7 +130,7 @@ export class DeviceListManager {
             try {
               this.opts.onDeviceReady(d);
             } catch {
-              // never let the notifier kill the polling loop
+              /* don't let notifier kill polling */
             }
           }
         }
@@ -202,14 +156,11 @@ export class DeviceListManager {
     try {
       this.opts.onStateChange?.(next);
     } catch {
-      // never let a renderer-side callback crash the polling loop
+      /* don't let callback crash polling */
     }
   }
 }
 
-// Returns a short, locale-agnostic label like "•" for online, "○" for
-// offline, etc. Used to keep the tray submenu compact — full status
-// strings would exceed the recommended menu-item width on Windows.
 export function statusGlyph(status: DeviceStatus): string {
   switch (status) {
     case "ONLINE":

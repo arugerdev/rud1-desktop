@@ -1,34 +1,4 @@
-/**
- * Serial bridge manager — the desktop-side counterpart to rud1-fw's
- * serial-bridge package. Spawns the bundled `rud1-bridge` Go binary
- * for each CDC-class device the operator wants to connect, manages
- * its lifecycle, and surfaces the local endpoint path (Windows COM
- * the user opens in Arduino IDE, or Unix pty) back to the renderer.
- *
- * Why a Go subprocess instead of an in-process Node module: see the
- * planning notes — the short version is that the native `serialport`
- * npm package introduces a build/CI tax (electron-rebuild against
- * each Electron version, signing the .node on macOS, AV false-positive
- * pressure) that doesn't pay off for a bridge that's a couple
- * hundred lines of pure-Go forwarding logic. The Go binary cross-
- * compiles trivially from one Windows dev box to all three target
- * platforms.
- *
- * Lifecycle:
- *   1. Renderer calls electronAPI.serial.open({ busId, piHost, piPort,
- *      baud? }).
- *   2. We pre-flight com0com (Windows only) to discover an unused
- *      pair and pick its B-side as our endpoint.
- *   3. We spawn rud1-bridge with the right flags, wait for the
- *      "BRIDGE-READY" line on stdout, parse the JSON envelope to
- *      learn the endpoint path, and reply to the renderer.
- *   4. The renderer surfaces "Open COMx in your Arduino IDE" in the
- *      Connect tab.
- *   5. On close (renderer click, app quit, VPN disconnect), we send
- *      SIGTERM (Unix) / signal-the-process (Windows) and the binary
- *      cleans up the endpoint.
- */
-
+// Spawns rud1-bridge Go binary; espera "BRIDGE-READY" + JSON envelope.
 import { spawn, execFile, ChildProcess } from "child_process";
 import path from "path";
 import readline from "readline";
@@ -48,9 +18,6 @@ import {
   Com0comStatus,
 } from "./com0com-detector";
 
-// Argument validators. Keep these strict — the values flow into a
-// child_process spawn argv and we want the same crisp pre-spawn rejection
-// pattern usb-manager uses.
 const HOST_REGEX = /^[a-zA-Z0-9.\-:]{1,253}$/;
 const BUS_ID_REGEX = /^[0-9]+-[0-9]+(?:\.[0-9]+)*$/;
 

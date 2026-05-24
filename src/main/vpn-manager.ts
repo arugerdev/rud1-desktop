@@ -1,22 +1,4 @@
-/**
- * WireGuard VPN manager.
- *
- * Abstracts platform differences:
- *   Windows  — uses the WireGuard tunnel service via wireguard.exe /installtunnelservice
- *   Linux    — uses wg-quick up/down (requires CAP_NET_ADMIN or sudo)
- *   macOS    — uses wg-quick (from Homebrew or bundled wireguard-go)
- *
- * The private key is generated on the client, never sent to the server.
- * The WireGuard config supplied here should have PrivateKey filled in.
- *
- * Security: the tunnel name forwarded to wg-quick/wireguard.exe/netsh is
- * validated against a strict regex (alphanumeric+underscore+dash, 1..15
- * chars — the Linux IFNAMSIZ limit minus NUL). The temp config file name
- * is derived from the tunnel name only, so path-traversal via `../..` is
- * impossible. `netsh` no longer runs through cmd.exe — we invoke it via
- * execFile with argv, not exec with a string.
- */
-
+// Tunnel name validado contra regex IFNAMSIZ (1..15 chars); netsh vía execFile, no cmd.exe.
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -30,13 +12,6 @@ import {
 
 const WIREGUARD_INSTALL_URL = "https://www.wireguard.com/install/";
 
-/**
- * Stable error class so callers (the IPC handler in particular) can
- * recognise the "WireGuard isn't installed" failure mode without having
- * to string-match on the message. The message itself is what we
- * surface to the user — keep it actionable: name the missing component
- * AND the URL to install it from.
- */
 export class WireguardMissingError extends Error {
   constructor(platform: NodeJS.Platform) {
     const installer =
@@ -52,14 +27,6 @@ export class WireguardMissingError extends Error {
   }
 }
 
-/**
- * Preflight: refuse to spawn anything when the platform's WireGuard
- * binary is missing. Without this, the spawn fails with the opaque
- * `spawn wireguard ENOENT` Node default — which is what the operator
- * was hitting in the first place. We resolve the binary path via the
- * same lookup the actual spawn uses, so this is the canonical "does
- * the binary exist" signal.
- */
 function ensureWireguardAvailable(): void {
   if (process.platform === "win32") {
     if (!isBinaryAvailable("wireguard")) {
@@ -67,7 +34,6 @@ function ensureWireguardAvailable(): void {
     }
     return;
   }
-  // Unix: wg-quick is the entrypoint for connect/disconnect, wg for status.
   if (!isBinaryAvailable("wg-quick") || !isBinaryAvailable("wg")) {
     throw new WireguardMissingError(process.platform);
   }
@@ -75,10 +41,7 @@ function ensureWireguardAvailable(): void {
 
 const execFileAsync = promisify(execFile);
 
-// Linux IFNAMSIZ is 16 (15 chars + NUL). WireGuard interface names must
-// match `^[a-zA-Z0-9_=+.-]{1,15}$` per the kernel module; we keep a
-// stricter subset (no `=`/`+`) for safety — none of those are needed for
-// the rud1-generated default `rud1` or any user-chosen name we'd ship.
+// IFNAMSIZ=16 (15+NUL). Subset estricto del kernel: sin `=`/`+`.
 const TUNNEL_NAME_REGEX = /^[a-zA-Z0-9_.\-]{1,15}$/;
 
 const TUNNEL_NAME = "rud1";
@@ -94,12 +57,6 @@ function assertTunnelName(name: unknown): asserts name is string {
   }
 }
 
-/**
- * Resolve the on-disk path for a tunnel's temp WireGuard config. Uses
- * only `os.tmpdir()` + the validated tunnel name — never accepts a
- * caller-supplied path, so traversal (`../etc/passwd.conf`) cannot
- * reach writeFile.
- */
 export function resolveConfigPath(name: string): string {
   assertTunnelName(name);
   return path.join(os.tmpdir(), `${name}.conf`);
@@ -119,14 +76,6 @@ async function removeTempConfig(): Promise<void> {
   }
 }
 
-// ─── Parsers ──────────────────────────────────────────────────────────────────
-
-/**
- * Parse `wg show <iface>` stdout. Returns `{connected, ip?}`. A tunnel is
- * considered connected only when a "latest handshake" line is present;
- * the optional `address: X.X.X.X` line (wg-quick wrappers on some distros)
- * is extracted when available.
- */
 export function parseWgShow(stdout: string): { connected: boolean; ip?: string } {
   const connected = stdout.includes("latest handshake");
   const ipMatch = stdout.match(/address:\s+([\d.]+)/i);
@@ -135,69 +84,37 @@ export function parseWgShow(stdout: string): { connected: boolean; ip?: string }
     : { connected };
 }
 
-/**
- * Parse `netsh interface show interface <name>` stdout. On Windows, a
- * value of "Connected" in the Connect state column signals the tunnel
- * is up; anything else counts as disconnected.
- */
 export function parseNetshInterface(stdout: string): { connected: boolean } {
   return { connected: stdout.includes("Connected") };
 }
 
-// ─── Platform implementations ─────────────────────────────────────────────────
-
 async function connectWindows(wgConfig: string): Promise<void> {
   const file = await writeTempConfig(wgConfig);
   const wireguard = wgQuickPath();
-  // WireGuard for Windows registers the tunnel as a Windows service.
-  // The flag is `/installtunnelservice <conf-path>` (NOT `/installtunnel` —
-  // that's a phantom from older docs; `wireguard.exe` rejects it and
-  // prints the help text). The tunnel name is derived from the config
-  // filename (rud1.conf -> service name "WireGuardTunnel$rud1"), which
-  // is why writeTempConfig pins the filename to TUNNEL_NAME.
+  // Flag correcto: `/installtunnelservice` (no `/installtunnel`). Service name = filename.
   await execFileAsync(wireguard, ["/installtunnelservice", file]);
 }
 
 async function disconnectWindows(): Promise<void> {
   assertTunnelName(TUNNEL_NAME);
   const wireguard = wgQuickPath();
-  // `/uninstalltunnelservice <tunnel-name>` — same pairing rule as install.
   await execFileAsync(wireguard, ["/uninstalltunnelservice", TUNNEL_NAME]);
   await removeTempConfig();
 }
 
-/** Probe whether the WireGuard tunnel is currently registered with the
- *  Service Control Manager. Locale-immune: relies on `sc.exe`'s exit
- *  code (0 = service exists, 1060 = ERROR_SERVICE_DOES_NOT_EXIST). The
- *  previous implementation lower-cased the error message and grepped
- *  for English substrings — Spanish Windows ships
- *  "El servicio especificado no existe como servicio instalado", which
- *  matched none of them, so a fresh install always blew up the connect
- *  flow with an "uninstall failed" error before the install ever ran. */
+// Usa sc.exe exit code (locale-immune); 1060=ERROR_SERVICE_DOES_NOT_EXIST.
 async function tunnelServiceExistsWindows(): Promise<boolean> {
   const serviceName = `WireGuardTunnel$${TUNNEL_NAME}`;
   try {
     await execFileAsync("sc.exe", ["query", serviceName], { windowsHide: true });
     return true;
   } catch {
-    // execFileAsync rejects on any non-zero exit. The expected case here
-    // is 1060 (service not installed); any other failure (SCM down,
-    // sc.exe missing) is surfaced through the subsequent install path
-    // which has its own error handling.
     return false;
   }
 }
 
-/** Best-effort teardown used by the idempotent connect path. On Windows
- *  we positively probe for the service before issuing the uninstall;
- *  on Unix wg-quick is already idempotent enough that we just swallow
- *  the well-known "is not a wireguard interface" string.
- *
- *  Windows-specific subtlety: `wireguard.exe /uninstalltunnelservice`
- *  returns synchronously, but the Service Control Manager keeps the
- *  service in DELETE_PENDING state for a short window while in-flight
- *  handles release. If the subsequent `/installtunnelservice` runs
- *  during that window, WireGuard rejects it with "Tunnel already
+// Win: uninstall vuelve sincrono pero SCM mantiene DELETE_PENDING; necesita poll para no chocar con install.
+/** "Tunnel already
  *  installed and running" and the user gets no tunnel — exactly the
  *  bug the operator was hitting in the panel: click Connect, the
  *  status said "fresh install" because the panel hadn't surfaced the

@@ -1,22 +1,4 @@
-/**
- * Network diagnostics manager.
- *
- * Runs lightweight, read-only OS probes so the remote dashboard can verify
- * that LAN subnets exposed by a Pi (via the rud1-fw LAN routing feature)
- * are actually reachable through the WireGuard tunnel from the operator's
- * machine. All commands are whitelisted and arguments are validated before
- * being passed to execFile so we never invoke a shell.
- *
- * Exposed probes:
- *   ping(host)         — 3 ICMP echoes, returns avg RTT (ms) + packet loss
- *   interfaces()       — local NIC enumeration with IPv4 addresses & CIDR
- *   resolveRoute(ip)   — which local interface would egress packets to <ip>
- *   traceroute(host)   — hop-by-hop path with RTT per hop (max 15 hops)
- *   dnsLookup(host)    — A / AAAA / CNAME records via dns/promises
- *   publicIp()         — detect operator's public IPv4 / IPv6 via ipify
- *   portCheck(opts)    — TCP connect probe with timeout + latency
- */
-
+// Probes read-only validados; nunca shell, sólo execFile + argv.
 import { execFile } from "child_process";
 import { promisify } from "util";
 import os from "os";
@@ -31,12 +13,8 @@ const IP_REGEX = /^(\d{1,3}\.){3}\d{1,3}$/;
 const HOSTNAME_REGEX = /^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
 const IPV6_REGEX = /^[0-9a-fA-F:]+$/;
 
+// Bloquea leading-dash: `-T` se parsearía como flag por las tools.
 export function validateHost(h: string): boolean {
-  // Reject leading-dash values: HOST_REGEX itself permits `-` anywhere,
-  // and the spawning probes (ping/traceroute/portCheck) forward `host` as
-  // a positional argv slot — a value like "-T" would be parsed as a flag
-  // and confuse the underlying tool. usb-manager / vpn-manager added the
-  // same guard in iter 19 (commit a5ba407); net-diag was missed.
   return typeof h === "string" && !h.startsWith("-") && HOST_REGEX.test(h);
 }
 
