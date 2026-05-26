@@ -134,7 +134,13 @@ interface RunningProc {
   initialized: boolean;
   /** Captures the most recent error line for diagnostics. */
   lastErrorLine: string | null;
+  /** Ring buffer of the last LOG_RING_SIZE stdout/stderr lines. Surfaced
+   *  on timeout/early-exit so the operator can see what openvpn was
+   *  actually doing without having to crack open the log file. */
+  logRing: string[];
 }
+
+const LOG_RING_SIZE = 80;
 
 let running: RunningProc | null = null;
 let lastConnectedAt: number | null = null;
@@ -437,17 +443,30 @@ function parseManagementLine(line: string, live: RunningProc): void {
 async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
   const exe = openvpnPath();
   const managementPort = await pickManagementPort();
-  // Open openvpn with a single config file. Management socket pinned to
-  // loopback. We disable the GUI's TAP-Windows interactive service so
-  // the child uses the directly-launched binary's privileges (our app's
-  // NSIS manifest is requireAdministrator).
+  // Tee openvpn's full stdout/stderr to a rotating log file under
+  // APPDATA so the operator (and we, in error messages) can inspect
+  // exactly what the daemon saw — TLS handshake details, push pull,
+  // route negotiation, etc. The file is also surfaced in the timeout
+  // error message so non-technical users can find it without us
+  // describing the path.
+  const logPath = openvpnLogPath();
+  try {
+    await fs.mkdir(path.dirname(logPath), { recursive: true });
+    // Truncate on each connect so the file always shows the LATEST
+    // session — keeps it small and avoids "wait, which run was this?".
+    await fs.writeFile(logPath, `# rud1-desktop openvpn log — ${new Date().toISOString()}\n`, { encoding: "utf8" });
+  } catch {
+    /* best-effort — a missing log file isn't fatal, the in-memory ring still serves */
+  }
   const args = [
     "--config", configPath,
     "--dev-node", TUNNEL_NAME,
     "--management", MANAGEMENT_HOST, String(managementPort),
     "--management-hold",
     "--management-query-passwords",
-    "--verb", "3",
+    // verb 4 gives us TLS handshake detail without the cleartext key
+    // material that verb 6+ leaks. Useful when diagnosing connect timeouts.
+    "--verb", "4",
   ];
   // The bundled DLLs live next to openvpn.exe; spawn with that directory
   // as cwd so libssl / libcrypto resolve via the binary's import table
@@ -473,21 +492,34 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
     lastHeartbeatAt: 0,
     initialized: false,
     lastErrorLine: null,
+    logRing: [],
   };
+
+  function recordLine(line: string): void {
+    if (!line) return;
+    live.logRing.push(line);
+    if (live.logRing.length > LOG_RING_SIZE) {
+      live.logRing.splice(0, live.logRing.length - LOG_RING_SIZE);
+    }
+    // Tee to disk. Best-effort — disk failure shouldn't kill the tunnel.
+    void fs.appendFile(logPath, line + "\n", { encoding: "utf8" }).catch(() => { /* ignore */ });
+  }
+
   // stdout scraping for the coarse-grained "initialization completed" /
-  // "auth failed" events. We don't tear down on AUTH_FAILED here — the
-  // child process exits non-zero on its own and our exit handler picks
-  // up the failure.
+  // "auth failed" events plus the full ring + log file teeing. We don't
+  // tear down on AUTH_FAILED here — the child process exits non-zero on
+  // its own and our exit handler picks up the failure.
   if (proc.stdout) {
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk: string) => {
       for (const rawLine of chunk.split(/\r?\n/)) {
         const line = rawLine.trim();
         if (!line) continue;
+        recordLine(line);
         if (line.includes("Initialization Sequence Completed")) {
           live.initialized = true;
           live.lastHeartbeatAt = Date.now();
-        } else if (/(AUTH_FAILED|TLS Error|Cannot resolve host)/i.test(line)) {
+        } else if (/(AUTH_FAILED|TLS Error|Cannot resolve host|All TAP-Win32 adapters)/i.test(line)) {
           live.lastErrorLine = line.slice(0, 240);
         } else if (line.includes("Inactivity timeout")) {
           live.initialized = false;
@@ -504,8 +536,12 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
   if (proc.stderr) {
     proc.stderr.setEncoding("utf8");
     proc.stderr.on("data", (chunk: string) => {
-      const line = chunk.split(/\r?\n/).pop()?.trim() ?? "";
-      if (line) live.lastErrorLine = line.slice(0, 240);
+      for (const rawLine of chunk.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        recordLine("[stderr] " + line);
+        live.lastErrorLine = line.slice(0, 240);
+      }
     });
   }
   proc.on("exit", () => {
@@ -515,6 +551,14 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
     if (running === live) running = null;
   });
   return live;
+}
+
+/**
+ * Path to the rotating openvpn session log. Lives under APPDATA so the
+ * user can open it with Notepad without us having to surface a chooser.
+ */
+export function openvpnLogPath(): string {
+  return path.join(app.getPath("userData"), "logs", "openvpn.log");
 }
 
 /**
@@ -697,13 +741,18 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
   // can show what openvpn complained about.
   const INIT_TIMEOUT_MS = 25_000;
   const startedAt = Date.now();
+  const logPath = openvpnLogPath();
+  const tailLog = (n = 12): string => {
+    const ring = live.logRing.slice(-n);
+    return ring.length ? "\n  " + ring.join("\n  ") : "";
+  };
   await new Promise<void>((resolve, reject) => {
     const onExit = (code: number | null) => {
-      const msg = live.lastErrorLine
+      const head = live.lastErrorLine
         ? `OpenVPN exited before initialization: ${live.lastErrorLine}`
         : `OpenVPN exited before initialization (code ${code ?? "?"})`;
       cleanup();
-      reject(new Error(msg));
+      reject(new Error(`${head}\n\nLast OpenVPN output:${tailLog()}\n\nFull log: ${logPath}`));
     };
     const onTick = () => {
       if (running !== live) {
@@ -718,11 +767,12 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
       }
       if (Date.now() - startedAt >= INIT_TIMEOUT_MS) {
         cleanup();
-        const reason = live.lastErrorLine
+        const head = live.lastErrorLine
           ? `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s: ${live.lastErrorLine}`
           : `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s. ` +
-            `Check rud1-tap adapter, server address, and OpenVPN logs.`;
-        reject(new Error(reason));
+            `Most likely the OpenVPN server is unreachable, the .ovpn config is stale, ` +
+            `or another process is holding the rud1-tap adapter.`;
+        reject(new Error(`${head}\n\nLast OpenVPN output:${tailLog()}\n\nFull log: ${logPath}`));
         return;
       }
     };
