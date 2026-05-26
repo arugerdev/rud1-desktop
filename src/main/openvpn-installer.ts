@@ -433,21 +433,34 @@ async function cleanupStrayTapAdapters(): Promise<void> {
 }
 
 /**
- * Overwrite the rud1-tap adapter's `DriverDesc` registry value so its
- * InterfaceDescription becomes the chosen string instead of the stock
- * "TAP-Windows Adapter V9 #N". TIA Portal, Codesys, SinaProg, and the
- * "Set PG/PC Interface" applet all enumerate by that description, so
- * after this the dropdown shows "rud1" — a much friendlier identifier
- * than the generic vendor name + index suffix.
+ * Re-skin the rud1-tap adapter so engineering tools (TIA Portal,
+ * Codesys, SINEC PNI, Step 7, "Set PG/PC Interface") list it as just
+ * "rud1" — no "TAP-Windows Adapter V9 #N" anywhere visible.
  *
- * The DriverDesc value lives at
+ * Multiple Windows registries cache the user-visible strings; flipping
+ * just one of them leaves a stale label somewhere. We overwrite ALL of
+ * them inside the device-class subkey, plus the NetworkCards entry
+ * NDIS reads at enumeration time, then disable+enable the adapter so
+ * PnP republishes the values to listeners (TIA Portal still requires
+ * its own restart, but the dropdown reflects the change immediately
+ * everywhere else).
+ *
+ * Registry locations rewritten:
  *   HKLM\SYSTEM\CurrentControlSet\Control\Class\
  *     {4D36E972-E325-11CE-BFC1-08002BE10318}\<NNNN>
- * where <NNNN> is the four-digit class instance index. We locate the
- * right subkey by matching NetCfgInstanceId against rud1-tap's GUID
- * (from Get-NetAdapter), then `Set-ItemProperty` the new DriverDesc.
+ *       DriverDesc                  → "rud1"
+ *       FriendlyName                → "rud1"
+ *       ProviderName                → "rud1"
+ *       *ifDescription              → "rud1"            (when present)
+ *   HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\
+ *     NetworkCards\<N>
+ *       Description                 → "rud1"
  *
- * Non-fatal on failure: the VPN still works with the old name, the
+ * Retries Get-NetAdapter for up to 5 s because tapctl-create returns
+ * before NDIS finishes registering the new device. Without the retry
+ * loop the rename silently no-ops on a fresh adapter.
+ *
+ * Non-fatal on failure: the VPN still works with the stock name, the
  * dropdown just stays ugly. Logged and ignored.
  */
 async function renameRud1TapAdapterDescription(newDesc: string): Promise<void> {
@@ -455,31 +468,89 @@ async function renameRud1TapAdapterDescription(newDesc: string): Promise<void> {
   const safe = newDesc.replace(/'/g, "''");
   const psCmd = [
     "$ErrorActionPreference = 'Stop';",
-    "$adapter = Get-NetAdapter -Name 'rud1-tap' -ErrorAction Stop;",
+    // Retry up to ~5s for Windows to finish registering the freshly-
+    // created adapter. Without this, Get-NetAdapter returns null and
+    // the whole rewrite is skipped on a clean install.
+    "$adapter = $null;",
+    "for ($i = 0; $i -lt 25; $i++) {",
+    "  try {",
+    "    $adapter = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction Stop;",
+    "    if ($adapter) { break }",
+    "  } catch { }",
+    "  Start-Sleep -Milliseconds 200;",
+    "}",
+    "if (-not $adapter) { exit 3 }",
     "$guid = $adapter.InterfaceGuid;",
+    "$ifIndex = $adapter.ifIndex;",
     "$classRoot = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}';",
-    "$match = Get-ChildItem $classRoot | Where-Object {",
+    "$match = Get-ChildItem $classRoot -ErrorAction SilentlyContinue | Where-Object {",
     "  try { (Get-ItemProperty $_.PsPath -Name NetCfgInstanceId -ErrorAction Stop).NetCfgInstanceId -eq $guid } catch { $false }",
     "} | Select-Object -First 1;",
-    "if (-not $match) { exit 3 }",
-    `Set-ItemProperty -Path $match.PsPath -Name 'DriverDesc' -Value '${safe}' -Force;`,
-    // Restart the adapter so PnP picks up the new description. Without
-    // this, Get-NetAdapter still shows the old string until next boot.
-    "Restart-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction SilentlyContinue;",
+    "if (-not $match) { exit 4 }",
+    // The class-subkey values that map to Device Manager's General /
+    // Driver tabs and to the WMI-NDIS InterfaceDescription. Setting
+    // each as -Force ensures we overwrite even when Windows pre-seeded
+    // them with the upstream INF defaults.
+    `Set-ItemProperty -Path $match.PsPath -Name 'DriverDesc'   -Value '${safe}' -Force;`,
+    `Set-ItemProperty -Path $match.PsPath -Name 'FriendlyName' -Value '${safe}' -Force;`,
+    `Set-ItemProperty -Path $match.PsPath -Name 'ProviderName' -Value '${safe}' -Force;`,
+    "if (Get-ItemProperty -Path $match.PsPath -Name '*IfDescription' -ErrorAction SilentlyContinue) {",
+    `  Set-ItemProperty -Path $match.PsPath -Name '*IfDescription' -Value '${safe}' -Force`,
+    "}",
+    // NetworkCards is the legacy table NDIS shipping clients (incl.
+    // older Siemens enumerators) still read. Each entry has a numeric
+    // subkey + a Description value; the entry that matches our GUID is
+    // the one to rewrite.
+    "$ncRoot = 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\NetworkCards';",
+    "$ncMatch = Get-ChildItem $ncRoot -ErrorAction SilentlyContinue | Where-Object {",
+    "  try { (Get-ItemProperty $_.PsPath -Name ServiceName -ErrorAction Stop).ServiceName -eq $guid } catch { $false }",
+    "} | Select-Object -First 1;",
+    "if ($ncMatch) {",
+    `  Set-ItemProperty -Path $ncMatch.PsPath -Name 'Description' -Value '${safe}' -Force`,
+    "}",
+    // Disable+Enable is more reliable than Restart-NetAdapter (the
+    // latter can no-op when openvpn already holds the device open).
+    // We wrap both in try/catch because a brief disable while openvpn
+    // is mid-handshake can race; a re-enable on next reconnect picks
+    // it back up either way.
+    "try { Disable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }",
+    "Start-Sleep -Milliseconds 600;",
+    "try { Enable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }",
     "exit 0",
   ].join(" ");
   try {
-    await execFileAsync(
+    const { stdout, stderr } = await execFileAsync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", psCmd],
-      { timeout: 15_000, windowsHide: true },
+      { timeout: 20_000, windowsHide: true },
     );
+    if (stdout?.trim() || stderr?.trim()) {
+      console.log(
+        "openvpn-installer: rename ran",
+        stdout?.trim() ? "stdout=" + stdout.trim() : "",
+        stderr?.trim() ? "stderr=" + stderr.trim() : "",
+      );
+    }
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const code = (err as { code?: number | string }).code;
     console.warn(
       "openvpn-installer: rename of rud1-tap description failed (non-fatal):",
-      err instanceof Error ? err.message : err,
+      "exit=" + String(code ?? "?"),
+      msg,
     );
   }
+}
+
+/**
+ * Public re-skin entry-point. Used by an IPC handler so the renderer
+ * can offer the user a "rename adapter" button when the description
+ * still shows the upstream default — e.g. on adapters created by an
+ * old rud1-desktop build that pre-dates the auto-rename, or after a
+ * manual driver reinstall via Device Manager.
+ */
+export async function renameTapAdapterToRud1(): Promise<void> {
+  await renameRud1TapAdapterDescription("rud1");
 }
 
 /**

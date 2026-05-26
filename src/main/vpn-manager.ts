@@ -30,6 +30,7 @@ import { openvpnPath, isBinaryAvailable, openvpnBundledDir } from "./binary-help
 import {
   detectOpenVpnRuntime,
   ensureTapDriverInstalled,
+  renameTapAdapterToRud1,
   type OpenVpnRuntimeStatus,
 } from "./openvpn-installer";
 import { writeOvpnConfig, defaultOvpnConfigPath } from "./ovpn-config-store";
@@ -703,6 +704,26 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
         "The rud1-tap network adapter could not be created. Open Device " +
           "Manager and verify the TAP-Windows V9 driver is installed, " +
           "then click Connect again.",
+      );
+    }
+  }
+
+  // Self-heal the adapter's user-visible description on every Connect.
+  // An adapter created by an older rud1-desktop build (or by a manual
+  // `tapctl create` from the user) carries the upstream default
+  // "TAP-Windows Adapter V9" string, which is what TIA Portal / Codesys
+  // / Set PG/PC Interface display. The rename script is a no-op when
+  // DriverDesc is already "rud1", so calling it unconditionally only
+  // costs a sub-second when there's actually work to do.
+  if (process.platform === "win32") {
+    try {
+      await renameTapAdapterToRud1();
+    } catch (err) {
+      // Non-fatal — the VPN still works with the ugly name, so we never
+      // block a Connect on rename failure.
+      console.warn(
+        "[vpn] adapter rename failed (non-fatal):",
+        err instanceof Error ? err.message : err,
       );
     }
   }
