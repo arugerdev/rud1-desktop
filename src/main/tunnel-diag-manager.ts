@@ -8,6 +8,13 @@ import * as path from "path";
 import { app, shell, dialog, BrowserWindow } from "electron";
 import { ping, portCheck, validateHost } from "./net-diag-manager";
 import { getStats as getSystemStats, type SystemStats } from "./system-manager";
+import {
+  vpnStatus,
+  fetchHandshakeSnapshot,
+  parseEndpointFromConfig,
+  getLastWgConfig,
+  __test as vpnTest,
+} from "./vpn-manager";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,7 +22,6 @@ const execFileAsync = promisify(execFile);
 const ICMP_IP_OVERHEAD = 28;
 
 const TUNNEL_NAME_REGEX = /^[a-zA-Z0-9_-]{1,32}$/;
-const WG_WINDOWS_PATH = "C:\\Program Files\\WireGuard\\wg.exe";
 
 export interface WgPeer {
   publicKey: string;
@@ -39,9 +45,16 @@ export type WgStatusResult =
   | { available: true; tunnels: WgTunnel[] }
   | { available: false; reason: string };
 
-function wgBinary(): string {
-  return process.platform === "win32" ? WG_WINDOWS_PATH : "wg";
-}
+/**
+ * Pre-OpenVPN this resolved the WireGuard binary path; the OpenVPN
+ * manager now owns its own binary discovery (see `vpn-manager.ts`) and
+ * we synthesise tunnel state from the live OpenVPN process rather than
+ * shelling out. This helper is kept un-exported and only referenced by
+ * the legacy `parseWgShow` test fixture parser below — that parser is
+ * still useful for ad-hoc admin-driven WG output ingestion via the
+ * `wg show` CLI on a developer's Linux box, but production runs through
+ * `wgStatus()` which short-circuits to the OpenVPN snapshot path.
+ */
 
 /**
  * Parse `wg show` (non-dump) output. The format is a blank-line separated
@@ -217,12 +230,23 @@ function parseKeepalive(value: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Synthesise a {@link WgStatusResult}-shaped report from the live OpenVPN
+ * process state. We preserve the WG-flavoured shape so the renderer's
+ * existing diagnostics chips render unchanged — there's exactly one
+ * "interface" (`rud1-tap`) and exactly one synthetic peer (the rud1-vps
+ * server). Bytes / handshake are pulled from the OpenVPN management
+ * snapshot exposed by `vpn-manager`.
+ *
+ * Migration note: `tunnelName` is preserved as an argument so callers
+ * (including the renderer's diag pane and the unit tests) don't have to
+ * change shape, but it's only used for validation now — the OpenVPN
+ * manager runs a singleton tunnel named "rud1-tap".
+ */
 export async function wgStatus(tunnelName?: string): Promise<WgStatusResult> {
   if (tunnelName !== undefined) {
-    // Reject leading-dash values: TUNNEL_NAME_REGEX permits `-` in its char
-    // class, so a name like "-version" matches the regex but would be parsed
-    // as a flag by `wg show` (positional argv #2). Mirrors the iter 11 guard
-    // in net-diag-manager.validateHost.
+    // Same flag-injection defence as before: reject leading-dash strings
+    // so a value like "-version" never sneaks through.
     if (
       typeof tunnelName !== "string" ||
       tunnelName.startsWith("-") ||
@@ -232,40 +256,59 @@ export async function wgStatus(tunnelName?: string): Promise<WgStatusResult> {
     }
   }
 
-  const bin = wgBinary();
-  const args = tunnelName ? ["show", tunnelName] : ["show"];
-
+  let status: Awaited<ReturnType<typeof vpnStatus>>;
   try {
-    const { stdout } = await execFileAsync(bin, args, {
-      timeout: 5_000,
-      windowsHide: true,
-      maxBuffer: 1024 * 1024,
-    });
-    const tunnels = parseWgShow(stdout || "");
-    return { available: true, tunnels };
-  } catch (err: unknown) {
-    const e = err as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
-    const code = e?.code;
-    if (code === "ENOENT") {
-      return { available: false, reason: "WireGuard tools not installed (wg not found in PATH)" };
-    }
-    if (code === "ETIMEDOUT" || code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-      return { available: false, reason: `wg show timed out (${String(code)})` };
-    }
-    // wg may exit non-zero if the tunnel doesn't exist; partial stdout is
-    // still useful. If we have any stdout, try parsing it.
-    if (e?.stdout && e.stdout.trim().length > 0) {
-      try {
-        const tunnels = parseWgShow(e.stdout);
-        return { available: true, tunnels };
-      } catch {
-        // fall through
-      }
-    }
-    const stderr = (e?.stderr || "").trim();
-    const msg = stderr || (err instanceof Error ? err.message : String(err));
-    return { available: false, reason: msg.slice(0, 400) };
+    status = await vpnStatus();
+  } catch (err) {
+    return {
+      available: false,
+      reason:
+        err instanceof Error ? err.message.slice(0, 400) : String(err).slice(0, 400),
+    };
   }
+
+  if (!status.connected) {
+    return { available: true, tunnels: [] };
+  }
+
+  // Best-effort endpoint extraction so the panel can render the server
+  // host:port chip — we only have the cached .ovpn here, not the live
+  // socket peer address. parseEndpointFromConfig returns null when the
+  // cache hasn't been populated yet (very rare — the OpenVPN child
+  // wouldn't have come up without a .ovpn). The renderer renders "—"
+  // for null endpoints.
+  const cfg = getLastWgConfig();
+  const endpoint = cfg ? parseEndpointFromConfig(cfg) : null;
+
+  // The handshake snapshot drives the renderer's "Tunnel up Ns" chip.
+  // We translate fresh|stale|no-handshake-yet into the same `unix
+  // seconds` shape the WG parser produced — a 0 means "never" and a
+  // non-zero value is the seconds-since-epoch.
+  const snapshot = await fetchHandshakeSnapshot();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const latestHandshake =
+    snapshot && (snapshot.kind === "fresh" || snapshot.kind === "stale")
+      ? Math.max(0, nowSec - Math.floor((snapshot.handshakeAgeMs ?? 0) / 1000))
+      : 0;
+
+  const tunnel: WgTunnel = {
+    interface: vpnTest.TUNNEL_NAME,
+    publicKey: null, // OpenVPN uses cert-based identity, not WG keypairs.
+    listenPort: null, // Client opens an ephemeral outbound socket.
+    peers: [
+      {
+        publicKey: "rud1-vps",
+        endpoint,
+        allowedIps: status.ip ? [`${status.ip}/32`] : [],
+        latestHandshake,
+        transferRx: 0,
+        transferTx: 0,
+        persistentKeepalive: null,
+      },
+    ],
+  };
+
+  return { available: true, tunnels: [tunnel] };
 }
 
 // ─── tunnelHealth ────────────────────────────────────────────────────────────
@@ -387,7 +430,7 @@ export async function tunnelHealth(
 
   if (!wgReachable) {
     hints.push(
-      "El túnel WG no responde — verifica que el device esté online desde rud1.es",
+      "El túnel OpenVPN no responde — verifica que el device esté online desde rud1.es",
     );
   }
   if (wgReachable && wgRtt !== null && wgRtt >= 500) {
@@ -407,20 +450,20 @@ export async function tunnelHealth(
   }
   if (tcpOpen) {
     hints.push(
-      `TCP al puerto WG ${publicPort} abierto — el host está encendido (nota: WG usa UDP, el test real requiere \`wg-quick up\` + handshake)`,
+      `TCP al puerto VPN ${publicPort} abierto — el host está encendido (nota: OpenVPN usa UDP por defecto; el test TCP confirma que el servidor responde, no que el túnel UDP esté operativo)`,
     );
   }
   if (!tcpOpen && !("error" in tcpResult)) {
     const code = tcpResult.errorCode ? ` (${tcpResult.errorCode})` : "";
     hints.push(
-      `TCP al puerto ${publicPort} cerrado${code} — normal si WG escucha sólo UDP; úsalo como indicio de "host apagado" si además el ping público también falla`,
+      `TCP al puerto ${publicPort} cerrado${code} — normal si OpenVPN escucha sólo UDP; úsalo como indicio de "host apagado" si además el ping público también falla`,
     );
   }
   if ("error" in tcpResult) {
     hints.push(`No se pudo ejecutar el TCP probe: ${tcpResult.error}`);
   }
   if (verdict === "healthy") {
-    hints.push("Túnel WG responde correctamente — latencia normal y handshake activo");
+    hints.push("Túnel OpenVPN responde correctamente — latencia normal y handshake activo");
   }
 
   // Optional auxiliary probe: when the caller opted in and the tunnel is
@@ -769,6 +812,11 @@ export interface FullDiagnosisResult {
 }
 
 const FULL_DIAGNOSIS_OUTER_TIMEOUT_MS = 30_000;
+// rud1-vps reuses 51820/UDP for OpenVPN (port inherited from the prior
+// WireGuard server so existing UFW / cloud firewall rules carry over).
+// Stock OpenVPN community defaults to 1194/UDP — when an integrator
+// re-points to a different server the renderer can pass `publicPort`
+// explicitly through fullDiagnosis().
 const WG_DEFAULT_LISTEN_PORT = 51820;
 
 function errMsg(e: unknown): string {

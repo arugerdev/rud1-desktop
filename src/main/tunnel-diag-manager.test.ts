@@ -45,6 +45,21 @@ vi.mock("os", async () => {
   };
 });
 
+// tunnel-diag-manager transitively imports vpn-manager -> binary-helper which
+// pulls `app` from electron at module load time. Stub it so vitest can load
+// the module without a running Electron runtime.
+vi.mock("electron", () => ({
+  app: {
+    isPackaged: false,
+    getAppPath: () => process.cwd(),
+    getPath: (_n: string) => tmpHome,
+    getVersion: () => "0.0.0",
+  },
+  shell: { openPath: async () => "" },
+  dialog: { showSaveDialog: async () => ({ canceled: true }) },
+  BrowserWindow: class {},
+}));
+
 // Import AFTER the mock is registered. vi.mock is hoisted but the captured
 // `tmpHome` lookup happens lazily inside homedir(), so it's safe.
 import {

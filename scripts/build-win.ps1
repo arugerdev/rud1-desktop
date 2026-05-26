@@ -57,12 +57,12 @@ if (-not $SkipFetch -and $env:RUD1_SKIP_FETCH -eq "1") {
 if ($SkipFetch) {
   Step "Skipping fetch:* steps (using committed resources/win32/*)"
 } else {
-  # ── 1. Fetch WireGuard ──────────────────────────────────────────────────
-  Step "Fetching WireGuard binaries (idempotent)"
+  # ── 1. Fetch OpenVPN portable runtime + TAP driver ──────────────────────
+  Step "Fetching OpenVPN runtime (idempotent)"
   try {
-    & (Join-Path $ScriptDir "fetch-wireguard-win.ps1")
+    & (Join-Path $ScriptDir "fetch-openvpn-win.ps1")
   } catch {
-    throw "fetch-wireguard-win.ps1 failed: $_"
+    throw "fetch-openvpn-win.ps1 failed: $_"
   }
 
   # ── 1b. Fetch usbip-win2 installer ──────────────────────────────────────

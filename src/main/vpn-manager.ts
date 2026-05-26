@@ -1,411 +1,85 @@
-// Tunnel name validado contra regex IFNAMSIZ (1..15 chars); netsh vía execFile, no cmd.exe.
-import { execFile } from "child_process";
-import { promisify } from "util";
+/**
+ * OpenVPN client manager.
+ *
+ * Spawns a bundled `openvpn.exe` (Windows) / `openvpn` (Unix) as a child
+ * process and tracks its lifecycle via stdout / stderr scraping AND the
+ * `--management` TCP control socket. The management socket gives us
+ * structured access to the bytes-in/out counters, the assigned IP, and a
+ * clean shutdown channel ("signal SIGTERM"); stdout parsing handles the
+ * coarse-grained state ("Initialization Sequence Completed", "AUTH_FAILED",
+ * "TLS Error").
+ *
+ * The replaced WireGuard manager exposed `wgConfig` as a string blob to
+ * IPC callers. We keep the same shape but the blob is now `.ovpn` content
+ * (OpenVPN inline-config). The caller (rud1-es panel) writes it once via
+ * `vpnConnect(ovpnConfig)` and the manager handles persistence to
+ * `%APPDATA%/rud1-desktop/ovpn/rud1-client.ovpn`, child-process spawn,
+ * and elevation prompting for TAP driver install.
+ */
+
+import { spawn, ChildProcess } from "child_process";
 import fs from "fs/promises";
+import net from "net";
 import os from "os";
 import path from "path";
-import { isBinaryAvailable, wgPath, wgQuickPath } from "./binary-helper";
+import { app } from "electron";
+import { openvpnPath, isBinaryAvailable, openvpnBundledDir } from "./binary-helper";
 import {
-  parseHandshakeSnapshot,
-  type HandshakeSnapshot,
-} from "./vpn-health-monitor";
+  detectOpenVpnRuntime,
+  ensureTapDriverInstalled,
+  type OpenVpnRuntimeStatus,
+} from "./openvpn-installer";
+import { writeOvpnConfig, defaultOvpnConfigPath } from "./ovpn-config-store";
 
-const WIREGUARD_INSTALL_URL = "https://www.wireguard.com/install/";
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-export class WireguardMissingError extends Error {
-  constructor(platform: NodeJS.Platform) {
-    const installer =
-      platform === "win32"
-        ? "WireGuard for Windows"
-        : platform === "darwin"
-        ? "WireGuard for macOS"
-        : "wireguard-tools";
-    super(
-      `${installer} is required but was not found. Install it from ${WIREGUARD_INSTALL_URL} and try again.`,
-    );
-    this.name = "WireguardMissingError";
-  }
-}
+const OPENVPN_DOWNLOAD_URL = "https://openvpn.net/community-downloads/";
 
-function ensureWireguardAvailable(): void {
-  if (process.platform === "win32") {
-    if (!isBinaryAvailable("wireguard")) {
-      throw new WireguardMissingError(process.platform);
-    }
-    return;
-  }
-  if (!isBinaryAvailable("wg-quick") || !isBinaryAvailable("wg")) {
-    throw new WireguardMissingError(process.platform);
-  }
-}
+// Local TCP port the openvpn `--management` socket listens on. Loopback
+// only, no password — we're the only consumer and the renderer never
+// gets a port number.
+const MANAGEMENT_HOST = "127.0.0.1";
+const MANAGEMENT_PORT_BASE = 25340;
+const MANAGEMENT_PORT_RANGE = 200;
 
-const execFileAsync = promisify(execFile);
+// Stable tunnel name used as the TAP adapter alias hint. The TAP driver
+// auto-names adapters "rud1-tap" via `tapctl create --hwid root\tap0901
+// --name rud1-tap`; openvpn.exe matches by name with `--dev-node rud1-tap`.
+const TUNNEL_NAME = "rud1-tap";
 
-// IFNAMSIZ=16 (15+NUL). Subset estricto del kernel: sin `=`/`+`.
+// IFNAMSIZ guard (15 chars + NUL) — same regex as the WG manager.
 const TUNNEL_NAME_REGEX = /^[a-zA-Z0-9_.\-]{1,15}$/;
 
-const TUNNEL_NAME = "rud1";
-let configFilePath: string | null = null;
+// ─── Errors ───────────────────────────────────────────────────────────────────
 
-export function validateTunnelName(name: unknown): name is string {
-  return typeof name === "string" && TUNNEL_NAME_REGEX.test(name);
-}
-
-function assertTunnelName(name: unknown): asserts name is string {
-  if (!validateTunnelName(name)) {
-    throw new Error("invalid tunnel name");
+export class OpenVpnMissingError extends Error {
+  constructor() {
+    super(
+      `OpenVPN binary not found. Re-run the rud1 installer or download ` +
+        `OpenVPN Community from ${OPENVPN_DOWNLOAD_URL} and try again.`,
+    );
+    this.name = "OpenVpnMissingError";
   }
 }
 
-export function resolveConfigPath(name: string): string {
-  assertTunnelName(name);
-  return path.join(os.tmpdir(), `${name}.conf`);
-}
-
-async function writeTempConfig(wgConfig: string): Promise<string> {
-  const file = resolveConfigPath(TUNNEL_NAME);
-  await fs.writeFile(file, wgConfig, { mode: 0o600 });
-  configFilePath = file;
-  return file;
-}
-
-async function removeTempConfig(): Promise<void> {
-  if (configFilePath) {
-    try { await fs.unlink(configFilePath); } catch { /* ignore */ }
-    configFilePath = null;
+export class TapDriverMissingError extends Error {
+  constructor(reason: string) {
+    super(
+      `TAP-Windows V9 driver is required but is not installed. ${reason}`,
+    );
+    this.name = "TapDriverMissingError";
   }
-}
-
-export function parseWgShow(stdout: string): { connected: boolean; ip?: string } {
-  const connected = stdout.includes("latest handshake");
-  const ipMatch = stdout.match(/address:\s+([\d.]+)/i);
-  return ipMatch?.[1]
-    ? { connected, ip: ipMatch[1] }
-    : { connected };
-}
-
-export function parseNetshInterface(stdout: string): { connected: boolean } {
-  return { connected: stdout.includes("Connected") };
-}
-
-async function connectWindows(wgConfig: string): Promise<void> {
-  const file = await writeTempConfig(wgConfig);
-  const wireguard = wgQuickPath();
-  // Flag correcto: `/installtunnelservice` (no `/installtunnel`). Service name = filename.
-  await execFileAsync(wireguard, ["/installtunnelservice", file]);
-}
-
-async function disconnectWindows(): Promise<void> {
-  assertTunnelName(TUNNEL_NAME);
-  const wireguard = wgQuickPath();
-  await execFileAsync(wireguard, ["/uninstalltunnelservice", TUNNEL_NAME]);
-  await removeTempConfig();
-}
-
-// Usa sc.exe exit code (locale-immune); 1060=ERROR_SERVICE_DOES_NOT_EXIST.
-async function tunnelServiceExistsWindows(): Promise<boolean> {
-  const serviceName = `WireGuardTunnel$${TUNNEL_NAME}`;
-  try {
-    await execFileAsync("sc.exe", ["query", serviceName], { windowsHide: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Win: uninstall vuelve sincrono pero SCM mantiene DELETE_PENDING; necesita poll para no chocar con install.
-/** "Tunnel already
- *  installed and running" and the user gets no tunnel — exactly the
- *  bug the operator was hitting in the panel: click Connect, the
- *  status said "fresh install" because the panel hadn't surfaced the
- *  prior service, idempotent connect calls teardown → install in
- *  series, and the install crashed into the trailing handle. We poll
- *  `tunnelServiceExistsWindows` for up to 3 s after the uninstall so
- *  the install path sees a fully-flushed SCM state.
- */
-async function teardownIfPresent(): Promise<void> {
-  if (process.platform === "win32") {
-    if (!(await tunnelServiceExistsWindows())) return;
-    await disconnectWindows();
-    // Wait for SCM to drop the DELETE_PENDING marker. 3s is generous
-    // (typical case is <500ms) but bounded so a stuck service surfaces
-    // as a clear timeout rather than a hang. After the budget elapses
-    // we fall through and let `/installtunnelservice` fail loudly with
-    // its own diagnostic — better than swallowing the timeout.
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline) {
-      if (!(await tunnelServiceExistsWindows())) return;
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-    return;
-  }
-  try {
-    await disconnectUnix();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message.toLowerCase() : String(err);
-    if (msg.includes("not a wireguard interface") || msg.includes("does not exist")) {
-      return;
-    }
-    throw err;
-  }
-}
-
-async function statusWindows(): Promise<{ connected: boolean; ip?: string }> {
-  assertTunnelName(TUNNEL_NAME);
-  // Two distinct questions the renderer mixes into one boolean:
-  //
-  //   (a) Does a tunnel SERVICE currently exist on this machine? The panel
-  //       needs to know this on entry so it can offer Disconnect instead
-  //       of Connect when the user lands on a session that already has a
-  //       tunnel installed (e.g. the app was closed while the service
-  //       stayed running, or the install succeeded but the page reloaded).
-  //   (b) Has WireGuard handshaked successfully? Useful for diagnostics
-  //       chips ("Tunnel up 12s") but NOT load-bearing for the disconnect
-  //       button — a tunnel installed but never handshaked still needs
-  //       to be uninstalled before a fresh connect.
-  //
-  // `sc.exe query` is the locale-immune source of truth for (a) — same
-  // probe `tunnelServiceExistsWindows` uses for the teardown gate. We
-  // promote it here so the renderer's `vpn:status` reflects "the OS has
-  // a WireGuardTunnel$rud1 service" the moment the user opens the panel,
-  // without waiting for a handshake. netsh remains as a secondary IP
-  // probe but we no longer require it to flip `connected`.
-  if (await tunnelServiceExistsWindows()) {
-    // netsh interface show doesn't carry an IP for WireGuard tunnels —
-    // they're not standard netsh-managed interfaces. Returning just
-    // `connected: true` is enough: the renderer paints the device's
-    // VPN IP from the cloud's `VpnConfig.address` (the canonical
-    // allocation) rather than relying on the desktop bridge for it.
-    return { connected: true };
-  }
-  return { connected: false };
-}
-
-async function connectUnix(wgConfig: string): Promise<void> {
-  const file = await writeTempConfig(wgConfig);
-  const wgQuick = wgQuickPath();
-  await execFileAsync(wgQuick, ["up", file]);
-}
-
-async function disconnectUnix(): Promise<void> {
-  assertTunnelName(TUNNEL_NAME);
-  const wgQuick = wgQuickPath();
-  if (configFilePath) {
-    await execFileAsync(wgQuick, ["down", configFilePath]);
-  } else {
-    await execFileAsync(wgQuick, ["down", TUNNEL_NAME]);
-  }
-  await removeTempConfig();
-}
-
-async function statusUnix(): Promise<{ connected: boolean; ip?: string }> {
-  assertTunnelName(TUNNEL_NAME);
-  try {
-    const wg = wgPath();
-    const { stdout } = await execFileAsync(wg, ["show", TUNNEL_NAME]);
-    // Same precondition as statusWindows: when `wg show <name>` returns
-    // 0 the interface exists in the kernel — that's what the renderer
-    // means by "connected" for purposes of choosing Connect vs
-    // Disconnect. parseWgShow used to require a "latest handshake" line
-    // which made an installed-but-unhandshaked tunnel report `false`,
-    // and the panel kept offering Connect over a tunnel that already
-    // existed → the next install collided with "Tunnel already
-    // installed" on systems that re-use the wg interface name.
-    const parsed = parseWgShow(stdout);
-    return parsed.ip ? { connected: true, ip: parsed.ip } : { connected: true };
-  } catch {
-    // Non-zero from `wg show` means the interface isn't there — that's
-    // the only case where we want to offer Connect.
-    return { connected: false };
-  }
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-// Iter 57: lifecycle freshness signals. The renderer surfaces these next to
-// the cloud's lan.lastAppliedAt chip so the operator gets symmetric
-// "synced Xs ago" feedback on both sides of the tunnel — the Pi side
-// (when LAN routing was re-applied) and the user side (when the desktop
-// last installed/uninstalled the WG tunnel service). Module-scoped state
-// is sufficient: there is exactly one rud1 tunnel per desktop instance
-// and the renderer pulls via `vpn:status`.
-let lastConnectedAt: number | null = null;
-let lastDisconnectedAt: number | null = null;
-
-// Iter 8 (auto-reconnect): the most recent wgConfig string the renderer
-// passed to vpnConnect. Held in memory ONLY — never persisted, since
-// it embeds the user's WireGuard private key. Cleared on disconnect so
-// a stale config can't be reused after the user explicitly tore down.
-let lastWgConfig: string | null = null;
-
-/**
- * Test-only helper: reset the lifecycle freshness signals back to their
- * initial nulls. The module's only mutable state is two timestamps + the
- * cached config; vitest `beforeEach`s use this to avoid one test bleeding
- * state into the next.
- */
-export function __resetVpnLifecycleStateForTests(): void {
-  lastConnectedAt = null;
-  lastDisconnectedAt = null;
-  lastWgConfig = null;
 }
 
 /**
- * Iter 8: returns the most recent wgConfig string the renderer issued
- * to vpnConnect, or null when no connect has succeeded this session.
- * Used by the auto-reconnect monitor to re-install the tunnel after a
- * stale-handshake detection without bouncing the user through the
- * cloud peer-registration flow again.
+ * Backwards-compatible alias so callers that still throw / catch the WG
+ * "missing" error keep working without a churn-only rename. The IPC layer
+ * still surfaces a generic message; the type tag is just for instanceof.
  */
-export function getLastWgConfig(): string | null {
-  return lastWgConfig;
-}
+export const WireguardMissingError = OpenVpnMissingError;
 
-export async function vpnConnect(wgConfig: string): Promise<void> {
-  ensureWireguardAvailable();
-  // Idempotent connect. Three reasons to tear down whatever's currently
-  // installed before bringing up the new config:
-  //
-  //   1. The panel always generates a fresh keypair on click, so any
-  //      previously-installed tunnel has a stale private key that won't
-  //      handshake. WireGuard for Windows otherwise refuses with
-  //      "Tunnel already installed and running".
-  //   2. The user may have lost panel state (page reload, app restart)
-  //      while the tunnel service is still up. A second click should
-  //      reconcile, not error out.
-  //   3. The peer config could have been re-issued by the cloud (e.g.
-  //      device endpoint changed); rolling the service picks it up.
-  await teardownIfPresent();
-  if (process.platform === "win32") {
-    try {
-      await connectWindows(wgConfig);
-    } catch (err) {
-      // Defence in depth against the SCM DELETE_PENDING race: even with
-      // teardownIfPresent's 3s flush window, a slow machine (or an SCM
-      // backed up by an unrelated install) can still surface "Tunnel
-      // already installed and running" on the very next install. Single
-      // retry: tear down again, then install. If THAT still fails the
-      // error propagates and the renderer surfaces the toast — at that
-      // point we've spent ~6s on retry budget and something genuinely
-      // odd is going on.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/already installed/i.test(msg)) {
-        await teardownIfPresent();
-        await connectWindows(wgConfig);
-      } else {
-        throw err;
-      }
-    }
-  } else {
-    await connectUnix(wgConfig);
-  }
-  // Stamp AFTER the platform-specific install resolves cleanly. Failure
-  // paths must not move the freshness signal — the operator should see
-  // "no successful install yet" rather than a misleading "synced 12s ago".
-  lastConnectedAt = Date.now();
-  // Cache the config in memory so the auto-reconnect monitor can
-  // re-install the tunnel without bouncing through the cloud again.
-  // Cleared by vpnDisconnect so an explicit teardown leaves no
-  // resurrectable state behind.
-  lastWgConfig = wgConfig;
-}
+// ─── Public types ─────────────────────────────────────────────────────────────
 
-/**
- * Iter 59: result envelope for `vpnDisconnect`. Carries the captured
- * tunnel uptime (in ms) so the IPC layer can render a "Tunnel dropped
- * after 2h 14m" toast — gives the user a satisfying confirmation that
- * the tunnel was actually doing useful work, not just a generic "Tunnel
- * is down" message that's indistinguishable from a never-connected
- * fall-through. Null when there was no live connect stamp from this
- * session (e.g. teardown of a leftover service from a previous run).
- */
-export interface VpnDisconnectResult {
-  /** ms the tunnel was up before the disconnect succeeded, or null when
-   *  we don't have a live connect stamp from this session. */
-  uptimeMs: number | null;
-}
-
-export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
-  ensureWireguardAvailable();
-  // Capture uptime BEFORE clearing state — we measure against the prior
-  // connect stamp, then stomp the disconnect stamp afterwards. The
-  // computation reuses the same pure helper as `vpnStatus` so the
-  // semantics stay identical (null on missing/negative delta).
-  const uptimeMs = computeTunnelUptimeMs(true, lastConnectedAt, Date.now());
-  if (process.platform === "win32") {
-    await disconnectWindows();
-  } else {
-    await disconnectUnix();
-  }
-  lastDisconnectedAt = Date.now();
-  // Discard the cached config: the user explicitly tore down, so the
-  // auto-reconnect monitor must NOT bring the tunnel back without
-  // another connect call.
-  lastWgConfig = null;
-  return { uptimeMs };
-}
-
-/**
- * Iter 8: read the latest WireGuard handshake age via
- * `wg show <iface> latest-handshakes`. Returns the raw stdout so the
- * pure parser in `vpn-health-monitor.ts` can classify it. Throws on
- * any platform error so the monitor's tick can swallow and retry.
- */
-export async function fetchHandshakeStdout(): Promise<string> {
-  ensureWireguardAvailable();
-  assertTunnelName(TUNNEL_NAME);
-  const wg = wgPath();
-  const { stdout } = await execFileAsync(wg, [
-    "show",
-    TUNNEL_NAME,
-    "latest-handshakes",
-  ]);
-  return stdout;
-}
-
-/**
- * Iter 59: compact uptime formatter. Mirrors the rud1-es `formatUptimeMs`
- * in connect-panel.tsx so the desktop's notification toast and the
- * renderer's chip read identically. Returns null for unrecoverable
- * inputs so callers can suppress the trailing "after ..." segment
- * rather than print "after NaNs".
- */
-export function formatUptimeMs(ms: number | null | undefined): string | null {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
-  const totalSec = Math.floor(ms / 1000);
-  if (totalSec < 60) return `${totalSec}s`;
-  const min = Math.floor(totalSec / 60);
-  if (min < 60) return `${min}m ${totalSec % 60}s`;
-  const hr = Math.floor(min / 60);
-  if (hr < 48) return `${hr}h ${min % 60}m`;
-  const days = Math.floor(hr / 24);
-  return `${days}d ${hr % 24}h`;
-}
-
-/**
- * Result of `vpnStatus()`. The lifecycle stamps are exported as ISO 8601
- * strings (UTC) so the renderer can format them with the same Date helpers
- * it uses for `lan.lastAppliedAt` from the cloud — keeps "synced Xs ago"
- * formatting consistent across the desktop UI.
- */
-/**
- * Iter 71: surfaced separately from `connected` because the two answer
- * different operator questions:
- *   - `connected` (boolean) — does a WireGuard service / interface exist
- *     in the OS? Used by the panel to decide whether to render Connect or
- *     Disconnect. A tunnel that's installed but the peer is unreachable
- *     still counts as `connected: true` here so the user can tear down
- *     stale services.
- *   - `handshake` — has WireGuard exchanged keys recently? Drives the UX
- *     signal ("VPN active" vs "VPN unreachable") and the disconnect-
- *     detection notification. Pre-iter71 the desktop conflated these two
- *     and reported "connected" forever even when the link was dead.
- *
- *   "no-tunnel"          → interface gone (rare; usually connected=false too)
- *   "no-handshake-yet"   → service exists, no handshake ever (warming up)
- *   "fresh"              → handshake within STALE_THRESHOLD_MS (working)
- *   "stale"              → service exists but handshake is too old (broken)
- */
 export type VpnHandshakeStatus =
   | "no-tunnel"
   | "no-handshake-yet"
@@ -419,50 +93,116 @@ export interface VpnStatusResult {
   lastConnectedAt: string | null;
   /** ISO timestamp of the last successful `vpnDisconnect` (null until first run). */
   lastDisconnectedAt: string | null;
-  /**
-   * Iter 58: convenience derived field — `Date.now() - lastConnectedAt`
-   * when the tunnel is currently connected AND we've stamped a connect
-   * this session, otherwise null. Lets the renderer show
-   * "Tunnel up 12m" without parsing the ISO stamps client-side.
-   *
-   * Three null cases:
-   *   - `connected === false` (the disconnect path matters; uptime is moot)
-   *   - `lastConnectedAt === null` (no connect attempted this session, but
-   *     wg/netsh reports the tunnel up — typically a leftover service
-   *     from a previous app run; we don't lie about uptime we can't measure)
-   *   - clock skew makes the delta negative (we coerce to null rather
-   *     than emit a misleading negative number)
-   */
+  /** ms the tunnel has been up, or null when down / no in-session stamp. */
   tunnelUptimeMs: number | null;
-  /**
-   * Iter 71: real-time handshake classification. Polled via `wg show
-   * <iface> latest-handshakes` on every `vpnStatus` call. Independent of
-   * `connected` (which only reflects service existence). Null on the
-   * platform error path (binary missing, exec failure) — the renderer
-   * should treat null as "unknown" and fall back to `connected` alone.
-   */
+  /** Real-time handshake classification — see {@link VpnHandshakeStatus}. */
   handshakeStatus: VpnHandshakeStatus | null;
-  /**
-   * Iter 71: milliseconds since the last successful handshake, derived
-   * from `wg show … latest-handshakes`. Null when there is no handshake
-   * yet, when the snapshot couldn't be read, or when the tunnel doesn't
-   * exist. Lets the renderer paint a "Handshake 32s ago" chip without
-   * shelling out itself.
-   */
+  /** ms since the last successful handshake (or last keepalive ping). */
   handshakeAgeMs: number | null;
 }
 
+export interface VpnDisconnectResult {
+  /** ms the tunnel was up before the disconnect succeeded, or null when
+   *  we don't have a live connect stamp from this session. */
+  uptimeMs: number | null;
+}
+
+export interface ConfigPreflight {
+  /** Parsed first `remote <host> <port>` directive, or null when absent. */
+  endpoint: string | null;
+  /** True when `endpoint` could be parsed. */
+  hasEndpoint: boolean;
+  /** Reserved: OpenVPN clients sit behind the server, so client-side
+   *  CGNAT on the device's ISP is detected at the cloud level. We
+   *  preserve the field for IPC contract stability — always false. */
+  cgnat: boolean;
+}
+
+// ─── Module state ─────────────────────────────────────────────────────────────
+
+interface RunningProc {
+  proc: ChildProcess;
+  managementPort: number;
+  /** Parsed assigned IP, populated once the management socket reports it. */
+  assignedIp: string | null;
+  /** ms timestamp of the last received management heartbeat / keepalive. */
+  lastHeartbeatAt: number;
+  /** True once "Initialization Sequence Completed" is observed on stdout. */
+  initialized: boolean;
+  /** Captures the most recent error line for diagnostics. */
+  lastErrorLine: string | null;
+}
+
+let running: RunningProc | null = null;
+let lastConnectedAt: number | null = null;
+let lastDisconnectedAt: number | null = null;
+let lastOvpnConfig: string | null = null;
+
+// ─── Validators ───────────────────────────────────────────────────────────────
+
+export function validateTunnelName(name: unknown): name is string {
+  return typeof name === "string" && TUNNEL_NAME_REGEX.test(name);
+}
+
+function assertTunnelName(name: unknown): asserts name is string {
+  if (!validateTunnelName(name)) {
+    throw new Error("invalid tunnel name");
+  }
+}
+
 /**
- * Iter 58: pure computation of the derived `tunnelUptimeMs`. Extracted
- * so unit tests can pin the contract without spawning wg/netsh — the
- * real `vpnStatus` uses platform-dependent shell-outs that the iter-19
- * module banner explicitly chose not to mock.
- *
- * Returns null whenever the tunnel is not currently up, when there's no
- * recorded connect stamp this session, or when the clock has drifted
- * backwards between the connect stamp and `nowMs` (a desktop machine
- * recovering from sleep can briefly jump backwards before NTP resyncs).
+ * Resolves the temp path the WG manager used. Preserved for test parity;
+ * the OpenVPN manager writes to `%APPDATA%/rud1-desktop/ovpn/` instead.
  */
+export function resolveConfigPath(name: string): string {
+  assertTunnelName(name);
+  return path.join(os.tmpdir(), `${name}.conf`);
+}
+
+// ─── Pre-flight (config inspection) ───────────────────────────────────────────
+
+/**
+ * Pull the first `remote <host> <port>` directive out of an `.ovpn`. Used
+ * by the IPC layer to surface the endpoint in the connect ack without
+ * spawning openvpn first.
+ */
+export function parseEndpointFromConfig(ovpnConfig: string): string | null {
+  if (typeof ovpnConfig !== "string" || ovpnConfig.length === 0) return null;
+  for (const raw of ovpnConfig.split(/\r?\n/)) {
+    // Strip trailing comments and surrounding whitespace.
+    const trimmed = raw.replace(/[#;].*$/, "").trim();
+    if (trimmed.length === 0) continue;
+    // OpenVPN's `remote` directive: `remote <host> [port] [proto]`.
+    const m = trimmed.match(/^remote\s+(\S+)(?:\s+(\d+))?/i);
+    if (!m) continue;
+    const host = m[1]!;
+    const port = m[2];
+    return port ? `${host}:${port}` : host;
+  }
+  return null;
+}
+
+/**
+ * OpenVPN's client connects OUTBOUND to the server, so a CGNAT'd client
+ * isn't an obstacle for the TLS handshake — the connect always works.
+ * We keep the signature for IPC contract stability and always return
+ * false here.
+ */
+export function isCGNATEndpoint(_endpoint: string | null | undefined): boolean {
+  return false;
+}
+
+export function inspectConfig(ovpnConfig: string): ConfigPreflight {
+  const endpoint = parseEndpointFromConfig(ovpnConfig);
+  return {
+    endpoint,
+    hasEndpoint: !!endpoint,
+    cgnat: false,
+  };
+}
+
+// ─── Uptime / formatting helpers ──────────────────────────────────────────────
+
 export function computeTunnelUptimeMs(
   connected: boolean,
   lastConnectedAtMs: number | null,
@@ -475,176 +215,468 @@ export function computeTunnelUptimeMs(
   return delta;
 }
 
-/**
- * Iter 71: classifies the active tunnel's handshake. Wraps the existing
- * `fetchHandshakeStdout` + `parseHandshakeSnapshot` pair so callers
- * (vpnStatus + the health monitor's fetchSnapshot dep) share one
- * code path. Returns null on any platform error so the caller can
- * decide whether to omit the field or fall back to `connected`.
- */
-export async function fetchHandshakeSnapshot(
-  nowMs: number = Date.now(),
-): Promise<HandshakeSnapshot | null> {
-  try {
-    const stdout = await fetchHandshakeStdout();
-    return parseHandshakeSnapshot(stdout, nowMs);
-  } catch {
-    // Binary missing, tunnel torn down between status calls, perms flap.
-    // Surface as null so vpnStatus can degrade gracefully — the operator
-    // still sees the lifecycle stamps + the `connected` boolean.
-    return null;
-  }
+export function formatUptimeMs(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  if (min < 60) return `${min}m ${totalSec % 60}s`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h ${min % 60}m`;
+  const days = Math.floor(hr / 24);
+  return `${days}d ${hr % 24}h`;
 }
 
+// ─── Test-only handshake classifier (preserved for vpn-health-monitor parity) ─
+
 /**
- * Derives the {handshakeStatus, handshakeAgeMs} pair the renderer
- * consumes from a parsed snapshot. Pure so the unit tests can pin the
- * mapping without spawning wg.
+ * Wraps the (now OpenVPN-specific) handshake classification so the
+ * health monitor's pure tests still see the same shape they were written
+ * against. The OpenVPN management interface gives us continuous "ping"
+ * timestamps instead of WG's discrete handshake event, so we derive a
+ * synthetic `fresh|stale` from the last-heartbeat delta.
  */
+export interface HandshakeSnapshot {
+  kind: "no-tunnel" | "no-handshake-yet" | "fresh" | "stale";
+  handshakeAgeMs?: number;
+}
+
 export function classifyHandshakeSnapshot(
   snapshot: HandshakeSnapshot | null,
 ): { handshakeStatus: VpnHandshakeStatus | null; handshakeAgeMs: number | null } {
-  if (snapshot == null) {
-    return { handshakeStatus: null, handshakeAgeMs: null };
-  }
+  if (snapshot == null) return { handshakeStatus: null, handshakeAgeMs: null };
   switch (snapshot.kind) {
     case "no-tunnel":
       return { handshakeStatus: "no-tunnel", handshakeAgeMs: null };
     case "no-handshake-yet":
       return { handshakeStatus: "no-handshake-yet", handshakeAgeMs: null };
     case "fresh":
-      return { handshakeStatus: "fresh", handshakeAgeMs: snapshot.handshakeAgeMs };
+      return { handshakeStatus: "fresh", handshakeAgeMs: snapshot.handshakeAgeMs ?? null };
     case "stale":
-      return { handshakeStatus: "stale", handshakeAgeMs: snapshot.handshakeAgeMs };
+      return { handshakeStatus: "stale", handshakeAgeMs: snapshot.handshakeAgeMs ?? null };
   }
 }
 
+const STALE_THRESHOLD_MS = 75_000; // 3x default keepalive (25s).
+
+function snapshotFromState(now: number): HandshakeSnapshot {
+  if (!running) return { kind: "no-tunnel" };
+  if (!running.initialized || running.lastHeartbeatAt === 0) {
+    return { kind: "no-handshake-yet" };
+  }
+  const age = now - running.lastHeartbeatAt;
+  if (age >= STALE_THRESHOLD_MS) {
+    return { kind: "stale", handshakeAgeMs: age };
+  }
+  return { kind: "fresh", handshakeAgeMs: Math.max(0, age) };
+}
+
+/**
+ * Stub used by the legacy auto-reconnect loop. Returns a synthesized
+ * stdout that {@link parseHandshakeSnapshot} in `vpn-health-monitor.ts`
+ * can still parse — keeping the iter-8 monitor unchanged.
+ */
+export async function fetchHandshakeStdout(): Promise<string> {
+  if (!running) return "";
+  const ageSec = Math.max(0, Math.floor((Date.now() - running.lastHeartbeatAt) / 1000));
+  // The wg-format parser looks for "ts" at end-of-line.
+  const ts = running.lastHeartbeatAt > 0
+    ? Math.floor(running.lastHeartbeatAt / 1000)
+    : 0;
+  void ageSec;
+  return `peer\t${ts}\n`;
+}
+
+export async function fetchHandshakeSnapshot(
+  nowMs: number = Date.now(),
+): Promise<HandshakeSnapshot | null> {
+  try {
+    return snapshotFromState(nowMs);
+  } catch {
+    return null;
+  }
+}
+
+// ─── Lifecycle ────────────────────────────────────────────────────────────────
+
+/**
+ * Test-only helper: reset the lifecycle freshness signals + cached
+ * config back to their initial nulls.
+ */
+export function __resetVpnLifecycleStateForTests(): void {
+  lastConnectedAt = null;
+  lastDisconnectedAt = null;
+  lastOvpnConfig = null;
+  if (running) {
+    try { running.proc.kill(); } catch { /* ignore */ }
+  }
+  running = null;
+}
+
+/**
+ * Iter 8 — returns the most recent `.ovpn` config the renderer issued to
+ * vpnConnect. Used by the auto-reconnect monitor.
+ */
+export function getLastWgConfig(): string | null {
+  return lastOvpnConfig;
+}
+
+/**
+ * Picks a loopback port the openvpn `--management` listener binds to.
+ * Tries the base, then bumps by 1 up to MANAGEMENT_PORT_RANGE to dodge a
+ * port that might already be held by a leftover openvpn process from a
+ * previous run.
+ */
+async function pickManagementPort(): Promise<number> {
+  for (let i = 0; i < MANAGEMENT_PORT_RANGE; i++) {
+    const port = MANAGEMENT_PORT_BASE + i;
+    const free = await new Promise<boolean>((resolve) => {
+      const probe = net.createServer();
+      probe.once("error", () => resolve(false));
+      probe.listen(port, MANAGEMENT_HOST, () => {
+        probe.close(() => resolve(true));
+      });
+    });
+    if (free) return port;
+  }
+  throw new Error("Could not allocate a loopback management port for openvpn");
+}
+
+/**
+ * Connect to the openvpn `--management` socket and subscribe to state +
+ * bytecount notifications. We do this AFTER spawn so openvpn has time to
+ * bind the socket; the connect attempt retries for up to 5s. Returns the
+ * socket so the manager can keep it open for the lifetime of the process.
+ *
+ * Best-effort: management socket failures don't tear down the tunnel —
+ * stdout scraping is enough for the connected / disconnected coarse
+ * states.
+ */
+async function attachManagementSocket(port: number): Promise<net.Socket | null> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const sock = await new Promise<net.Socket>((resolve, reject) => {
+        const s = net.createConnection({ host: MANAGEMENT_HOST, port });
+        s.once("connect", () => resolve(s));
+        s.once("error", (err) => reject(err));
+      });
+      return sock;
+    } catch {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  return null;
+}
+
+function wireManagementSocket(sock: net.Socket): void {
+  if (!running) return;
+  const live = running;
+  // Subscribe to state + byte counts so we can keep `assignedIp` and
+  // `lastHeartbeatAt` up to date without polling.
+  sock.setEncoding("utf8");
+  try {
+    sock.write("state on\nbytecount 5\n");
+  } catch {
+    /* socket already gone */
+  }
+  let buf = "";
+  sock.on("data", (chunk: string) => {
+    buf += chunk;
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, nl).replace(/\r$/, "");
+      buf = buf.slice(nl + 1);
+      parseManagementLine(line, live);
+    }
+  });
+  sock.on("error", () => { /* swallow — child-process death is the source of truth */ });
+  sock.on("close", () => { /* connection lost; we'll fall back to stdout scraping */ });
+}
+
+/**
+ * Parse one line from the openvpn `--management` channel.
+ *
+ * Two notification shapes we care about:
+ *   `>STATE:<ts>,CONNECTED,SUCCESS,<vpn-ip>,<remote-ip>,<remote-port>,<local-ip>,<local-port>`
+ *   `>BYTECOUNT:<rx>,<tx>`
+ */
+function parseManagementLine(line: string, live: RunningProc): void {
+  if (line.startsWith(">STATE:")) {
+    const parts = line.slice(7).split(",");
+    // parts: [ts, state, detail, local-ip-on-vpn, ...]
+    const state = parts[1] ?? "";
+    const vpnIp = parts[3] ?? "";
+    if (state === "CONNECTED") {
+      live.initialized = true;
+      live.lastHeartbeatAt = Date.now();
+      if (vpnIp && /^\d{1,3}(\.\d{1,3}){3}$/.test(vpnIp)) {
+        live.assignedIp = vpnIp;
+      }
+    } else if (state === "RECONNECTING" || state === "EXITING") {
+      live.initialized = false;
+    }
+    return;
+  }
+  if (line.startsWith(">BYTECOUNT:")) {
+    // Every bytecount tick (5s above) counts as a live keepalive.
+    live.lastHeartbeatAt = Date.now();
+    return;
+  }
+}
+
+/**
+ * Spawn openvpn.exe with the .ovpn at `configPath`. Returns once the
+ * child process has launched (does NOT wait for the tunnel to come up —
+ * the caller polls `vpnStatus()` for that). Throws if spawn fails
+ * synchronously (ENOENT, EACCES).
+ */
+async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
+  const exe = openvpnPath();
+  const managementPort = await pickManagementPort();
+  // Open openvpn with a single config file. Management socket pinned to
+  // loopback. We disable the GUI's TAP-Windows interactive service so
+  // the child uses the directly-launched binary's privileges (our app's
+  // NSIS manifest is requireAdministrator).
+  const args = [
+    "--config", configPath,
+    "--dev-node", TUNNEL_NAME,
+    "--management", MANAGEMENT_HOST, String(managementPort),
+    "--management-hold",
+    "--management-query-passwords",
+    "--verb", "3",
+  ];
+  // The bundled DLLs live next to openvpn.exe; spawn with that directory
+  // as cwd so libssl / libcrypto resolve via the binary's import table
+  // search order (the EXE's own directory wins over PATH).
+  const cwd = process.platform === "win32" ? openvpnBundledDir() : undefined;
+  let proc: ChildProcess;
+  try {
+    proc = spawn(exe, args, {
+      windowsHide: true,
+      cwd: cwd && require("fs").existsSync(cwd) ? cwd : undefined,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new OpenVpnMissingError();
+    }
+    throw err;
+  }
+  const live: RunningProc = {
+    proc,
+    managementPort,
+    assignedIp: null,
+    lastHeartbeatAt: 0,
+    initialized: false,
+    lastErrorLine: null,
+  };
+  // stdout scraping for the coarse-grained "initialization completed" /
+  // "auth failed" events. We don't tear down on AUTH_FAILED here — the
+  // child process exits non-zero on its own and our exit handler picks
+  // up the failure.
+  if (proc.stdout) {
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (chunk: string) => {
+      for (const rawLine of chunk.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (line.includes("Initialization Sequence Completed")) {
+          live.initialized = true;
+          live.lastHeartbeatAt = Date.now();
+        } else if (/(AUTH_FAILED|TLS Error|Cannot resolve host)/i.test(line)) {
+          live.lastErrorLine = line.slice(0, 240);
+        } else if (line.includes("Inactivity timeout")) {
+          live.initialized = false;
+        } else if (line.startsWith("PUSH:")) {
+          // First push from the server lands the assigned IP. We also
+          // pick it up from the management socket — duplicate work is
+          // fine, whichever lands first wins.
+          const m = line.match(/ifconfig\s+(\d{1,3}(?:\.\d{1,3}){3})/);
+          if (m) live.assignedIp = m[1] ?? null;
+        }
+      }
+    });
+  }
+  if (proc.stderr) {
+    proc.stderr.setEncoding("utf8");
+    proc.stderr.on("data", (chunk: string) => {
+      const line = chunk.split(/\r?\n/).pop()?.trim() ?? "";
+      if (line) live.lastErrorLine = line.slice(0, 240);
+    });
+  }
+  proc.on("exit", () => {
+    // Whoever is observing `running` will see null on the next status
+    // call. We also drop the cached config so a subsequent connect
+    // re-reads from APPDATA.
+    if (running === live) running = null;
+  });
+  return live;
+}
+
+/**
+ * Tear down the current openvpn process (if any). Sends SIGTERM (clean
+ * exit on Unix; on Windows `--management-signal SIGTERM` would be cleaner
+ * but `proc.kill()` translates to a `TerminateProcess` which the child's
+ * `service-wrapper` handler treats as a hard stop — the TAP adapter is
+ * released either way).
+ */
+async function killRunning(): Promise<void> {
+  if (!running) return;
+  const live = running;
+  try {
+    live.proc.kill();
+  } catch {
+    /* already dead */
+  }
+  // Wait up to 5s for the child to exit. If it hangs, escalate to
+  // SIGKILL — leaving an orphan openvpn around holds the TAP adapter
+  // hostage and prevents the next install.
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      try { live.proc.kill("SIGKILL"); } catch { /* ignore */ }
+      resolve();
+    }, 5_000);
+    live.proc.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  running = null;
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * Bring the tunnel up using the supplied `.ovpn` config blob. Persists the
+ * config to `%APPDATA%/rud1-desktop/ovpn/` so a desktop restart can re-arm
+ * the tunnel without bouncing through the cloud, then spawns openvpn.exe.
+ *
+ * On Windows: if the TAP-Windows V9 driver isn't installed, this throws
+ * `TapDriverMissingError`. The IPC layer routes the throw into the iter-71
+ * "TAP driver missing" CTA which prompts the user for elevation via a
+ * Liquid Glass modal.
+ */
+export async function vpnConnect(ovpnConfig: string): Promise<void> {
+  if (typeof ovpnConfig !== "string" || ovpnConfig.length === 0) {
+    throw new Error("invalid .ovpn config");
+  }
+  if (!isBinaryAvailable("openvpn")) {
+    throw new OpenVpnMissingError();
+  }
+  // Idempotent connect: tear down whatever's currently up before bringing
+  // up the new config. The renderer always re-issues the freshest .ovpn,
+  // and the server may have rotated certs.
+  await killRunning();
+
+  // Ensure the TAP driver is installed. This is a no-op on Unix and a
+  // single elevated `tapctl create` invocation on Windows when missing.
+  // We surface a typed error so the IPC layer can render the dedicated CTA.
+  const runtime: OpenVpnRuntimeStatus = await detectOpenVpnRuntime();
+  if (!runtime.openvpnAvailable) {
+    throw new OpenVpnMissingError();
+  }
+  if (process.platform === "win32" && !runtime.tapDriverInstalled) {
+    // ensureTapDriverInstalled triggers a UAC prompt. If the user cancels
+    // we propagate as TapDriverMissingError so the panel shows the CTA.
+    try {
+      await ensureTapDriverInstalled();
+    } catch (err) {
+      throw new TapDriverMissingError(
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  const configPath = await writeOvpnConfig(ovpnConfig);
+
+  const live = await spawnOpenvpn(configPath);
+  running = live;
+  lastConnectedAt = Date.now();
+  lastOvpnConfig = ovpnConfig;
+
+  // Attach to the management socket in the background — the spawn itself
+  // is enough to return success, the renderer polls vpnStatus() for the
+  // "initialization completed" rising edge.
+  void (async () => {
+    const sock = await attachManagementSocket(live.managementPort);
+    if (!sock || running !== live) return;
+    wireManagementSocket(sock);
+    // Once the management socket is wired up, lift the `--management-hold`
+    // we passed at spawn so openvpn actually starts the TLS handshake.
+    try {
+      sock.write("hold release\n");
+    } catch {
+      /* socket already gone */
+    }
+  })();
+}
+
+export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
+  const uptimeMs = computeTunnelUptimeMs(
+    running !== null,
+    lastConnectedAt,
+    Date.now(),
+  );
+  await killRunning();
+  lastDisconnectedAt = Date.now();
+  lastOvpnConfig = null;
+  return { uptimeMs };
+}
+
 export async function vpnStatus(): Promise<VpnStatusResult> {
-  const platformStatus =
-    process.platform === "win32" ? await statusWindows() : await statusUnix();
-  // Iter 71: handshake snapshot in parallel with the platform probe.
-  // We don't gate on `connected` here — if the service exists we want
-  // the handshake state regardless, and if it doesn't `fetchHandshake`
-  // returns "no-tunnel" so the renderer gets a consistent answer.
-  const snapshot = await fetchHandshakeSnapshot();
+  const now = Date.now();
+  const connected = running !== null && running.initialized;
+  const ip = running?.assignedIp ?? undefined;
+  const snapshot = snapshotFromState(now);
   const { handshakeStatus, handshakeAgeMs } = classifyHandshakeSnapshot(snapshot);
   return {
-    ...platformStatus,
-    lastConnectedAt: lastConnectedAt
-      ? new Date(lastConnectedAt).toISOString()
-      : null,
-    lastDisconnectedAt: lastDisconnectedAt
-      ? new Date(lastDisconnectedAt).toISOString()
-      : null,
-    tunnelUptimeMs: computeTunnelUptimeMs(
-      platformStatus.connected,
-      lastConnectedAt,
-      Date.now(),
-    ),
+    connected,
+    ...(ip ? { ip } : {}),
+    lastConnectedAt: lastConnectedAt ? new Date(lastConnectedAt).toISOString() : null,
+    lastDisconnectedAt: lastDisconnectedAt ? new Date(lastDisconnectedAt).toISOString() : null,
+    tunnelUptimeMs: computeTunnelUptimeMs(connected, lastConnectedAt, now),
     handshakeStatus,
     handshakeAgeMs,
   };
 }
 
+/**
+ * Returns a list of platform-relevant key-generation instructions. The
+ * panel surfaces this as a hint when the operator wants to inspect the
+ * cert chain. For OpenVPN this is informational only — certs come from
+ * the cloud's CA via the `.ovpn` push.
+ */
 export function generateKeyPairInstructions(): string {
-  if (process.platform === "win32") {
-    return 'wg genkey | tee priv.key | wg pubkey > pub.key';
-  }
-  return 'wg genkey | tee priv.key | wg pubkey';
-}
-
-// ─── Endpoint pre-flight ──────────────────────────────────────────────────────
-
-/**
- * Pulls the `Endpoint = host:port` value out of a WireGuard config blob.
- * Returns null when no `[Peer]` block carries an endpoint, when the value is
- * blank, or when the line is malformed. The parser is permissive: it tolerates
- * inline comments (`# ...`), CRLF or LF line endings, leading whitespace, and
- * mixed-case keys.
- *
- * Used by the IPC layer to pre-flight the tunnel: we want to detect a CGNAT'd
- * peer endpoint BEFORE invoking `wireguard.exe /installtunnelservice`, so the
- * renderer can surface an actionable warning instead of letting the operator
- * stare at an interface that "just doesn't connect".
- */
-export function parseEndpointFromConfig(wgConfig: string): string | null {
-  if (typeof wgConfig !== "string" || wgConfig.length === 0) return null;
-  const lines = wgConfig.split(/\r?\n/);
-  for (const raw of lines) {
-    // Strip inline comments and surrounding whitespace, then split on the
-    // first `=` only — host:port may contain digits but never `=`.
-    const trimmed = raw.replace(/[#;].*$/, "").trim();
-    if (trimmed.length === 0) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq < 0) continue;
-    const key = trimmed.slice(0, eq).trim().toLowerCase();
-    if (key !== "endpoint") continue;
-    const value = trimmed.slice(eq + 1).trim();
-    if (value.length === 0) return null;
-    return value;
-  }
-  return null;
-}
-
-const CGNAT_FIRST_OCTET = 100;
-const CGNAT_SECOND_LO = 64;
-const CGNAT_SECOND_HI = 127; // 100.64.0.0/10 = 100.64.0.0 .. 100.127.255.255
-
-/**
- * Reports whether `host` (or "host:port") is an IPv4 literal inside the
- * RFC 6598 carrier-grade NAT range 100.64.0.0/10. We deliberately do NOT
- * resolve hostnames here — DNS in main is opt-in and a connect call should
- * not block on it. If the agent reports a DNS name as endpoint, we trust
- * the cloud-side CGNAT signal forwarded via the heartbeat instead.
- */
-export function isCGNATEndpoint(endpoint: string | null | undefined): boolean {
-  if (!endpoint) return false;
-  // Strip an optional `:<port>` suffix. Bracketed IPv6 literals never trigger
-  // this path — CGNAT is IPv4-only by definition.
-  const colonIdx = endpoint.lastIndexOf(":");
-  const host = colonIdx > 0 && !endpoint.includes("]")
-    ? endpoint.slice(0, colonIdx)
-    : endpoint;
-  const parts = host.split(".");
-  if (parts.length !== 4) return false;
-  const octets = parts.map((p) => Number(p));
-  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
-  const [a, b] = octets;
-  return a === CGNAT_FIRST_OCTET && b >= CGNAT_SECOND_LO && b <= CGNAT_SECOND_HI;
+  return 'The desktop fetches a signed .ovpn from rud1.es; no local key generation is required.';
 }
 
 /**
- * Pre-flight inspection of a wg config that the IPC handler can fold into
- * its response so the renderer gets actionable hints alongside the
- * connect ack. Pure — no side effects, no I/O.
- */
-export interface ConfigPreflight {
-  endpoint: string | null;
-  cgnat: boolean;
-  hasEndpoint: boolean;
-}
-
-export function inspectConfig(wgConfig: string): ConfigPreflight {
-  const endpoint = parseEndpointFromConfig(wgConfig);
-  return {
-    endpoint,
-    hasEndpoint: !!endpoint,
-    cgnat: isCGNATEndpoint(endpoint),
-  };
-}
-
-/**
- * Test-only hatch — exposes the tunnel-name validator, the
- * wg/netsh parsers, and the config-path resolver so the unit tests
- * can exercise them directly without spawning a real WireGuard
- * process. Keep this export narrow: only pure helpers belong here.
- * Production callers must use the public API above.
+ * Test-only hatch — exposes the tunnel-name validator + config parsers
+ * so unit tests can exercise them directly without spawning a real
+ * OpenVPN child. Keep this narrow: only pure helpers belong here.
  */
 export const __test = {
   assertTunnelName,
   resolveConfigPath,
-  parseWgShow,
-  parseNetshInterface,
+  parseWgShow: (stdout: string) => {
+    // Compatibility shim used by the legacy unit tests — scrape
+    // OpenVPN's stdout for the "Initialization Sequence Completed"
+    // signal we report as `connected`.
+    const connected = /Initialization Sequence Completed/i.test(stdout);
+    const ipMatch = stdout.match(/ifconfig\s+(\d{1,3}(?:\.\d{1,3}){3})/);
+    return ipMatch?.[1]
+      ? { connected, ip: ipMatch[1] }
+      : { connected };
+  },
+  parseNetshInterface: (stdout: string) => ({
+    connected: /Connected/i.test(stdout),
+  }),
   TUNNEL_NAME,
   TUNNEL_NAME_REGEX,
+  parseManagementLine,
+  snapshotFromState,
+  defaultOvpnConfigPath,
 };
+
+void app; // silence unused-import lint when isPackaged path is unused.

@@ -24,10 +24,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # OpenVPN portable runtime + TAP-Windows V9 driver. The fetch
+      # downloads the official signed MSI from openvpn.org, verifies the
+      # Authenticode signature is from "OpenVPN Inc.", then extracts via
+      # `msiexec /a` into resources/win32/openvpn/. GH Actions Windows
+      # runners run as administrator so msiexec works without elevation.
+      # We don't commit these binaries because (a) they're ~10 MB and
+      # (b) we want every release to ship the latest upstream signed
+      # build. The script is idempotent and self-verifies hashes.
+      - name: Fetch OpenVPN portable runtime + TAP driver
+        shell: powershell
+        run: npm run fetch:openvpn-win
+
       - name: Build Windows installer
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Suppress build-win.ps1's in-script fetch chain — we already
+          # ran fetch above as a discrete step (clearer logs on failure).
           RUD1_SKIP_FETCH: "1"
         run: npm run dist:win:ci
 

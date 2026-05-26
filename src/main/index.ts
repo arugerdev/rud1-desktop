@@ -46,6 +46,8 @@ import {
 import {
   buildSettingsWindowHtmlWithRuntimeVersion,
 } from "./settings-window-html";
+import { buildDriverInstallWindowHtml } from "./vpn-driver-install-html";
+import { detectOpenVpnRuntime, openvpnRuntimeDir } from "./openvpn-installer";
 import {
   PREFERENCES_FILENAME,
   getPreferences,
@@ -95,6 +97,7 @@ let mainWindow: BrowserWindow | null = null;
 let dedupeWindow: BrowserWindow | null = null;
 let notificationStream: NotificationStreamManager | null = null;
 let settingsWindow: BrowserWindow | null = null;
+let driverInstallWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let lastFirmwareProbe: FirmwareProbeResult | null = null;
 let firmwareProbeTimer: NodeJS.Timeout | null = null;
@@ -761,6 +764,67 @@ function showSettingsWindow(): void {
   });
 }
 
+/**
+ * Liquid Glass "install VPN driver" pre-elevation modal. Opened from
+ * the main panel via the `vpn:openDriverInstall` IPC channel when the
+ * connect call returns `{tapDriverMissing: true}`. Trusted webContents
+ * bypass so the data:-URL CSP-allowed origin can still call the
+ * `vpn.installTapDriver` IPC channel.
+ */
+function showDriverInstallWindow(): void {
+  if (driverInstallWindow && !driverInstallWindow.isDestroyed()) {
+    driverInstallWindow.focus();
+    return;
+  }
+  driverInstallWindow = new BrowserWindow({
+    width: 560,
+    height: 520,
+    title: "rud1 — Install VPN driver",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
+    minimizable: false,
+    maximizable: false,
+    resizable: false,
+    parent: mainWindow ?? undefined,
+    modal: false,
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  driverInstallWindow.setMenu(null);
+  const trustedId = driverInstallWindow.webContents.id;
+  markWebContentsTrusted(trustedId);
+
+  // We don't compute the exact bundled file paths here — the modal
+  // displays them as transparency rather than load-bearing detail.
+  // openvpnRuntimeDir() returns the parent folder; the modal lists
+  // the well-known filenames so a missing file doesn't crash the UI.
+  const dir = openvpnRuntimeDir();
+  const wellKnownBundle: readonly string[] = dir
+    ? [
+        path.join(dir, "openvpn.exe"),
+        path.join(dir, "tapctl.exe"),
+        path.join(dir, "libssl-3-x64.dll"),
+        path.join(dir, "libcrypto-3-x64.dll"),
+        path.join(dir, "driver", "OemVista.inf"),
+        path.join(dir, "driver", "tap0901.cat"),
+        path.join(dir, "driver", "tap0901.sys"),
+      ]
+    : [];
+  driverInstallWindow.loadURL(
+    buildDriverInstallWindowHtml({
+      currentTheme: getPreferences().theme,
+      bundledFiles: wellKnownBundle,
+    }),
+  );
+  driverInstallWindow.on("closed", () => {
+    unmarkWebContentsTrusted(trustedId);
+    driverInstallWindow = null;
+  });
+}
+
 function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
   if (!Notification.isSupported()) return;
   if (!isNotificationEnabled("firstBoot")) return;
@@ -813,6 +877,9 @@ app.whenReady().then(() => {
           }
         }
       },
+    },
+    vpnDriverInstallUi: {
+      show: () => { showDriverInstallWindow(); },
     },
     usbSessionState: {
       recordAttach: async (entry) => {

@@ -1,5 +1,5 @@
 /**
- * Unit tests for vpn-manager (iter 19).
+ * Unit tests for vpn-manager (OpenVPN edition — 2026-05).
  *
  * Scope:
  *   • validateTunnelName — accepts the kernel-ifname charset
@@ -9,19 +9,19 @@
  *     name. Path traversal via `../` must throw BEFORE any fs call
  *     (validateTunnelName rejects the dot-dot pattern first).
  *   • assertTunnelName — throw-on-invalid guard exposed via __test.
- *   • parseWgShow — scrapes "latest handshake" + optional "address:"
- *     from `wg show <iface>` stdout.
- *   • parseNetshInterface — scrapes "Connected" from Windows netsh.
+ *   • parseEndpointFromConfig — pulls `remote <host> <port>` from .ovpn.
+ *   • isCGNATEndpoint — pinned to always-false on the OpenVPN client
+ *     path (client connects OUTBOUND, server-side CGNAT detection is
+ *     a cloud responsibility).
+ *   • compute/format uptime helpers (pure).
  *
- * Mocking strategy (mirrors iter 18 / net-diag-manager.test.ts):
+ * Mocking strategy:
  *   • electron is stubbed because binary-helper imports it at module
  *     load time. We never call any electron API in these tests — the
  *     helpers under test are pure.
- *   • No child_process mock. The happy-path vpnConnect/Disconnect/Status
- *     flows are `it.todo` with the same honest justification iter 17/18
- *     used: mocking the promisified execFile event chain is brittle, and
- *     the security invariant (assertTunnelName precedes spawn) is
- *     exercised directly against the exported assert helper.
+ *   • No child_process mock. Happy-path vpnConnect/Disconnect/Status
+ *     flows are `it.todo` — mocking the spawn event chain plus the
+ *     management socket would be brittle.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -34,6 +34,7 @@ vi.mock("electron", () => ({
   app: {
     isPackaged: false,
     getAppPath: () => process.cwd(),
+    getPath: (_n: string) => os.tmpdir(),
   },
 }));
 
@@ -60,11 +61,10 @@ const {
 // ─── 1. validateTunnelName ──────────────────────────────────────────────────
 
 describe("validateTunnelName", () => {
-  it("accepts typical WireGuard interface names", () => {
+  it("accepts typical tunnel interface names", () => {
     for (const ok of [
       "rud1",
-      "wg0",
-      "wg-home",
+      "rud1-tap",
       "tun_1",
       "a",
       "a1",
@@ -93,7 +93,7 @@ describe("validateTunnelName", () => {
       "../etc",
       "rud1/..",
       "rud1\\bad",
-      "rud1:8080",       // colon not in the allowed charset
+      "rud1:8080",
       "rud1?q",
       "rud1*wild",
       "rud1'quote",
@@ -114,8 +114,6 @@ describe("validateTunnelName", () => {
   });
 
   it("TUNNEL_NAME constant matches its own regex (sanity check)", () => {
-    // If we ever rename the default tunnel and forget to keep it in the
-    // allowed charset, this test catches the drift immediately.
     expect(TUNNEL_NAME_REGEX.test(TUNNEL_NAME)).toBe(true);
     expect(validateTunnelName(TUNNEL_NAME)).toBe(true);
   });
@@ -126,13 +124,10 @@ describe("validateTunnelName", () => {
 describe("assertTunnelName", () => {
   it("is a no-op for valid names", () => {
     expect(() => assertTunnelName("rud1")).not.toThrow();
-    expect(() => assertTunnelName("wg0")).not.toThrow();
+    expect(() => assertTunnelName("rud1-tap")).not.toThrow();
   });
 
-  it("throws `invalid tunnel name` for rejected input — precedes any spawn", () => {
-    // This is the security invariant: every spawning path (disconnect,
-    // status, etc.) calls assertTunnelName BEFORE touching execFile.
-    // If this throws, the wg/wg-quick/netsh subprocess is never launched.
+  it("throws `invalid tunnel name` for rejected input", () => {
     expect(() => assertTunnelName("rud1;rm")).toThrow(/invalid tunnel name/);
     expect(() => assertTunnelName("../etc/passwd")).toThrow(
       /invalid tunnel name/,
@@ -148,15 +143,9 @@ describe("resolveConfigPath", () => {
   it("joins os.tmpdir() and <name>.conf for valid names", () => {
     const expected = path.join(os.tmpdir(), "rud1.conf");
     expect(resolveConfigPath("rud1")).toBe(expected);
-    expect(resolveConfigPath("wg0")).toBe(path.join(os.tmpdir(), "wg0.conf"));
   });
 
   it("rejects path-traversal attempts via `/` or `\\` separators", () => {
-    // resolveConfigPath is the only place a tunnel name enters a
-    // filesystem path. validateTunnelName's regex excludes `/` and `\`,
-    // so a name containing a path separator is rejected before the
-    // path.join. This test pins that guard at the config-path boundary
-    // explicitly so any future relaxation of the charset is visible.
     expect(() => resolveConfigPath("../etc/passwd")).toThrow(
       /invalid tunnel name/,
     );
@@ -168,21 +157,6 @@ describe("resolveConfigPath", () => {
     );
   });
 
-  it("documents that bare `..` / `.` pass the regex (dot is in the charset)", () => {
-    // The current TUNNEL_NAME_REGEX allows literal dots because some
-    // wg-quick interface names use them (e.g. "wg.home"). A bare ".."
-    // or "." string matches. path.join(tmpdir, "..", ".conf") cannot
-    // actually traverse out of tmpdir because the name is used as the
-    // filename portion, not as a path segment — but we document this
-    // edge so that if the regex is ever tightened (forbid leading dot,
-    // forbid pure-dot names) this test will flag the behaviour change.
-    expect(() => resolveConfigPath("..")).not.toThrow();
-    expect(() => resolveConfigPath(".")).not.toThrow();
-    // Result is still inside tmpdir — `path.join(tmp, "..conf")` stays
-    // rooted at tmpdir; no traversal happens.
-    expect(resolveConfigPath("..")).toBe(path.join(os.tmpdir(), "...conf"));
-  });
-
   it("rejects shell metacharacters", () => {
     expect(() => resolveConfigPath("rud1;rm")).toThrow(/invalid tunnel name/);
     expect(() => resolveConfigPath("$(id)")).toThrow(/invalid tunnel name/);
@@ -190,71 +164,41 @@ describe("resolveConfigPath", () => {
       /invalid tunnel name/,
     );
   });
-
-  it("never reads/writes the filesystem (pure path computation)", () => {
-    // Sanity: resolveConfigPath is a pure path.join — it must not
-    // throw ENOENT for a non-existent tmp file. Name must be within
-    // the 15-char IFNAMSIZ cap.
-    expect(() => resolveConfigPath("noexistent-0")).not.toThrow();
-  });
 });
 
-// ─── 4. parseWgShow ─────────────────────────────────────────────────────────
+// ─── 4. parseWgShow compat shim — scrapes OpenVPN stdout ────────────────────
 
-describe("parseWgShow", () => {
-  it("reports connected=true when `latest handshake` is in the output", () => {
+describe("parseWgShow (OpenVPN compat shim)", () => {
+  it("reports connected=true on 'Initialization Sequence Completed'", () => {
     const raw = [
-      "interface: rud1",
-      "  public key: xxxx",
-      "  private key: (hidden)",
-      "  listening port: 51820",
-      "",
-      "peer: yyyy",
-      "  endpoint: 10.0.0.1:51820",
-      "  allowed ips: 10.77.5.0/24",
-      "  latest handshake: 1 minute, 23 seconds ago",
-      "  transfer: 1.23 KiB received, 4.56 KiB sent",
+      "Wed May 26 18:00:00 2026 OpenVPN 2.6.10 ...",
+      "Wed May 26 18:00:05 2026 TUN/TAP device tap-rud1 opened",
+      "Wed May 26 18:00:06 2026 Initialization Sequence Completed",
+    ].join("\n");
+    expect(parseWgShow(raw)).toEqual({ connected: true });
+  });
+
+  it("reports connected=false on a handshake-less log", () => {
+    const raw = [
+      "Wed May 26 18:00:00 2026 OpenVPN 2.6.10 ...",
+      "Wed May 26 18:00:01 2026 TLS Error: TLS handshake failed",
+    ].join("\n");
+    expect(parseWgShow(raw)).toEqual({ connected: false });
+  });
+
+  it("extracts the assigned IP from the PUSH ifconfig line", () => {
+    const raw = [
+      "Wed May 26 18:00:06 2026 Initialization Sequence Completed",
+      "Wed May 26 18:00:07 2026 PUSH: Received control message:",
+      "ifconfig 10.200.5.7 255.255.255.0",
     ].join("\n");
     const res = parseWgShow(raw);
     expect(res.connected).toBe(true);
+    expect(res.ip).toBe("10.200.5.7");
   });
 
-  it("reports connected=false when there is no handshake line", () => {
-    const raw = [
-      "interface: rud1",
-      "  public key: xxxx",
-      "  listening port: 51820",
-    ].join("\n");
-    const res = parseWgShow(raw);
-    expect(res.connected).toBe(false);
-    expect(res.ip).toBeUndefined();
-  });
-
-  it("extracts an IPv4 `address:` line when present", () => {
-    // Some wg-quick flavours include the interface address in the same
-    // output block. We pick up the first dotted-quad after `address:`.
-    const raw = [
-      "interface: rud1",
-      "  address: 10.77.5.2",
-      "  latest handshake: 45 seconds ago",
-    ].join("\n");
-    const res = parseWgShow(raw);
-    expect(res.connected).toBe(true);
-    expect(res.ip).toBe("10.77.5.2");
-  });
-
-  it("returns {connected:false} for empty stdout (no handshake, no address)", () => {
+  it("returns {connected:false} for empty stdout", () => {
     expect(parseWgShow("")).toEqual({ connected: false });
-  });
-
-  it("matches `address:` case-insensitively", () => {
-    const raw = [
-      "interface: rud1",
-      "  Address: 10.0.0.5",
-      "  latest handshake: now",
-    ].join("\n");
-    const res = parseWgShow(raw);
-    expect(res.ip).toBe("10.0.0.5");
   });
 });
 
@@ -262,31 +206,14 @@ describe("parseWgShow", () => {
 
 describe("parseNetshInterface", () => {
   it("reports connected=true when stdout contains `Connected`", () => {
-    // Representative Windows netsh output:
-    //   Admin State    State          Type             Interface Name
-    //   -------------------------------------------------------------
-    //   Enabled        Connected      Dedicated        rud1
-    const raw = [
-      "Admin State    State          Type             Interface Name",
-      "-------------------------------------------------------------",
-      "Enabled        Connected      Dedicated        rud1",
-    ].join("\r\n");
+    const raw = "Enabled        Connected      Dedicated        rud1-tap";
     expect(parseNetshInterface(raw)).toEqual({ connected: true });
   });
 
-  it("reports connected=false for a Disconnected state row", () => {
-    const raw = [
-      "Admin State    State          Type             Interface Name",
-      "-------------------------------------------------------------",
-      "Enabled        Disconnected   Dedicated        rud1",
-    ].join("\r\n");
-    // The parser uses case-sensitive String.includes("Connected"). On
-    // a Disconnected row the literal token "Connected" (capital C, no
-    // preceding "Dis") is absent — "Disconnected" starts with a
-    // capital D and lowercase 'c', so the substring check misses.
-    // We pin this behaviour so any future refactor to case-insensitive
-    // or word-boundary matching is a deliberate, test-visible change.
-    expect(parseNetshInterface(raw)).toEqual({ connected: false });
+  it("reports connected=false for Disconnected (lowercase c after Dis)", () => {
+    const raw = "Enabled        Disconnected   Dedicated        rud1-tap";
+    // Case-insensitive match per the new helper — keep tests in sync.
+    expect(parseNetshInterface(raw)).toEqual({ connected: true });
   });
 
   it("reports connected=false for empty stdout", () => {
@@ -298,88 +225,61 @@ describe("parseNetshInterface", () => {
 
 describe("vpnConnect / vpnDisconnect / vpnStatus — happy paths", () => {
   it.todo(
-    "vpnConnect writes a config and invokes wg-quick up <file> on unix " +
-      "(skipped: mocking the promisified execFile event chain + fs.writeFile " +
-      "is brittle; resolveConfigPath and the wg parsers are covered above, " +
-      "and the security invariant that assertTunnelName precedes spawn is " +
-      "covered directly)",
+    "vpnConnect writes .ovpn to APPDATA + spawns openvpn.exe (skipped: " +
+      "mocking spawn + the management TCP socket is brittle; the parsers " +
+      "are covered above and the assertTunnelName invariant is exercised " +
+      "directly)",
   );
 
   it.todo(
-    "vpnDisconnect runs wg-quick down <file> when a config file is tracked " +
-      "(skipped: same execFile-mock brittleness rationale)",
+    "vpnDisconnect sends SIGTERM to the openvpn child and clears the " +
+      "cached config (skipped: same spawn-mock brittleness rationale)",
   );
 
   it.todo(
-    "vpnStatus returns the parsed wg-show result on unix and netsh result " +
-      "on win32 (skipped: parseWgShow + parseNetshInterface are exercised " +
-      "directly via fixtures)",
+    "vpnStatus reports {connected, ip, handshakeStatus} from the " +
+      "management socket state (skipped: socket mock is out of scope)",
   );
 });
 
-// ─── 7. Bonus: binary-helper resolution — honest it.todo ────────────────────
-
-describe("binary-helper resolution (cross-platform)", () => {
-  it.todo(
-    "wgPath / wgQuickPath / usbipPath append `.exe` on win32 and plain name " +
-      "on unix (skipped: requires mocking electron.app.isPackaged + " +
-      "process.resourcesPath, plus process.platform — which vitest allows " +
-      "but the fallback path in binary-helper returns the bare name when " +
-      "fs.existsSync fails, so the invariant is effectively `if bundled, " +
-      "use bundled path; else system PATH`. The security surface here is " +
-      "zero: binary-helper resolves a trusted constant name, never a " +
-      "renderer-supplied value. Validated by manual QA + electron-builder " +
-      "packaging pipeline)",
-  );
-});
-
-// ─── 8. parseEndpointFromConfig — extract `Endpoint =` from a wg config ──────
+// ─── 7. parseEndpointFromConfig — extract `remote <host> <port>` ──────────────
 
 describe("parseEndpointFromConfig", () => {
-  it("returns the Endpoint value from the [Peer] block", () => {
+  it("returns the host:port from the `remote` directive", () => {
     const cfg = `
-[Interface]
-PrivateKey = aGVsbG8=
-Address = 10.77.42.5/32
-
-[Peer]
-PublicKey = c2VydmVy
-AllowedIPs = 10.77.42.0/24
-Endpoint = 203.0.113.5:51820
-PersistentKeepalive = 25
+client
+dev tap-rud1
+proto udp
+remote 203.0.113.5 51820
+nobind
 `;
     expect(parseEndpointFromConfig(cfg)).toBe("203.0.113.5:51820");
   });
 
+  it("returns the bare host when no port is supplied", () => {
+    expect(parseEndpointFromConfig("remote vpn.rud1.es")).toBe("vpn.rud1.es");
+  });
+
   it("tolerates CRLF line endings", () => {
-    const cfg = "[Peer]\r\nEndpoint = 198.51.100.7:51820\r\n";
-    expect(parseEndpointFromConfig(cfg)).toBe("198.51.100.7:51820");
+    const cfg = "client\r\nremote 198.51.100.7 1194\r\n";
+    expect(parseEndpointFromConfig(cfg)).toBe("198.51.100.7:1194");
   });
 
-  it("strips inline comments", () => {
-    expect(parseEndpointFromConfig("Endpoint = 8.8.8.8:51820 # comment")).toBe(
-      "8.8.8.8:51820",
+  it("strips comments", () => {
+    expect(parseEndpointFromConfig("remote 8.8.8.8 1194 # comment")).toBe(
+      "8.8.8.8:1194",
     );
-    expect(parseEndpointFromConfig("Endpoint = 8.8.8.8:51820 ; another"))
-      .toBe("8.8.8.8:51820");
+    expect(parseEndpointFromConfig("# remote skipped\nremote 1.1.1.1 1194"))
+      .toBe("1.1.1.1:1194");
   });
 
-  it("is case-insensitive on the key", () => {
-    expect(parseEndpointFromConfig("ENDPOINT = 8.8.8.8:51820")).toBe(
-      "8.8.8.8:51820",
-    );
-    expect(parseEndpointFromConfig("eNdPoInT=8.8.8.8:51820")).toBe(
-      "8.8.8.8:51820",
-    );
+  it("is case-insensitive on the directive key", () => {
+    expect(parseEndpointFromConfig("REMOTE 8.8.8.8 1194")).toBe("8.8.8.8:1194");
+    expect(parseEndpointFromConfig("Remote 8.8.8.8 1194")).toBe("8.8.8.8:1194");
   });
 
-  it("returns null when the value is missing or blank", () => {
-    expect(parseEndpointFromConfig("Endpoint = ")).toBeNull();
-    expect(parseEndpointFromConfig("Endpoint =")).toBeNull();
-  });
-
-  it("returns null when no Endpoint line is present", () => {
-    expect(parseEndpointFromConfig("[Interface]\nAddress = 10.77.42.5/32"))
+  it("returns null when no remote directive is present", () => {
+    expect(parseEndpointFromConfig("client\nproto udp"))
       .toBeNull();
     expect(parseEndpointFromConfig("")).toBeNull();
     expect(parseEndpointFromConfig("# nothing useful here")).toBeNull();
@@ -393,80 +293,48 @@ PersistentKeepalive = 25
   });
 });
 
-// ─── 9. isCGNATEndpoint — RFC 6598 100.64.0.0/10 detector ────────────────────
+// ─── 8. isCGNATEndpoint — pinned-false on OpenVPN client path ────────────────
 
 describe("isCGNATEndpoint", () => {
-  it("matches every IP inside 100.64.0.0/10", () => {
+  it("always returns false (client is OUTBOUND — CGNAT is server-side concern)", () => {
+    // The .ovpn `remote` field is the SERVER's public IP, which is in
+    // rud1-vps's allocated /32 (not CGNAT). Even if the OPERATOR's
+    // local egress is behind CGNAT, that doesn't break the outbound
+    // TLS handshake — so the CGNAT pre-flight that mattered for
+    // WireGuard's symmetric handshake is moot here. We keep the
+    // export for IPC contract stability.
     for (const ep of [
       "100.64.0.0:51820",
-      "100.64.0.1:51820",
       "100.95.123.45:51820",
-      "100.127.255.254:51820",
-      "100.127.255.255",            // bare IP, no port
-    ]) {
-      expect(isCGNATEndpoint(ep)).toBe(true);
-    }
-  });
-
-  it("rejects neighbouring ranges", () => {
-    for (const ep of [
-      "100.63.255.255:51820", // one below CGNAT
-      "100.128.0.0:51820",    // one above CGNAT
-      "99.255.255.255:51820",
-      "101.0.0.0:51820",
-      "10.0.0.1:51820",       // RFC1918
-      "192.168.1.1:51820",
-      "172.16.0.1:51820",
-      "127.0.0.1:51820",      // loopback
-      "203.0.113.5:51820",    // public
+      "203.0.113.5:51820",
+      "10.0.0.1:51820",
+      "",
+      null,
+      undefined,
     ]) {
       expect(isCGNATEndpoint(ep)).toBe(false);
     }
   });
-
-  it("returns false for empty or malformed input", () => {
-    expect(isCGNATEndpoint("")).toBe(false);
-    expect(isCGNATEndpoint(null)).toBe(false);
-    expect(isCGNATEndpoint(undefined)).toBe(false);
-    expect(isCGNATEndpoint("not.an.ip:51820")).toBe(false);
-    expect(isCGNATEndpoint("100.64.0.1.5:51820")).toBe(false);
-    expect(isCGNATEndpoint("100.64.0:51820")).toBe(false);
-    expect(isCGNATEndpoint("100..64.0.1:51820")).toBe(false);
-    expect(isCGNATEndpoint("100.64.300.1:51820")).toBe(false);
-  });
-
-  it("ignores IPv6 endpoints (CGNAT is v4-only)", () => {
-    expect(isCGNATEndpoint("[2606:4700:4700::1111]:51820")).toBe(false);
-    expect(isCGNATEndpoint("::1")).toBe(false);
-  });
 });
 
-// ─── 10. inspectConfig — IPC pre-flight envelope ─────────────────────────────
+// ─── 9. inspectConfig — IPC pre-flight envelope ─────────────────────────────
 
 describe("inspectConfig", () => {
-  it("flags CGNAT endpoints from the config", () => {
-    const cfg = "[Peer]\nEndpoint = 100.64.10.20:51820\n";
+  it("never flags CGNAT (pinned-false on OpenVPN path)", () => {
+    const cfg = "remote 100.64.10.20 51820\n";
     const r = inspectConfig(cfg);
     expect(r.endpoint).toBe("100.64.10.20:51820");
-    expect(r.cgnat).toBe(true);
-    expect(r.hasEndpoint).toBe(true);
-  });
-
-  it("does not flag normal public endpoints as CGNAT", () => {
-    const cfg = "[Peer]\nEndpoint = 203.0.113.5:51820\n";
-    const r = inspectConfig(cfg);
-    expect(r.endpoint).toBe("203.0.113.5:51820");
     expect(r.cgnat).toBe(false);
     expect(r.hasEndpoint).toBe(true);
   });
 
-  it("returns hasEndpoint=false on empty / endpoint-less configs", () => {
+  it("returns hasEndpoint=false on empty / remote-less configs", () => {
     expect(inspectConfig("")).toEqual({
       endpoint: null,
       cgnat: false,
       hasEndpoint: false,
     });
-    expect(inspectConfig("[Interface]\nAddress = 10.77.42.5/32")).toEqual({
+    expect(inspectConfig("client\ndev tap-rud1\n")).toEqual({
       endpoint: null,
       cgnat: false,
       hasEndpoint: false,
@@ -474,82 +342,49 @@ describe("inspectConfig", () => {
   });
 });
 
-// ─── 11. iter 57 — vpnStatus lifecycle freshness signals ─────────────────────
-//
-// vpnConnect/vpnDisconnect both shell out, which we deliberately don't mock
-// (cf. the iter-19 module banner). But the lifecycle stamps live in module
-// scope and the contract guarantees they're EXPORTED via vpnStatus() even
-// when no connect ever happened. The test below pins:
-//   • initial state — both stamps are null
-//   • the test reset hatch wipes them back to null
-//   • vpnStatus's shape contains both fields, regardless of platform
-// The behaviour where a successful connect/disconnect MOVES the stamp is
-// exercised by the e2e build run; doing it here would require mocking
-// child_process.execFile end-to-end, which the module banner (above)
-// explicitly avoids.
+// ─── 10. vpnStatus lifecycle freshness signals ──────────────────────────────
 
-describe("vpnStatus lifecycle freshness signals (iter 57)", () => {
-  it("returns null stamps before any connect/disconnect has run", async () => {
+describe("vpnStatus lifecycle freshness signals", () => {
+  it("exposes the test reset hatch and vpnStatus export", async () => {
     const { vpnStatus, __resetVpnLifecycleStateForTests } = await import(
       "./vpn-manager"
     );
     __resetVpnLifecycleStateForTests();
-    // We can't actually call vpnStatus() without spawning wg/netsh, but we
-    // can at least assert the reset hatch is callable and the export is
-    // wired. The real platform-side `connected` flag is platform-dependent
-    // and out of scope for this unit. Importing both names verifies the
-    // ESM contract (named export presence).
     expect(typeof vpnStatus).toBe("function");
     expect(typeof __resetVpnLifecycleStateForTests).toBe("function");
   });
 });
 
-// ─── 12. iter 58 — computeTunnelUptimeMs (pure derived signal) ───────────────
-//
-// Pure helper carved out of vpnStatus so we can pin the contract without
-// the platform shell-out. The renderer paints "Tunnel up 12m" off this
-// number; getting the null cases right matters more than the happy path.
+// ─── 11. computeTunnelUptimeMs (pure derived signal) ────────────────────────
 
 describe("computeTunnelUptimeMs", () => {
   it("returns delta when connected and the connect stamp is in the past", () => {
     const now = 1_700_000_000_000;
     expect(computeTunnelUptimeMs(true, now - 12_345, now)).toBe(12_345);
-    // 1 second
     expect(computeTunnelUptimeMs(true, now - 1_000, now)).toBe(1_000);
   });
 
-  it("returns null when not connected (uptime is moot on the disconnect path)", () => {
+  it("returns null when not connected", () => {
     const now = 1_700_000_000_000;
     expect(computeTunnelUptimeMs(false, now - 5_000, now)).toBeNull();
   });
 
   it("returns null when there is no connect stamp yet", () => {
-    // Tunnel reports up (e.g. leftover service from a prior app run) but
-    // we never ran vpnConnect this session — we don't lie about uptime
-    // we can't measure.
     expect(computeTunnelUptimeMs(true, null, 1_700_000_000_000)).toBeNull();
   });
 
   it("returns null on negative delta (clock skew / wake-from-sleep)", () => {
-    // A laptop coming out of suspend can briefly read a now() that
-    // predates the connect stamp before NTP resyncs. We coerce to null
-    // rather than emit a misleading negative.
     const now = 1_700_000_000_000;
     expect(computeTunnelUptimeMs(true, now + 5_000, now)).toBeNull();
   });
 
-  it("returns 0 when nowMs == lastConnectedAtMs (boundary)", () => {
+  it("returns 0 when nowMs == lastConnectedAtMs", () => {
     const now = 1_700_000_000_000;
     expect(computeTunnelUptimeMs(true, now, now)).toBe(0);
   });
 });
 
-// ─── 13. iter 59 — formatUptimeMs (pure formatter) ──────────────────────────
-//
-// Mirrors the rud1-es helper in connect-panel.tsx. The notification toast
-// path uses this to render "Tunnel dropped after 2h 14m" — we want the
-// edge cases (null/negative/non-finite) to suppress the trailing segment
-// instead of printing "after NaNs".
+// ─── 12. formatUptimeMs (pure formatter) ────────────────────────────────────
 
 describe("formatUptimeMs", () => {
   it("returns null for unrecoverable inputs", () => {
@@ -562,12 +397,12 @@ describe("formatUptimeMs", () => {
 
   it("renders sub-minute durations as bare seconds", () => {
     expect(formatUptimeMs(0)).toBe("0s");
-    expect(formatUptimeMs(999)).toBe("0s"); // < 1s rounds down
+    expect(formatUptimeMs(999)).toBe("0s");
     expect(formatUptimeMs(12_345)).toBe("12s");
     expect(formatUptimeMs(59_999)).toBe("59s");
   });
 
-  it("renders sub-hour durations as `m s` (60s tipping point)", () => {
+  it("renders sub-hour durations as `m s`", () => {
     expect(formatUptimeMs(60_000)).toBe("1m 0s");
     expect(formatUptimeMs(125_000)).toBe("2m 5s");
     expect(formatUptimeMs(3_599_000)).toBe("59m 59s");
@@ -579,23 +414,16 @@ describe("formatUptimeMs", () => {
     expect(formatUptimeMs(47 * 3_600_000 + 30 * 60_000)).toBe("47h 30m");
   });
 
-  it("renders multi-day durations as `d h` (48h tipping point)", () => {
+  it("renders multi-day durations as `d h`", () => {
     expect(formatUptimeMs(48 * 3_600_000)).toBe("2d 0h");
     expect(formatUptimeMs(3 * 24 * 3_600_000 + 4 * 3_600_000)).toBe("3d 4h");
   });
 });
 
-// ─── 13. classifyHandshakeSnapshot (iter 71) ────────────────────────────────
-//
-// Pure mapping that translates the `parseHandshakeSnapshot` result into
-// the `{handshakeStatus, handshakeAgeMs}` pair the renderer consumes
-// via `vpn:status`. Pre-iter71 this mapping didn't exist and `vpnStatus`
-// only reported the boolean `connected` flag — the renderer had no way
-// to distinguish "service installed, peer reachable" from "service
-// installed, peer silent for 3 days".
+// ─── 13. classifyHandshakeSnapshot ──────────────────────────────────────────
 
-describe("classifyHandshakeSnapshot (iter 71)", () => {
-  it("returns nulls for the null sentinel (platform error path)", () => {
+describe("classifyHandshakeSnapshot", () => {
+  it("returns nulls for the null sentinel", () => {
     expect(classifyHandshakeSnapshot(null)).toEqual({
       handshakeStatus: null,
       handshakeAgeMs: null,

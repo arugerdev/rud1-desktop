@@ -152,7 +152,7 @@ async function allocateOnPi(piHost: string, busId: string): Promise<{
   } catch (err) {
     throw new Error(
       "Could not reach the device's serial-bridge endpoint. " +
-      "Check that the WireGuard tunnel is up and that the Pi has " +
+      "Check that the OpenVPN tunnel is up and that the Pi has " +
       "`usb.serial_bridge.enabled: true` in /etc/rud1-agent/config.yaml" +
       (err instanceof Error ? ` (cause: ${err.message})` : ""),
     );
@@ -268,7 +268,7 @@ export async function serialBridgeReset(opts: {
   } catch (err) {
     throw new Error(
       "Could not reach the device's serial-bridge reset endpoint. " +
-        "Check that the WireGuard tunnel is up and the bridge listener is running" +
+        "Check that the OpenVPN tunnel is up and the bridge listener is running" +
         (err instanceof Error ? ` (cause: ${err.message})` : ""),
     );
   }

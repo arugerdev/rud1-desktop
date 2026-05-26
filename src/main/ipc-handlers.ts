@@ -14,7 +14,14 @@ import {
   vpnStatus,
   inspectConfig,
   formatUptimeMs,
+  TapDriverMissingError,
+  OpenVpnMissingError,
 } from "./vpn-manager";
+import {
+  detectOpenVpnRuntime,
+  ensureTapDriverInstalled,
+} from "./openvpn-installer";
+import { deleteOvpnConfig } from "./ovpn-config-store";
 import {
   VpnHealthMonitor,
   parseHandshakeSnapshot,
@@ -47,6 +54,7 @@ import {
   notifyVpnConnected,
   notifyVpnCgnatWarning,
   notifyVpnDisconnected,
+  notifyVpnTapDriverMissing,
   notifyUsbAttached,
   notifyUsbDetached,
 } from "./notifications";
@@ -147,6 +155,20 @@ export interface UsbSessionStateAccessor {
   recordDetachByPort: (port: number) => Promise<void>;
   recordDetachByBusId: (busId: string) => Promise<void>;
   onVpnConnected: () => Promise<void>;
+}
+
+/**
+ * Hook for the main-process to open the Liquid Glass "install VPN driver"
+ * modal. Defined separately from `vpnHealth` because it's a presentation
+ * surface, not a polling-loop callback — the renderer fires the channel
+ * once when it sees `tapDriverMissing: true` on a connect response.
+ *
+ * Optional: bare test harnesses don't supply it and the IPC channel
+ * becomes a no-op envelope.
+ */
+export interface VpnDriverInstallUiAccessor {
+  /** Open the modal (idempotent — focuses an existing window). */
+  show: () => void;
 }
 
 /**
@@ -395,6 +417,10 @@ export function registerIpcHandlers(opts: {
    *  unit tests that don't care about the broadcast surface can keep
    *  constructing the registrar without stubbing it. */
   vpnHealth?: VpnHealthAccessor;
+  /** Liquid Glass driver-install modal opener. The renderer fires this
+   *  via `vpn:openDriverInstall` when a connect response carries
+   *  `tapDriverMissing: true`. */
+  vpnDriverInstallUi?: VpnDriverInstallUiAccessor;
   /**
    * Invoked from `app:setPreferences` AFTER the patch has been
    * persisted, with the canonical post-merge `Preferences`. Used by
@@ -509,22 +535,18 @@ export function registerIpcHandlers(opts: {
     },
   });
 
-  ipcMain.handle("vpn:connect", async (event, wgConfig: string) => {
+  ipcMain.handle("vpn:connect", async (event, ovpnConfig: string) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
-    // Pre-flight: parse the config and surface non-fatal warnings (CGNAT,
-    // missing Endpoint) on the response envelope. We still attempt the
-    // connect — wireguard.exe will just sit there with no handshake — but
-    // the renderer can show an actionable hint instead of a generic
-    // "tunnel installed" toast that masks the real failure.
-    const preflight = inspectConfig(typeof wgConfig === "string" ? wgConfig : "");
+    // Pre-flight: parse the config and surface non-fatal warnings on the
+    // response envelope. For OpenVPN we still emit the (now always-false)
+    // CGNAT field for IPC contract stability — the renderer's existing
+    // chip code paths keep working without a coordinated rename.
+    const preflight = inspectConfig(typeof ovpnConfig === "string" ? ovpnConfig : "");
     try {
-      await vpnConnect(wgConfig);
-      // CGNAT path: fire the dedicated warning toast INSTEAD of the
-      // generic success one. The tunnel is technically installed, but
-      // calling it "Connected" would mislead the user into thinking
-      // their handshake will succeed when the ISP-side CGNAT will
-      // almost certainly drop the inbound UDP. Either path is exactly
-      // one notification — we don't double-fire.
+      await vpnConnect(ovpnConfig);
+      // OpenVPN never trips the legacy CGNAT path — but if a renderer
+      // builds against an older preload that still flips the flag, we
+      // fall back to the generic success toast.
       if (preflight.cgnat) {
         notifyVpnCgnatWarning();
       } else {
@@ -546,6 +568,29 @@ export function registerIpcHandlers(opts: {
         hasEndpoint: preflight.hasEndpoint,
       };
     } catch (err) {
+      // Structured error envelopes so the renderer can paint the right
+      // CTA without parsing message strings.
+      if (err instanceof TapDriverMissingError) {
+        notifyVpnTapDriverMissing();
+        return {
+          ok: false,
+          error: err.message,
+          tapDriverMissing: true,
+          endpoint: preflight.endpoint,
+          cgnat: preflight.cgnat,
+          hasEndpoint: preflight.hasEndpoint,
+        };
+      }
+      if (err instanceof OpenVpnMissingError) {
+        return {
+          ok: false,
+          error: err.message,
+          openvpnMissing: true,
+          endpoint: preflight.endpoint,
+          cgnat: preflight.cgnat,
+          hasEndpoint: preflight.hasEndpoint,
+        };
+      }
       return {
         ok: false,
         error: err instanceof Error ? err.message : String(err),
@@ -621,6 +666,85 @@ export function registerIpcHandlers(opts: {
         error: err instanceof Error ? err.message : String(err),
         usbDetached: usbCleanup.detached,
         usbDetachFailed: usbCleanup.failed,
+      };
+    }
+  });
+
+  // ── OpenVPN runtime detection & TAP driver install ────────────────────
+  //
+  // The renderer calls `vpn:runtimeStatus` on Connect-tab mount so it can
+  // surface a Liquid Glass modal asking for elevation BEFORE the user
+  // clicks Connect (rather than letting the connect call fail with a
+  // structured error). The modal lives in rud1-es and uses the pastel
+  // glassmorphism tokens; both light + dark themes are required per the
+  // user's design preferences.
+  //
+  // `vpn:installTapDriver` triggers the tapctl-via-PowerShell elevation
+  // path. Returns the post-install runtime status so the renderer can
+  // decide whether to enable the Connect button.
+  ipcMain.handle("vpn:runtimeStatus", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      const status = await detectOpenVpnRuntime();
+      return { ok: true as const, result: status };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  ipcMain.handle("vpn:installTapDriver", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      await ensureTapDriverInstalled();
+      const status = await detectOpenVpnRuntime();
+      return { ok: true as const, result: status };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  /**
+   * Open the Liquid Glass driver-install modal. The renderer fires this
+   * when a `vpn:connect` response carries `tapDriverMissing: true` so the
+   * operator gets a pastel-friendly walkthrough before the OS elevation
+   * prompt lands. Idempotent: focuses the existing window if one's open.
+   */
+  ipcMain.handle("vpn:openDriverInstall", (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    if (!opts.vpnDriverInstallUi) {
+      return { ok: false as const, error: "modal accessor not wired" };
+    }
+    try {
+      opts.vpnDriverInstallUi.show();
+      return { ok: true as const };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  /**
+   * Drop the cached `.ovpn` blob from APPDATA. The renderer fires this
+   * as part of its sign-out flow so a shared / stolen laptop can't keep
+   * the prior user's signed cert + private key on disk.
+   */
+  ipcMain.handle("vpn:clearConfig", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      await deleteOvpnConfig();
+      return { ok: true as const };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
       };
     }
   });

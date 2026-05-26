@@ -3,8 +3,32 @@ import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("electronAPI", {
   vpn: {
-    connect: (wgConfig: string) =>
-      ipcRenderer.invoke("vpn:connect", wgConfig) as Promise<{ ok: boolean; error?: string }>,
+    /**
+     * Bring up the OpenVPN tunnel using the supplied .ovpn blob.
+     *
+     * The blob is the same one the rud1-es backend returns from
+     * `GET /api/users/me/ovpn-config` — inlined CA + cert + private key.
+     * Main caches it under `%APPDATA%/rud1-desktop/ovpn/rud1-client.ovpn`
+     * so a desktop restart can re-arm the tunnel without round-tripping
+     * through the cloud.
+     *
+     * The connect response carries structured failure shapes:
+     *   - `tapDriverMissing: true` — TAP-Windows V9 isn't installed.
+     *     Renderer should show the Liquid Glass elevation modal and
+     *     call `vpn.installTapDriver()`.
+     *   - `openvpnMissing: true` — the bundled openvpn.exe is absent
+     *     (developer ran a dev build without `npm run fetch:openvpn-win`).
+     */
+    connect: (ovpnConfig: string) =>
+      ipcRenderer.invoke("vpn:connect", ovpnConfig) as Promise<{
+        ok: boolean;
+        error?: string;
+        endpoint?: string | null;
+        cgnat?: boolean;
+        hasEndpoint?: boolean;
+        tapDriverMissing?: boolean;
+        openvpnMissing?: boolean;
+      }>,
 
     disconnect: () =>
       ipcRenderer.invoke("vpn:disconnect") as Promise<{ ok: boolean; error?: string }>,
@@ -27,6 +51,67 @@ contextBridge.exposeInMainWorld("electronAPI", {
           | null;
         handshakeAgeMs: number | null;
       }>,
+
+    /**
+     * Inspect the OpenVPN runtime: is `openvpn.exe` present + is the
+     * TAP-Windows V9 kernel driver installed? Called on Connect-tab
+     * mount so the panel can surface the install CTA before the user
+     * tries Connect.
+     */
+    runtimeStatus: () =>
+      ipcRenderer.invoke("vpn:runtimeStatus") as Promise<
+        | {
+            ok: true;
+            result: {
+              openvpnAvailable: boolean;
+              openvpnPath: string | null;
+              tapDriverInstalled: boolean;
+              tapDriverProbeError: string | null;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    /**
+     * Trigger the bundled tapctl.exe install with UAC elevation. The
+     * OS surfaces its own elevation prompt; the renderer should disable
+     * the Connect button until this resolves. On success the post-install
+     * runtime status is returned so the panel can re-enable Connect.
+     */
+    installTapDriver: () =>
+      ipcRenderer.invoke("vpn:installTapDriver") as Promise<
+        | {
+            ok: true;
+            result: {
+              openvpnAvailable: boolean;
+              openvpnPath: string | null;
+              tapDriverInstalled: boolean;
+              tapDriverProbeError: string | null;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    /**
+     * Drop the cached .ovpn from APPDATA. The renderer's sign-out flow
+     * fires this so a shared laptop doesn't keep the prior user's signed
+     * cert + private key on disk.
+     */
+    clearConfig: () =>
+      ipcRenderer.invoke("vpn:clearConfig") as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+
+    /**
+     * Open the main-process Liquid Glass driver-install modal. The
+     * panel fires this when a connect response surfaces
+     * `tapDriverMissing: true` — gives the operator a pastel UI
+     * to grant elevation before the OS UAC prompt lands.
+     */
+    openDriverInstall: () =>
+      ipcRenderer.invoke("vpn:openDriverInstall") as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
 
     // Push subscription a VPN health transitions; returns unsubscribe handle.
     onHealthChange: (

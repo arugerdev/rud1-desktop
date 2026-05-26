@@ -53,9 +53,9 @@ function show(
 // ─── VPN ────────────────────────────────────────────────────────────────────
 
 /**
- * Fired after the bridge confirms `wireguard.exe /installtunnelservice`
- * (or `wg-quick up` on unix) succeeded. The body should be brief; the
- * panel carries the full handshake / IP detail. */
+ * Fired after openvpn.exe reports "Initialization Sequence Completed"
+ * on the management socket. The body should be brief; the panel carries
+ * the full handshake / IP detail. */
 export function notifyVpnConnected(deviceName?: string) {
   show(
     "VPN Connected",
@@ -65,21 +65,35 @@ export function notifyVpnConnected(deviceName?: string) {
 }
 
 /**
- * Variant of {@link notifyVpnConnected} fired when the agent's reported
- * endpoint sits inside RFC 6598 (100.64.0.0/10). The tunnel installs but
- * the WireGuard handshake is statistically certain to fail because the
- * Pi's ISP is performing carrier-grade NAT — telling the user up-front
- * saves a 30 s "tunnel installed but no handshake" debugging session.
- *
- * Title-cased "Tunnel installed (CGNAT detected)" so it's visually
- * distinct from the success path even when the body wraps off-screen.
+ * Preserved for IPC contract stability. Pre-OpenVPN we fired this when
+ * the agent's WireGuard endpoint sat inside RFC 6598 (100.64.0.0/10) —
+ * which made the symmetric WG handshake statistically certain to fail.
+ * OpenVPN's client-OUTBOUND model is unaffected by CGNAT on either side,
+ * so this notification is now a vestige; we keep the export so existing
+ * callers don't need a coordinated rename. Body is rephrased so a
+ * mis-fire reads sensibly.
  */
 export function notifyVpnCgnatWarning(deviceName?: string) {
   show(
-    "Tunnel installed (CGNAT detected)",
+    "VPN connecting (CGNAT detected)",
     deviceName
-      ? `${deviceName} sits behind carrier-grade NAT — handshake is unlikely to complete.`
-      : "Device sits behind carrier-grade NAT — handshake is unlikely to complete.",
+      ? `${deviceName} appears to be behind carrier-grade NAT. The OpenVPN client opens an outbound TLS connection, so this typically still works.`
+      : "Carrier-grade NAT was detected on the device side. The OpenVPN client opens an outbound TLS connection, so this typically still works.",
+    { category: "vpn" },
+  );
+}
+
+/**
+ * Fired when the desktop detects the TAP-Windows V9 kernel driver is
+ * missing — the renderer's Liquid Glass modal will appear above the
+ * panel asking the user to grant elevation. We emit a parallel native
+ * notification so the operator sees the prompt even when focused on
+ * another window.
+ */
+export function notifyVpnTapDriverMissing() {
+  show(
+    "TAP driver required",
+    "rud1 needs to install the TAP-Windows V9 driver. Click Connect and accept the elevation prompt.",
     { category: "vpn" },
   );
 }

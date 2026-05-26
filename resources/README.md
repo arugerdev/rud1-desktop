@@ -19,40 +19,46 @@ push — CI uses the committed copies as-is (the workflow sets
 
 ### Windows (`resources/win32/`)
 
-Run `npm run fetch:wg-win` (or invoke `dist:win`, which chains it). The
-script downloads the official signed WireGuard for Windows MSI, verifies
-SHA256 + Authenticode, extracts via `msiexec /a`, and writes the binaries
-plus GPLv2 compliance artefacts. Idempotent — only re-downloads on a
-version bump.
+Run `npm run fetch:openvpn-win` (or invoke `dist:win`, which chains it).
+The script downloads the official signed OpenVPN Community MSI, verifies
+SHA256 + Authenticode, extracts via `msiexec /a`, and writes the portable
+runtime (openvpn.exe + tapctl.exe + runtime DLLs + TAP-Windows V9 driver
+files) into `resources/win32/openvpn/`. Idempotent — only re-downloads
+on a version bump.
 
 | File | Source |
 |------|--------|
-| `wireguard.exe` | [WireGuard for Windows](https://download.wireguard.com/windows-client/) — bundled by `scripts/fetch-wireguard-win.ps1` |
-| `wg.exe` | Included with WireGuard for Windows — same script |
-| `COPYING.WireGuard.txt` | GPLv2 text, written by the same script |
-| `NOTICE.WireGuard.txt` | Source/version pointer for GPLv2 compliance |
-| `wireguard.version` | Pinned version stamp the script reads to skip re-downloads |
-| `usbip.exe` | [usbip-win2](https://github.com/vadimgrn/usbip-win2/releases) — fetch manually for now |
+| `openvpn/openvpn.exe` | [OpenVPN Community](https://openvpn.net/community-downloads/) — bundled by `scripts/fetch-openvpn-win.ps1` |
+| `openvpn/tapctl.exe` | Included with OpenVPN Community — same script |
+| `openvpn/*.dll` | OpenSSL + helper DLLs, must sit next to openvpn.exe |
+| `openvpn/driver/OemVista.inf` | TAP-Windows V9 INF — installed on first run via tapctl |
+| `openvpn/driver/tap0901.cat` | TAP-Windows V9 driver catalog |
+| `openvpn/driver/tap0901.sys` | TAP-Windows V9 kernel driver |
+| `openvpn/COPYING.OpenVPN.txt` | GPLv2 text, written by the fetch script |
+| `openvpn/NOTICE.OpenVPN.txt` | Source/version pointer for GPLv2 compliance |
+| `openvpn/openvpn.version` | Pinned version stamp the script reads to skip re-downloads |
+| `USBip-installer.exe` | [usbip-win2](https://github.com/vadimgrn/usbip-win2/releases) — bundled by `scripts/fetch-usbip-win.ps1` |
+| `com0com-installer.exe` | [com0com](https://sourceforge.net/projects/com0com/) — bundled by `scripts/fetch-com0com-win.ps1` |
 
 ### Linux (`resources/linux/`)
 | File | Source |
 |------|--------|
-| `wg` | `apt install wireguard-tools` |
-| `wg-quick` | `apt install wireguard-tools` |
-| `usbip` | `apt install linux-tools-common linux-tools-generic` |
+| `openvpn` | `apt install openvpn` |
 
 ### macOS (`resources/darwin/`)
 | File | Source |
 |------|--------|
-| `wg` | `brew install wireguard-tools` |
-| `wg-quick` | `brew install wireguard-tools` |
-| `wireguard-go` | `brew install wireguard-go` |
+| `openvpn` | `brew install openvpn` |
 
 ## Notes
 
 - On Linux, VPN operations require `CAP_NET_ADMIN` or running as root.
   The app requests elevated privileges via `pkexec` or `sudo` if needed.
 - On Windows, the app is configured as `requireAdministrator` in the manifest
-  (set in electron-builder `requestedExecutionLevel`).
-- Binaries are not committed to git. Download them from their official sources
-  and place them in the appropriate directory before building the app.
+  (set in electron-builder `requestedExecutionLevel`). The TAP-Windows V9
+  KERNEL DRIVER also needs a one-time install via `tapctl create --hwid
+  root\tap0901`. The first time the user clicks Connect, the desktop fires
+  an additional UAC prompt for the driver install, then never asks again.
+- The Authenticode signature on `openvpn.exe` is preserved end-to-end — we
+  never modify the binary, we just copy it from the MSI's `/a`-extracted
+  payload.

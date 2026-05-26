@@ -5,21 +5,16 @@
  *   1. Bundled binary (resources/<platform>/<name> in dev,
  *      process.resourcesPath/bin/<name> in production via extraResources).
  *   2. Platform-known system install paths — e.g. on Windows the official
- *      WireGuard installer drops `wireguard.exe` / `wg.exe` into
- *      `%ProgramFiles%\WireGuard\` but does NOT add that directory to
- *      PATH. Without an explicit lookup, `spawn wireguard` fails ENOENT
+ *      OpenVPN installer drops `openvpn.exe` into
+ *      `%ProgramFiles%\OpenVPN\bin\` but does NOT add that directory to
+ *      PATH. Without an explicit lookup, `spawn openvpn` fails ENOENT
  *      even when the user has done a clean install.
  *   3. The bare binary name, letting the OS resolve via PATH.
  *
- * Returning the bare name as the last fallback means `execFile` will
- * surface ENOENT only when the binary is genuinely absent — at that
- * point callers (`vpn-manager`, `usb-manager`) translate the error
- * into an actionable "install X from <url>" message for the panel.
- *
  * Required binaries per platform:
- *   Windows: wireguard.exe, wg.exe, usbip.exe
- *   Linux:   wg, wg-quick, usbip, usbipd
- *   macOS:   wireguard-go, wg, wg-quick
+ *   Windows: openvpn.exe (bundled portable), tapctl.exe (bundled), usbip.exe
+ *   Linux:   openvpn, usbip, usbipd
+ *   macOS:   openvpn
  */
 
 import path from "path";
@@ -36,8 +31,19 @@ function resourcesDir(): string {
 }
 
 /**
+ * Windows-only: directory holding the bundled portable OpenVPN binaries
+ * (openvpn.exe + the runtime DLLs the official MSI installs into
+ * Program Files\OpenVPN\bin\). Lives one level below `resourcesDir()` so
+ * the DLLs sit next to openvpn.exe (it's a non-relocatable Windows binary —
+ * libcrypto-3-x64.dll, libssl-3-x64.dll, etc. must be in the same folder).
+ */
+export function openvpnBundledDir(): string {
+  return path.join(resourcesDir(), "openvpn");
+}
+
+/**
  * Known system install directories per binary, per platform. Only the
- * binaries we ship a UI for (WireGuard, usbip) are listed; everything
+ * binaries we ship a UI for (OpenVPN, usbip) are listed; everything
  * else falls through to PATH like before.
  *
  * Windows uses `process.env.ProgramFiles` / `ProgramFiles(x86)` rather
@@ -50,9 +56,13 @@ function systemInstallCandidates(name: string): string[] {
   const out: string[] = [];
   const programFiles = process.env["ProgramFiles"];
   const programFilesX86 = process.env["ProgramFiles(x86)"];
-  if (name === "wireguard" || name === "wg") {
-    if (programFiles) out.push(path.join(programFiles, "WireGuard", exe));
-    if (programFilesX86) out.push(path.join(programFilesX86, "WireGuard", exe));
+  if (name === "openvpn") {
+    if (programFiles) out.push(path.join(programFiles, "OpenVPN", "bin", exe));
+    if (programFilesX86) out.push(path.join(programFilesX86, "OpenVPN", "bin", exe));
+  }
+  if (name === "tapctl") {
+    if (programFiles) out.push(path.join(programFiles, "OpenVPN", "bin", exe));
+    if (programFilesX86) out.push(path.join(programFilesX86, "OpenVPN", "bin", exe));
   }
   if (name === "usbip") {
     // usbip-win2's NSIS installer drops the userspace tool here. PATH
@@ -66,6 +76,15 @@ function systemInstallCandidates(name: string): string[] {
 export function binaryPath(name: string): string {
   const base = resourcesDir();
   const exeName = process.platform === "win32" ? `${name}.exe` : name;
+  // OpenVPN sub-folder takes precedence so the bundled binary stays grouped
+  // with its DLLs (libssl, libcrypto). A bare resources/<platform>/openvpn.exe
+  // would still work but the runtime DLLs need to be siblings of the .exe
+  // on Windows — keeping them together avoids accidental DLL loads from
+  // PATH directories.
+  if (process.platform === "win32" && (name === "openvpn" || name === "tapctl")) {
+    const ovpnBundled = path.join(openvpnBundledDir(), exeName);
+    if (fs.existsSync(ovpnBundled)) return ovpnBundled;
+  }
   const bundled = path.join(base, exeName);
 
   if (fs.existsSync(bundled)) return bundled;
@@ -78,13 +97,41 @@ export function binaryPath(name: string): string {
   return name;
 }
 
-export function wgPath(): string {
-  return binaryPath("wg");
+/**
+ * Path to the bundled portable openvpn.exe. Returns the bare name
+ * "openvpn" / "openvpn.exe" as a last-resort PATH fallback so the caller
+ * can still spawn against a developer-installed copy.
+ */
+export function openvpnPath(): string {
+  return binaryPath("openvpn");
 }
 
-export function wgQuickPath(): string {
-  if (process.platform === "win32") return binaryPath("wireguard");
-  return binaryPath("wg-quick");
+/**
+ * Path to tapctl.exe — the CLI tool that installs / lists / removes
+ * TAP-Windows V9 virtual adapters. Bundled alongside openvpn.exe in the
+ * official MSI distribution. We use this to detect whether the TAP driver
+ * is installed and (with UAC elevation) to install it if missing.
+ *
+ * Windows-only. Returns `null` on other platforms.
+ */
+export function tapctlPath(): string | null {
+  if (process.platform !== "win32") return null;
+  return binaryPath("tapctl");
+}
+
+/**
+ * Absolute path to the bundled TAP-Windows V9 driver INF file. The MSI
+ * extracts it to `Program Files\OpenVPN\bin\drivers\tap-windows6\` or
+ * similar; we mirror that layout under `resources/win32/openvpn/driver/`.
+ * Returns `null` on non-Windows or when the driver wasn't bundled
+ * (developer skipped `npm run fetch:openvpn-win`).
+ */
+export function tapWindowsInfPath(): string | null {
+  if (process.platform !== "win32") return null;
+  // The MSI ships the driver under drivers\tap-windows6\<arch>\OemVista.inf.
+  // We normalise to a single architecture folder (amd64) at fetch time.
+  const candidate = path.join(openvpnBundledDir(), "driver", "OemVista.inf");
+  return fs.existsSync(candidate) ? candidate : null;
 }
 
 export function usbipPath(): string {
@@ -140,8 +187,8 @@ export function isRud1BridgeAvailable(): boolean {
 /**
  * Returns true when `binaryPath(name)` resolved to a real file. Useful
  * for preflight checks that need to give the user an actionable error
- * ("install WireGuard for Windows from <url>") instead of waiting for
- * spawn ENOENT to bubble up through the IPC bridge.
+ * ("install OpenVPN from <url>") instead of waiting for spawn ENOENT
+ * to bubble up through the IPC bridge.
  */
 export function isBinaryAvailable(name: string): boolean {
   return path.isAbsolute(binaryPath(name));
