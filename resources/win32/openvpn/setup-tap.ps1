@@ -117,6 +117,16 @@ if (-not $adapter) {
     exit 4
 }
 
+# Canonical "is rename already done" check: ask NDIS what InterfaceDescription
+# it's reporting. Skipping based on the Class-subkey DriverDesc was a bug —
+# DriverDesc could be "rud1" while InterfaceDescription was still
+# "TAP-Windows Adapter V9" because the real source is the PnP Enum tree's
+# DeviceDesc, not the Class subkey.
+if ($adapter.InterfaceDescription -eq $NEW_NAME) {
+    Write-Step "rud1-tap InterfaceDescription already '$NEW_NAME' — no-op."
+    exit 0
+}
+
 $guid = $adapter.InterfaceGuid
 $classRoot = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}'
 $match = Get-ChildItem $classRoot -ErrorAction SilentlyContinue | Where-Object {
@@ -128,14 +138,9 @@ if (-not $match) {
     exit 4
 }
 
-# Fast-path: skip the slow disable/enable when description is already correct.
-$currentDesc = (Get-ItemProperty -Path $match.PsPath -Name 'DriverDesc' -ErrorAction SilentlyContinue).DriverDesc
-if ($currentDesc -eq $NEW_NAME) {
-    Write-Step "rud1-tap description already '$NEW_NAME' — no-op."
-    exit 0
-}
+Write-Step "Renaming rud1-tap labels (current InterfaceDescription: '$($adapter.InterfaceDescription)') -> '$NEW_NAME'..."
 
-Write-Step "Renaming rud1-tap labels (was '$currentDesc') -> '$NEW_NAME'..."
+# --- Class subkey (driver layer — Device Manager "Controlador" tab) ---
 Set-ItemProperty -Path $match.PsPath -Name 'DriverDesc'   -Value $NEW_NAME -Force
 Set-ItemProperty -Path $match.PsPath -Name 'FriendlyName' -Value $NEW_NAME -Force
 Set-ItemProperty -Path $match.PsPath -Name 'ProviderName' -Value $NEW_NAME -Force
@@ -143,7 +148,30 @@ if (Get-ItemProperty -Path $match.PsPath -Name '*IfDescription' -ErrorAction Sil
     Set-ItemProperty -Path $match.PsPath -Name '*IfDescription' -Value $NEW_NAME -Force
 }
 
-# NetworkCards legacy table (older Siemens enumerators read this).
+# --- PnP Enum subkey (device layer — what NDIS reads to set IfDescr) ---
+# This is the load-bearing one. Without it Get-NetAdapter's
+# InterfaceDescription stays at the INF default no matter how many Class
+# subkey values we rewrite. Admins have write access by default to TAP-
+# Windows V9 entries under ROOT\NET — no take-ownership dance needed
+# (confirmed empirically on Spanish-locale Win 10 19045).
+$driverRef = "{4D36E972-E325-11CE-BFC1-08002BE10318}\$($match.PSChildName)"
+$enum = Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Enum\ROOT\NET' -ErrorAction SilentlyContinue | Where-Object {
+    try { (Get-ItemProperty $_.PsPath -Name Driver -ErrorAction Stop).Driver -eq $driverRef } catch { $false }
+} | Select-Object -First 1
+if ($enum) {
+    try {
+        Set-ItemProperty -Path $enum.PsPath -Name 'DeviceDesc'   -Value $NEW_NAME -Force
+        Set-ItemProperty -Path $enum.PsPath -Name 'FriendlyName' -Value $NEW_NAME -Force
+        Set-ItemProperty -Path $enum.PsPath -Name 'Mfg'          -Value $NEW_NAME -Force
+        Write-Step "Enum entry updated."
+    } catch {
+        Write-Step "WARN: could not write Enum entry: $($_.Exception.Message)"
+    }
+} else {
+    Write-Step "WARN: PnP Enum entry for driverRef='$driverRef' not found."
+}
+
+# --- NetworkCards legacy table (some older Siemens tools read this) ---
 $ncRoot = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkCards'
 $ncMatch = Get-ChildItem $ncRoot -ErrorAction SilentlyContinue | Where-Object {
     try { (Get-ItemProperty $_.PsPath -Name ServiceName -ErrorAction Stop).ServiceName -eq $guid } catch { $false }
@@ -152,10 +180,13 @@ if ($ncMatch) {
     Set-ItemProperty -Path $ncMatch.PsPath -Name 'Description' -Value $NEW_NAME -Force
 }
 
-# Disable+Enable so PnP re-publishes the new labels to NDIS listeners.
+# Disable+Enable so PnP re-publishes DeviceDesc → NDIS IfDescr.
 try { Disable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }
-Start-Sleep -Milliseconds 600
+Start-Sleep -Milliseconds 1500
 try { Enable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }
 
-Write-Step "Done."
+$post = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction SilentlyContinue
+if ($post) {
+    Write-Step "Post-rename: InterfaceDescription='$($post.InterfaceDescription)'."
+}
 exit 0

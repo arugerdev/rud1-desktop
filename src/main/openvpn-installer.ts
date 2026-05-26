@@ -480,32 +480,41 @@ async function renameRud1TapAdapterDescription(newDesc: string): Promise<void> {
     "  Start-Sleep -Milliseconds 200;",
     "}",
     "if (-not $adapter) { exit 3 }",
+    // Fast-path: ask NDIS what it's reporting as InterfaceDescription.
+    // That's the canonical "is rename done" check — checking only
+    // DriverDesc was a bug (it could be 'rud1' while NDIS still
+    // reported 'TAP-Windows Adapter V9' because the real source is
+    // the PnP Enum DeviceDesc, not the Class DriverDesc).
+    `if ($adapter.InterfaceDescription -eq '${safe}') { exit 0 }`,
     "$guid = $adapter.InterfaceGuid;",
     "$classRoot = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}';",
     "$match = Get-ChildItem $classRoot -ErrorAction SilentlyContinue | Where-Object {",
     "  try { (Get-ItemProperty $_.PsPath -Name NetCfgInstanceId -ErrorAction Stop).NetCfgInstanceId -eq $guid } catch { $false }",
     "} | Select-Object -First 1;",
     "if (-not $match) { exit 4 }",
-    // Fast-path: if DriverDesc is already what we want, skip the slow
-    // disable/enable cycle. Saves 5-10s on every Connect after the
-    // first one — the rename is called unconditionally so an idempotent
-    // fast-path is essential.
-    "$currentDesc = (Get-ItemProperty -Path $match.PsPath -Name 'DriverDesc' -ErrorAction SilentlyContinue).DriverDesc;",
-    `if ($currentDesc -eq '${safe}') { exit 0 }`,
-    // The class-subkey values that map to Device Manager's General /
-    // Driver tabs and to the WMI-NDIS InterfaceDescription. Setting
-    // each as -Force ensures we overwrite even when Windows pre-seeded
-    // them with the upstream INF defaults.
+    // --- Class subkey (driver layer / "Controlador" tab in Device Manager) ---
     `Set-ItemProperty -Path $match.PsPath -Name 'DriverDesc'   -Value '${safe}' -Force;`,
     `Set-ItemProperty -Path $match.PsPath -Name 'FriendlyName' -Value '${safe}' -Force;`,
     `Set-ItemProperty -Path $match.PsPath -Name 'ProviderName' -Value '${safe}' -Force;`,
     "if (Get-ItemProperty -Path $match.PsPath -Name '*IfDescription' -ErrorAction SilentlyContinue) {",
     `  Set-ItemProperty -Path $match.PsPath -Name '*IfDescription' -Value '${safe}' -Force`,
     "}",
-    // NetworkCards is the legacy table NDIS shipping clients (incl.
-    // older Siemens enumerators) still read. Each entry has a numeric
-    // subkey + a Description value; the entry that matches our GUID is
-    // the one to rewrite.
+    // --- PnP Enum subkey (device layer — what NDIS reads to set IfDescr) ---
+    // Load-bearing for InterfaceDescription. Admins have write access
+    // to TAP-Windows V9 ROOT\NET\* entries by default; no take-
+    // ownership needed (confirmed on Spanish Win 10 19045).
+    `$driverRef = '{4D36E972-E325-11CE-BFC1-08002BE10318}\\' + $match.PSChildName;`,
+    "$enum = Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\ROOT\\NET' -ErrorAction SilentlyContinue | Where-Object {",
+    "  try { (Get-ItemProperty $_.PsPath -Name Driver -ErrorAction Stop).Driver -eq $driverRef } catch { $false }",
+    "} | Select-Object -First 1;",
+    "if ($enum) {",
+    "  try {",
+    `    Set-ItemProperty -Path $enum.PsPath -Name 'DeviceDesc'   -Value '${safe}' -Force`,
+    `    Set-ItemProperty -Path $enum.PsPath -Name 'FriendlyName' -Value '${safe}' -Force`,
+    `    Set-ItemProperty -Path $enum.PsPath -Name 'Mfg'          -Value '${safe}' -Force`,
+    "  } catch { }",
+    "}",
+    // --- NetworkCards legacy table ---
     "$ncRoot = 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\NetworkCards';",
     "$ncMatch = Get-ChildItem $ncRoot -ErrorAction SilentlyContinue | Where-Object {",
     "  try { (Get-ItemProperty $_.PsPath -Name ServiceName -ErrorAction Stop).ServiceName -eq $guid } catch { $false }",
@@ -513,13 +522,9 @@ async function renameRud1TapAdapterDescription(newDesc: string): Promise<void> {
     "if ($ncMatch) {",
     `  Set-ItemProperty -Path $ncMatch.PsPath -Name 'Description' -Value '${safe}' -Force`,
     "}",
-    // Disable+Enable is more reliable than Restart-NetAdapter (the
-    // latter can no-op when openvpn already holds the device open).
-    // We wrap both in try/catch because a brief disable while openvpn
-    // is mid-handshake can race; a re-enable on next reconnect picks
-    // it back up either way.
+    // Disable+Enable so PnP re-publishes DeviceDesc → NDIS IfDescr.
     "try { Disable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }",
-    "Start-Sleep -Milliseconds 600;",
+    "Start-Sleep -Milliseconds 1200;",
     "try { Enable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }",
     "exit 0",
   ].join(" ");
