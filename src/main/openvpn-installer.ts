@@ -481,12 +481,17 @@ async function renameRud1TapAdapterDescription(newDesc: string): Promise<void> {
     "}",
     "if (-not $adapter) { exit 3 }",
     "$guid = $adapter.InterfaceGuid;",
-    "$ifIndex = $adapter.ifIndex;",
     "$classRoot = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}';",
     "$match = Get-ChildItem $classRoot -ErrorAction SilentlyContinue | Where-Object {",
     "  try { (Get-ItemProperty $_.PsPath -Name NetCfgInstanceId -ErrorAction Stop).NetCfgInstanceId -eq $guid } catch { $false }",
     "} | Select-Object -First 1;",
     "if (-not $match) { exit 4 }",
+    // Fast-path: if DriverDesc is already what we want, skip the slow
+    // disable/enable cycle. Saves 5-10s on every Connect after the
+    // first one — the rename is called unconditionally so an idempotent
+    // fast-path is essential.
+    "$currentDesc = (Get-ItemProperty -Path $match.PsPath -Name 'DriverDesc' -ErrorAction SilentlyContinue).DriverDesc;",
+    `if ($currentDesc -eq '${safe}') { exit 0 }`,
     // The class-subkey values that map to Device Manager's General /
     // Driver tabs and to the WMI-NDIS InterfaceDescription. Setting
     // each as -Force ensures we overwrite even when Windows pre-seeded

@@ -463,8 +463,17 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
     "--config", configPath,
     "--dev-node", TUNNEL_NAME,
     "--management", MANAGEMENT_HOST, String(managementPort),
-    "--management-hold",
-    "--management-query-passwords",
+    // No --management-hold: it gates startup on a "hold release" reply
+    // from our side, and an intermittent timing bug where the reply
+    // didn't reach openvpn left the tunnel wedged in "waiting…" state
+    // indefinitely. Without hold, openvpn proceeds directly to the TLS
+    // handshake; we still attach the management socket in the background
+    // for state + bytecount notifications (we just don't gate on it).
+    //
+    // No --management-query-passwords either: our .ovpn ships inline
+    // certs with an unencrypted private key, so there's never a password
+    // to query. The flag is a no-op for us and removing it shrinks the
+    // surface area for management-socket weirdness.
     // verb 4 gives us TLS handshake detail without the cleartext key
     // material that verb 6+ leaks. Useful when diagnosing connect timeouts.
     "--verb", "4",
@@ -734,21 +743,14 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
   running = live;
   lastOvpnConfig = ovpnConfig;
 
-  // Attach to the management socket synchronously so we can drive the
-  // hold-release + wait for actual initialization before returning. We
-  // intentionally block here: the renderer flips its UI to "connected"
-  // the moment `vpnConnect` resolves, so resolving early on a half-open
-  // tunnel (e.g. adapter gone, TLS auth still pending) lies to the
-  // operator. The wait is bounded so a real network failure surfaces as
-  // an error within a reasonable time window.
+  // Attach to the management socket synchronously so we have state +
+  // bytecount notifications by the time the renderer asks for status.
+  // Without --management-hold there's no critical command we MUST send;
+  // the wire-up is purely observability and failure to attach degrades
+  // gracefully to stdout-only scraping.
   const sock = await attachManagementSocket(live.managementPort);
   if (sock && running === live) {
     wireManagementSocket(sock);
-    try {
-      sock.write("hold release\n");
-    } catch {
-      /* socket already gone */
-    }
   }
 
   // Wait for the rising-edge `initialized` signal (set on stdout's
