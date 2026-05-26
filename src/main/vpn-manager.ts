@@ -627,21 +627,38 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
   // and the server may have rotated certs.
   await killRunning();
 
-  // Ensure the TAP driver is installed. This is a no-op on Unix and a
-  // single elevated `tapctl create` invocation on Windows when missing.
-  // We surface a typed error so the IPC layer can render the dedicated CTA.
+  // Ensure both the TAP-Windows V9 kernel driver AND the actual rud1-tap
+  // network adapter exist before spawning openvpn. Checking only the
+  // driver is not enough — users can uninstall the adapter from Device
+  // Manager (or another OpenVPN client can call `tapctl delete`) while
+  // leaving the driver registered. Without this guard, openvpn.exe
+  // launches, fails to open the device, and the management socket
+  // emits a CONNECTED state from a stale push, so the UI claims
+  // success while no real tunnel exists.
   const runtime: OpenVpnRuntimeStatus = await detectOpenVpnRuntime();
   if (!runtime.openvpnAvailable) {
     throw new OpenVpnMissingError();
   }
-  if (process.platform === "win32" && !runtime.tapDriverInstalled) {
-    // ensureTapDriverInstalled triggers a UAC prompt. If the user cancels
-    // we propagate as TapDriverMissingError so the panel shows the CTA.
+  if (process.platform === "win32" && !runtime.rud1TapAdapterPresent) {
+    // ensureTapDriverInstalled triggers a UAC prompt and is idempotent
+    // at both layers: it runs the driver MSI (no-op if already loaded)
+    // and then `tapctl create --name rud1-tap` (no-op if the adapter
+    // already exists). Either way it leaves a working rud1-tap on exit.
     try {
       await ensureTapDriverInstalled();
     } catch (err) {
       throw new TapDriverMissingError(
         err instanceof Error ? err.message : String(err),
+      );
+    }
+    // Re-verify. If the adapter STILL isn't present we refuse to
+    // spawn rather than reporting a phantom "connected" state.
+    const post = await detectOpenVpnRuntime();
+    if (!post.rud1TapAdapterPresent) {
+      throw new TapDriverMissingError(
+        "The rud1-tap network adapter could not be created. Open Device " +
+          "Manager and verify the TAP-Windows V9 driver is installed, " +
+          "then click Connect again.",
       );
     }
   }
@@ -650,24 +667,83 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
 
   const live = await spawnOpenvpn(configPath);
   running = live;
-  lastConnectedAt = Date.now();
   lastOvpnConfig = ovpnConfig;
 
-  // Attach to the management socket in the background — the spawn itself
-  // is enough to return success, the renderer polls vpnStatus() for the
-  // "initialization completed" rising edge.
-  void (async () => {
-    const sock = await attachManagementSocket(live.managementPort);
-    if (!sock || running !== live) return;
+  // Attach to the management socket synchronously so we can drive the
+  // hold-release + wait for actual initialization before returning. We
+  // intentionally block here: the renderer flips its UI to "connected"
+  // the moment `vpnConnect` resolves, so resolving early on a half-open
+  // tunnel (e.g. adapter gone, TLS auth still pending) lies to the
+  // operator. The wait is bounded so a real network failure surfaces as
+  // an error within a reasonable time window.
+  const sock = await attachManagementSocket(live.managementPort);
+  if (sock && running === live) {
     wireManagementSocket(sock);
-    // Once the management socket is wired up, lift the `--management-hold`
-    // we passed at spawn so openvpn actually starts the TLS handshake.
     try {
       sock.write("hold release\n");
     } catch {
       /* socket already gone */
     }
-  })();
+  }
+
+  // Wait for the rising-edge `initialized` signal (set on stdout's
+  // "Initialization Sequence Completed" line OR on a >STATE:CONNECTED
+  // notification from the management socket). 25s covers a slow TLS
+  // handshake over a marginal cellular uplink; failure beyond that is
+  // almost always a configuration error worth surfacing.
+  //
+  // If the child process exits before we see init, that's also a
+  // failure — propagate the captured last error line so the renderer
+  // can show what openvpn complained about.
+  const INIT_TIMEOUT_MS = 25_000;
+  const startedAt = Date.now();
+  await new Promise<void>((resolve, reject) => {
+    const onExit = (code: number | null) => {
+      const msg = live.lastErrorLine
+        ? `OpenVPN exited before initialization: ${live.lastErrorLine}`
+        : `OpenVPN exited before initialization (code ${code ?? "?"})`;
+      cleanup();
+      reject(new Error(msg));
+    };
+    const onTick = () => {
+      if (running !== live) {
+        cleanup();
+        reject(new Error("VPN connection was torn down before initialization"));
+        return;
+      }
+      if (live.initialized) {
+        cleanup();
+        resolve();
+        return;
+      }
+      if (Date.now() - startedAt >= INIT_TIMEOUT_MS) {
+        cleanup();
+        const reason = live.lastErrorLine
+          ? `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s: ${live.lastErrorLine}`
+          : `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s. ` +
+            `Check rud1-tap adapter, server address, and OpenVPN logs.`;
+        reject(new Error(reason));
+        return;
+      }
+    };
+    const timer = setInterval(onTick, 250);
+    function cleanup() {
+      clearInterval(timer);
+      try { live.proc.off("exit", onExit); } catch { /* ignore */ }
+    }
+    live.proc.on("exit", onExit);
+    // Run one immediate tick so we don't add 250ms latency when
+    // initialization completes very fast (rare but possible on warm
+    // sockets / local tests).
+    onTick();
+  }).catch(async (err) => {
+    // Tear down the child so we don't leave an orphan openvpn.exe
+    // owning the TAP adapter after a failed connect.
+    await killRunning();
+    throw err;
+  });
+
+  lastConnectedAt = Date.now();
 }
 
 export async function vpnDisconnect(): Promise<VpnDisconnectResult> {

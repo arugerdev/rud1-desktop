@@ -54,6 +54,13 @@ export interface OpenVpnRuntimeStatus {
   /** TAP-Windows V9 driver is detected via Windows adapter enumeration.
    *  Always true on non-Windows platforms (Unix uses tun/tap kernel). */
   tapDriverInstalled: boolean;
+  /** The actual `rud1-tap` virtual adapter is present (driver installed AND
+   *  an instance named rud1-tap exists in Get-NetAdapter). A user can
+   *  uninstall the adapter from Device Manager while leaving the driver
+   *  installed — this flag distinguishes that case from "driver missing"
+   *  so the connect flow can re-create the adapter without re-installing
+   *  the driver. Always true on non-Windows platforms. */
+  rud1TapAdapterPresent: boolean;
   /** Set when a NetAdapter probe failed (PowerShell unavailable, exotic
    *  Win box, etc.) — distinguishes "definitely missing" from "couldn't
    *  determine". The caller may treat unknown as "needs install" with
@@ -102,9 +109,62 @@ async function probeTapDriverWindows(): Promise<{
 }
 
 /**
+ * Verify that the actual `rud1-tap` adapter exists on the host. This is
+ * a strictly stronger check than {@link probeTapDriverWindows}: the
+ * driver can be installed while no rud1-tap instance exists (user
+ * uninstalled it manually from Device Manager, or another OpenVPN client
+ * removed it via `tapctl delete`).
+ *
+ * We match on the adapter alias (`-Name 'rud1-tap'`) AND require the
+ * InterfaceDescription to indicate it's still a TAP-Windows V9 instance
+ * — this protects against a stale empty NetAdapter entry from a half-
+ * uninstalled adapter. `-IncludeHidden` enumerates disconnected /
+ * disabled adapters too, so a user-disabled adapter still counts as
+ * present (we can re-enable it later if needed).
+ *
+ * Note: rud1-desktop renames the description to plain "rud1" so it
+ * surfaces nicely in TIA Portal / Codesys dropdowns — we accept either
+ * the original "TAP-Windows Adapter V9" string OR the renamed "rud1"
+ * description in the regex.
+ */
+async function probeRud1TapAdapter(): Promise<{
+  present: boolean;
+  error: string | null;
+}> {
+  if (process.platform !== "win32") return { present: true, error: null };
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$a = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction SilentlyContinue; " +
+          "if ($a -and ($a.InterfaceDescription -match 'TAP-Windows Adapter V9' " +
+          "  -or $a.InterfaceDescription -match '^rud1')) { " +
+          "  $a | Select-Object -First 1 | ConvertTo-Json -Compress " +
+          "}",
+      ],
+      { timeout: 10_000, windowsHide: true, maxBuffer: 512 * 1024 },
+    );
+    const trimmed = (stdout || "").trim();
+    return { present: trimmed.length > 0, error: null };
+  } catch (err) {
+    return {
+      present: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
  * Read the install marker so a subsequent app launch can short-circuit
- * the (slow) NetAdapter probe. Returns false on missing / unreadable
- * marker so the next call re-probes.
+ * the (slow) NetAdapter driver probe. Returns false on missing /
+ * unreadable marker so the next call re-probes. The marker only signals
+ * "the kernel driver has been installed at least once" — it intentionally
+ * does NOT imply the rud1-tap adapter is still present, since users can
+ * delete the adapter from Device Manager. Adapter presence is always
+ * verified via {@link probeRud1TapAdapter}.
  */
 async function readTapMarker(): Promise<boolean> {
   try {
@@ -407,9 +467,23 @@ async function runElevatedSilentInstaller(installerPath: string): Promise<void> 
 }
 
 /**
- * One-shot probe of the runtime state — the renderer's iter-71 modal
- * uses this on app start to decide whether to surface the "install
- * driver" CTA before the user even tries Connect.
+ * One-shot probe of the runtime state — the renderer surfaces this on
+ * app start (to decide whether to show the "install driver" CTA before
+ * the user even tries Connect) and the connect flow uses it as the
+ * gating precondition.
+ *
+ * Two-layer probe so we can distinguish "kernel driver missing entirely"
+ * from "driver installed, adapter deleted":
+ *   1. Probe for the `rud1-tap` adapter (fast, ~50ms via
+ *      `Get-NetAdapter -Name rud1-tap`). If present, both flags are true.
+ *   2. If the adapter is missing, fall back to the broader TAP-Windows
+ *      V9 driver probe to differentiate the two failure modes for the
+ *      caller.
+ *
+ * The install marker is NOT consulted as a fast-path for adapter
+ * presence — it only signals that the driver was installed at some
+ * point. Adapter presence is re-verified on every call so a user who
+ * deletes the adapter from Device Manager is detected immediately.
  */
 export async function detectOpenVpnRuntime(): Promise<OpenVpnRuntimeStatus> {
   const ovpnAvail = isBinaryAvailable("openvpn");
@@ -420,33 +494,37 @@ export async function detectOpenVpnRuntime(): Promise<OpenVpnRuntimeStatus> {
       openvpnAvailable: ovpnAvail,
       openvpnPath: ovpnP,
       tapDriverInstalled: true,
+      rud1TapAdapterPresent: true,
       tapDriverProbeError: null,
     };
   }
 
-  // Marker fast-path so a healthy install doesn't pay the PowerShell
-  // round-trip on every boot.
-  if (await readTapMarker()) {
+  const adapterProbe = await probeRud1TapAdapter();
+  if (adapterProbe.present) {
+    // Adapter present implies the driver is loaded — the adapter
+    // wouldn't enumerate otherwise. Sync the marker as a side-effect so
+    // a fresh install that landed via the standalone tap-windows MSI
+    // still benefits from the fast-path on subsequent boots.
+    await writeTapMarker();
     return {
       openvpnAvailable: ovpnAvail,
       openvpnPath: ovpnP,
       tapDriverInstalled: true,
+      rud1TapAdapterPresent: true,
       tapDriverProbeError: null,
     };
   }
 
-  const probe = await probeTapDriverWindows();
-  // Sync the marker if the adapter is genuinely present (e.g. a user
-  // who installed OpenVPN manually before rud1-desktop ran).
-  if (probe.installed) {
-    await writeTapMarker();
-  }
-
+  // Adapter missing — probe the driver layer so the caller knows
+  // whether they need a full install (UAC + driver) or just the cheaper
+  // `tapctl create` step (driver already in store).
+  const driverProbe = await probeTapDriverWindows();
   return {
     openvpnAvailable: ovpnAvail,
     openvpnPath: ovpnP,
-    tapDriverInstalled: probe.installed,
-    tapDriverProbeError: probe.error,
+    tapDriverInstalled: driverProbe.installed,
+    rud1TapAdapterPresent: false,
+    tapDriverProbeError: adapterProbe.error ?? driverProbe.error,
   };
 }
 

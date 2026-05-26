@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
               openvpnAvailable: boolean;
               openvpnPath: string | null;
               tapDriverInstalled: boolean;
+              rud1TapAdapterPresent: boolean;
               tapDriverProbeError: string | null;
             };
           }
@@ -86,6 +87,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
               openvpnAvailable: boolean;
               openvpnPath: string | null;
               tapDriverInstalled: boolean;
+              rud1TapAdapterPresent: boolean;
               tapDriverProbeError: string | null;
             };
           }
