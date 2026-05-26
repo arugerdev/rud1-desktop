@@ -21,5 +21,6 @@ pub.key
 resources/win32/openvpn/*
 !resources/win32/openvpn/.gitkeep
 !resources/win32/openvpn/driver/
+!resources/win32/openvpn/*.ps1
 resources/win32/openvpn/driver/*
 !resources/win32/openvpn/driver/.gitkeep
