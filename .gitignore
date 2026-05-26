@@ -11,3 +11,15 @@ pub.key
 # committed so CI can build releases without network fetches. Populate them
 # locally with the scripts/fetch-*.ps1 + scripts/build-rud1-bridge.ps1
 # helpers, then `git add resources/<platform>/` and push.
+#
+# EXCEPTION: OpenVPN runtime + TAP-Windows V9 driver installer are fetched
+# fresh by CI on every build (npm run fetch:openvpn-win in .github/workflows/
+# build.yml). The signed MSI + standalone NSIS together are ~7 MB of compressed
+# binary churn per release if committed, and we want the latest signed upstream
+# build to ship with every release without manual bumps. The directory only
+# holds .gitkeep markers in git; the actual binaries are runtime-fetched.
+resources/win32/openvpn/*
+!resources/win32/openvpn/.gitkeep
+!resources/win32/openvpn/driver/
+resources/win32/openvpn/driver/*
+!resources/win32/openvpn/driver/.gitkeep

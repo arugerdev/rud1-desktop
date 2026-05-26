@@ -120,18 +120,31 @@ export function tapctlPath(): string | null {
 }
 
 /**
- * Absolute path to the bundled TAP-Windows V9 driver INF file. The MSI
- * extracts it to `Program Files\OpenVPN\bin\drivers\tap-windows6\` or
- * similar; we mirror that layout under `resources/win32/openvpn/driver/`.
- * Returns `null` on non-Windows or when the driver wasn't bundled
- * (developer skipped `npm run fetch:openvpn-win`).
+ * Absolute path to the bundled standalone TAP-Windows V9 driver installer
+ * (signed NSIS .exe from openvpn.org). OpenVPN 2.6.x MSI no longer ships
+ * the driver inside its own bundle, so we fetch tap-windows-9.21.2.exe
+ * separately and ship it under `resources/win32/openvpn/driver/`. At
+ * first-launch the openvpn-installer module runs it silently with UAC
+ * elevation to install the .inf/.cat/.sys onto the host before calling
+ * `tapctl create` to instantiate the rud1-tap adapter.
+ *
+ * Returns null on non-Windows or when the file wasn't fetched yet (the
+ * caller should surface a "re-run fetch:openvpn-win" hint).
+ */
+export function tapWindowsInstallerPath(): string | null {
+  if (process.platform !== "win32") return null;
+  const candidate = path.join(openvpnBundledDir(), "driver", "tap-windows-installer.exe");
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Legacy compatibility export — older code paths reference an .inf path
+ * for "manual fallback: right-click and choose Install". The standalone
+ * installer makes that fallback obsolete, so this now returns the
+ * installer .exe path (still usable by Explorer's double-click).
  */
 export function tapWindowsInfPath(): string | null {
-  if (process.platform !== "win32") return null;
-  // The MSI ships the driver under drivers\tap-windows6\<arch>\OemVista.inf.
-  // We normalise to a single architecture folder (amd64) at fetch time.
-  const candidate = path.join(openvpnBundledDir(), "driver", "OemVista.inf");
-  return fs.existsSync(candidate) ? candidate : null;
+  return tapWindowsInstallerPath();
 }
 
 export function usbipPath(): string {

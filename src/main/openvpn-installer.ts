@@ -35,6 +35,7 @@ import {
   openvpnPath,
   tapctlPath,
   tapWindowsInfPath,
+  tapWindowsInstallerPath,
   openvpnBundledDir,
 } from "./binary-helper";
 
@@ -157,6 +158,24 @@ export async function ensureTapDriverInstalled(): Promise<void> {
         "`npm run fetch:openvpn-win` to repopulate resources/win32/openvpn/.",
     );
   }
+
+  // Step 1: install the TAP-Windows V9 kernel driver on the host BEFORE
+  // calling tapctl. OpenVPN 2.6.x dropped the bundled driver from its
+  // MSI's administrative install, so the .inf/.cat/.sys live exclusively
+  // inside the standalone tap-windows-9.21.2.exe NSIS installer (signed
+  // by OpenVPN Technologies, Inc.). We run it silently with the `/S` flag
+  // and elevation; the installer is idempotent so re-runs on an already-
+  // installed host are a no-op (~1 s).
+  const tapInstaller = tapWindowsInstallerPath();
+  if (!tapInstaller) {
+    throw new Error(
+      "Bundled tap-windows-installer.exe is missing — run " +
+        "`npm run fetch:openvpn-win` to repopulate " +
+        "resources/win32/openvpn/driver/.",
+    );
+  }
+  await runElevatedSilentInstaller(tapInstaller);
+
   const inf = tapWindowsInfPath();
   // PowerShell's Start-Process with -Verb RunAs is the only way to
   // trigger UAC for a non-admin parent. We're already
@@ -235,6 +254,50 @@ export async function ensureTapDriverInstalled(): Promise<void> {
     );
   }
   await writeTapMarker();
+}
+
+/**
+ * Run an NSIS installer (`installer.exe /S`) elevated via UAC. The
+ * tap-windows-installer.exe published by openvpn.org accepts the
+ * standard NSIS `/S` flag for silent mode. We escalate via PowerShell
+ * `Start-Process -Verb RunAs` so the OS surfaces the UAC dialog and
+ * we get a real exit code back from the child via `-Wait -PassThru`.
+ *
+ * Idempotent: if the driver is already installed at the same version,
+ * the installer exits 0 quickly without prompting (its INF check sees
+ * an existing match in the driver store).
+ */
+async function runElevatedSilentInstaller(installerPath: string): Promise<void> {
+  const psCmd = [
+    "$ErrorActionPreference = 'Stop';",
+    `$proc = Start-Process -FilePath '${installerPath.replace(/'/g, "''")}' ` +
+      `-ArgumentList @('/S') -Verb RunAs -Wait -PassThru -WindowStyle Hidden;`,
+    "if (-not $proc) { exit 2 }",
+    "exit $proc.ExitCode",
+  ].join(" ");
+  try {
+    await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+      { timeout: 120_000, windowsHide: true },
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ETIMEDOUT") {
+      throw new Error(
+        "Timed out waiting for the TAP-Windows driver installer. The " +
+          "UAC prompt may still be open — accept it and retry Connect.",
+      );
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/canceled|cancelled|denied/i.test(msg)) {
+      throw new Error(
+        "The OS elevation prompt was dismissed. The TAP-Windows V9 " +
+          "driver is required for the VPN — click Connect again to retry.",
+      );
+    }
+    throw new Error(`TAP-Windows driver installer failed: ${msg}`);
+  }
 }
 
 /**
