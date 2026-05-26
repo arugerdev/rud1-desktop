@@ -998,7 +998,17 @@ app.on("window-all-closed", () => {
   // Win/Linux: stay in tray.
 });
 
-app.on("before-quit", () => {
+// Lifecycle: when the user quits (tray menu → Quit, Cmd+Q on macOS,
+// taskbar close on Windows when in single-window mode), tear down the
+// VPN child process FIRST so openvpn.exe doesn't orphan. The Electron
+// `before-quit` event is the latest async-capable hook before exit —
+// we preventDefault + run cleanup + quit() to give the kill enough time.
+let isQuitting = false;
+app.on("before-quit", (event) => {
+  if (isQuitting) return;
+  event.preventDefault();
+  isQuitting = true;
+
   if (firmwareProbeTimer) {
     clearInterval(firmwareProbeTimer);
     firmwareProbeTimer = null;
@@ -1007,6 +1017,32 @@ app.on("before-quit", () => {
   deviceListManager?.stop();
   notificationStream?.stop();
   tray?.destroy();
+
+  // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
+  // timeouts so this can't hang indefinitely.
+  void (async () => {
+    try {
+      const { vpnDisconnect } = await import("./vpn-manager");
+      await vpnDisconnect();
+    } catch (err) {
+      // Don't block exit on this — log and proceed.
+      console.warn("[lifecycle] vpnDisconnect on quit failed:", err);
+    }
+    app.exit(0);
+  })();
+});
+
+// Synchronous safety net: if the OS kills us (task manager, shutdown,
+// power off) Electron may fire `quit` directly without before-quit. Best-
+// effort: send SIGKILL to the tracked child so it doesn't orphan.
+app.on("quit", () => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { killRunningSync } = require("./vpn-manager") as typeof import("./vpn-manager");
+    killRunningSync();
+  } catch {
+    /* module already torn down */
+  }
 });
 
 // Handle deep links: rud1://

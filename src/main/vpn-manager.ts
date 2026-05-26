@@ -17,7 +17,10 @@
  * and elevation prompting for TAP driver install.
  */
 
-import { spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess, execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 import fs from "fs/promises";
 import net from "net";
 import os from "os";
@@ -524,25 +527,80 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
 async function killRunning(): Promise<void> {
   if (!running) return;
   const live = running;
+  const pid = live.proc.pid;
   try {
     live.proc.kill();
   } catch {
     /* already dead */
   }
-  // Wait up to 5s for the child to exit. If it hangs, escalate to
+  // Wait up to 3s for the child to exit. If it hangs, escalate to
   // SIGKILL — leaving an orphan openvpn around holds the TAP adapter
   // hostage and prevents the next install.
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
       try { live.proc.kill("SIGKILL"); } catch { /* ignore */ }
       resolve();
-    }, 5_000);
+    }, 3_000);
     live.proc.once("exit", () => {
       clearTimeout(timer);
       resolve();
     });
   });
+  // Defense-in-depth: on Windows, openvpn.exe sometimes survives the
+  // parent's SIGTERM/SIGKILL when it's mid-TLS-renegotiation. Force a
+  // taskkill of the actual PID if it's still alive. Safe to call when
+  // it's already gone (taskkill returns non-zero, we ignore).
+  if (process.platform === "win32" && typeof pid === "number") {
+    try {
+      await execFileAsync("taskkill.exe", ["/F", "/T", "/PID", String(pid)], {
+        timeout: 5_000,
+        windowsHide: true,
+      });
+    } catch {
+      /* already gone or never existed */
+    }
+  }
   running = null;
+}
+
+/**
+ * Synchronous best-effort tear-down for `app.on("exit", ...)`. The exit
+ * event fires LAST in Electron's lifecycle and cannot run async code —
+ * if the user hits Quit from the tray and openvpn is still alive, this
+ * is the final hook that prevents an orphan.
+ *
+ * Best-effort: we don't wait for the child to actually die, just send the
+ * signal so the OS reaps it on our process exit. Use the async
+ * `killRunning()` from before-quit for the proper teardown — this is the
+ * "I missed before-quit somehow" safety net.
+ */
+export function killRunningSync(): void {
+  if (!running) return;
+  const live = running;
+  try { live.proc.kill("SIGKILL"); } catch { /* already gone */ }
+  if (process.platform === "win32" && typeof live.proc.pid === "number") {
+    try {
+      // Synchronous spawn — execFileSync would block forever if taskkill
+      // hangs, so use spawnSync with a short timeout instead.
+      const { spawnSync } = require("child_process") as typeof import("child_process");
+      spawnSync("taskkill.exe", ["/F", "/T", "/PID", String(live.proc.pid)], {
+        timeout: 2_000,
+        windowsHide: true,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+  running = null;
+}
+
+/**
+ * Public introspector — `true` when a tracked openvpn child is still in
+ * the process table. UI uses this to disambiguate "connected" from "we
+ * just sent connect and openvpn died silently".
+ */
+export function isOpenvpnAlive(): boolean {
+  return running !== null;
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
