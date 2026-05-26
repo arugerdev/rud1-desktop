@@ -1,22 +1,23 @@
 /**
- * Native OS notification helpers for VPN / USB lifecycle events.
+ * Liquid Glass notification helpers for VPN / USB / device lifecycle events.
  *
- * Surfaces lifecycle transitions outside the panel so the operator sees
- * them while focused on Slack, a terminal, etc. Title/body are bounded
- * because Linux libnotify has a per-line cap and a malicious device
- * label could otherwise break wrapping. On unsupported environments
- * (headless, no DBus session) the helpers no-op rather than throwing —
- * an IPC handler should never crash because the toast couldn't render.
+ * Public surface is intentionally unchanged from the platform-native
+ * `Notification` era — callers keep doing `notifyVpnConnected("foo")`,
+ * `notifyUsbAttached(label, busId)`, etc. — but under the hood we now
+ * route every toast through the frameless overlay window managed by
+ * `toast-overlay.ts`. Tradeoffs vs. the OS-native path documented in
+ * `toast-overlay.ts`.
+ *
+ * Per-category mute (Settings → Notifications) is still honoured via
+ * `isNotificationEnabled(category)` — the toast simply never reaches the
+ * overlay queue when the user has silenced it.
  */
-
-import { Notification } from "electron";
 
 import {
   isNotificationEnabled,
   type NotificationToggles,
 } from "./preferences-manager";
-
-const SUPPORTED = Notification.isSupported();
+import { pushToast, type ToastKind } from "./toast-overlay";
 
 const MAX_TITLE = 80;
 const MAX_BODY = 240;
@@ -26,41 +27,46 @@ function clamp(s: string, max: number): string {
   return s.slice(0, max - 1) + "…";
 }
 
-function show(
-  title: string,
-  body: string,
-  opts?: { silent?: boolean; category?: keyof NotificationToggles },
-) {
-  if (!SUPPORTED) return;
-  // Per-category mute. The category is an optional hint so legacy callers
-  // that don't pass one keep firing — only category-tagged toasts can be
-  // silenced from the Settings UI.
+interface ShowOpts {
+  kind?: ToastKind;
+  category?: keyof NotificationToggles;
+  /** Auto-dismiss override. Defaults to 5.5s. 0 = sticky. */
+  autoDismissMs?: number;
+  /** Optional CTA. The channel is fired through the toast overlay's IPC
+   *  bridge — register a handler with `onToastAction(channel, cb)`. */
+  action?: { label: string; channel: string };
+}
+
+function show(title: string, body: string, opts?: ShowOpts) {
   if (opts?.category && !isNotificationEnabled(opts.category)) return;
   try {
-    const n = new Notification({
+    pushToast({
+      kind: opts?.kind ?? "info",
       title: clamp(title, MAX_TITLE),
       body: clamp(body, MAX_BODY),
-      silent: opts?.silent ?? false,
+      autoDismissMs: opts?.autoDismissMs,
+      action: opts?.action,
     });
-    n.show();
-  } catch {
-    // Best effort. A platform that throws for any reason (no DBus
-    // session on a fresh Linux box, etc.) shouldn't break the IPC
-    // call that triggered this helper.
+  } catch (err) {
+    // Best effort — a failed toast shouldn't break the IPC call that
+    // triggered it. Log so headless dev runs still surface the message.
+    console.warn(
+      "[notifications] toast push failed:",
+      err instanceof Error ? err.message : err,
+      title,
+      "—",
+      body,
+    );
   }
 }
 
 // ─── VPN ────────────────────────────────────────────────────────────────────
 
-/**
- * Fired after openvpn.exe reports "Initialization Sequence Completed"
- * on the management socket. The body should be brief; the panel carries
- * the full handshake / IP detail. */
 export function notifyVpnConnected(deviceName?: string) {
   show(
     "VPN Connected",
     deviceName ? `Tunnel up to ${deviceName}.` : "Tunnel is up.",
-    { category: "vpn" },
+    { kind: "success", category: "vpn" },
   );
 }
 
@@ -70,8 +76,7 @@ export function notifyVpnConnected(deviceName?: string) {
  * which made the symmetric WG handshake statistically certain to fail.
  * OpenVPN's client-OUTBOUND model is unaffected by CGNAT on either side,
  * so this notification is now a vestige; we keep the export so existing
- * callers don't need a coordinated rename. Body is rephrased so a
- * mis-fire reads sensibly.
+ * callers don't need a coordinated rename.
  */
 export function notifyVpnCgnatWarning(deviceName?: string) {
   show(
@@ -79,31 +84,23 @@ export function notifyVpnCgnatWarning(deviceName?: string) {
     deviceName
       ? `${deviceName} appears to be behind carrier-grade NAT. The OpenVPN client opens an outbound TLS connection, so this typically still works.`
       : "Carrier-grade NAT was detected on the device side. The OpenVPN client opens an outbound TLS connection, so this typically still works.",
-    { category: "vpn" },
+    { kind: "warning", category: "vpn" },
   );
 }
 
 /**
  * Fired when the desktop detects the TAP-Windows V9 kernel driver is
  * missing — the renderer's Liquid Glass modal will appear above the
- * panel asking the user to grant elevation. We emit a parallel native
- * notification so the operator sees the prompt even when focused on
- * another window.
+ * panel asking the user to grant elevation.
  */
 export function notifyVpnTapDriverMissing() {
   show(
     "TAP driver required",
     "rud1 needs to install the TAP-Windows V9 driver. Click Connect and accept the elevation prompt.",
-    { category: "vpn" },
+    { kind: "warning", category: "vpn" },
   );
 }
 
-/**
- * Fired after a successful disconnect. Mainly for when the user triggers
- * disconnect from a device's Connect tab and immediately navigates away.
- * `uptimeLabel` (pre-formatted by vpn-manager, e.g. "2h 14m") differentiates
- * a real teardown from a leftover-service cleanup so the toast is meaningful.
- */
 export function notifyVpnDisconnected(
   deviceName?: string,
   uptimeLabel?: string | null,
@@ -113,65 +110,50 @@ export function notifyVpnDisconnected(
   show(
     "VPN Disconnected",
     `${target}${suffix}.`,
-    { silent: true, category: "vpn" },
+    { kind: "info", category: "vpn" },
   );
 }
 
 /** Used when the bridge surfaces a structured failure rather than a
- *  successful state transition. Kept distinct so the UX can pick a
- *  louder presentation later (icon, action button to open logs). */
+ *  successful state transition. */
 export function notifyVpnError(message: string) {
-  show("VPN Error", message, { category: "vpn" });
+  show("VPN Error", message, { kind: "error", category: "vpn", autoDismissMs: 9_000 });
 }
 
 // ─── USB ────────────────────────────────────────────────────────────────────
 
-/**
- * Fired after `usbip attach` returns success.
- *
- * `label` is the human-readable form the renderer assembles from
- * `vendorName + productName` (or whatever it has — sometimes only the
- * raw VID:PID is available). `busId` is the dotted/dashed Linux bus
- * ID used as a fallback when `label` is missing or empty.
- */
 export function notifyUsbAttached(label: string | null, busId: string) {
   const subject = label && label.trim() ? label.trim() : `USB ${busId}`;
   show("USB Attached", `${subject} is now mounted on this machine.`, {
+    kind: "success",
     category: "usb",
   });
 }
 
-/**
- * Fired after `usbip detach` returns success. Silent: detach is
- * almost always user-initiated, so the toast is informational and
- * doesn't need to interrupt.
- */
 export function notifyUsbDetached(label: string | null, busId: string) {
   const subject = label && label.trim() ? label.trim() : `USB ${busId}`;
   show("USB Detached", `${subject} was unmounted.`, {
-    silent: true,
+    kind: "info",
     category: "usb",
   });
 }
 
 // ─── Device lifecycle ───────────────────────────────────────────────────────
 
-/**
- * Fired when a device the tray is tracking transitions to ONLINE — most
- * commonly the first heartbeat after the user finishes the pairing
- * dialog in the dashboard. Edge-triggered by `DeviceListManager` so
- * already-online devices don't bark on every app start.
- */
 export function notifyDeviceReady(deviceName: string | null | undefined) {
   const subject = deviceName && deviceName.trim() ? deviceName.trim() : "Device";
   show(`${subject} connected`, `${subject} is online and ready to use.`, {
+    kind: "success",
     category: "deviceReady",
   });
 }
 
-/** True when the platform supports notifications and the constructor
- *  worked. Exposed for diagnostics so the renderer can decide whether
- *  to fall back to in-app toasts. */
+/**
+ * True when the toast surface can render. Always true under the in-app
+ * overlay (no platform-dependent feature detection needed). Kept for
+ * IPC contract stability — the renderer used to read this to fall back
+ * on in-panel toasts; with the overlay the fallback is moot.
+ */
 export function notificationsSupported(): boolean {
-  return SUPPORTED;
+  return true;
 }

@@ -4,7 +4,6 @@ import {
   BrowserWindow,
   shell,
   Menu,
-  Notification,
   Tray,
   nativeTheme,
 } from "electron";
@@ -57,6 +56,7 @@ import {
 } from "./preferences-manager";
 import { NotificationStreamManager } from "./notification-stream-manager";
 import { notifyDeviceReady } from "./notifications";
+import { destroyToastOverlay, onToastAction, pushToast } from "./toast-overlay";
 import {
   USB_SESSION_FILENAME,
   addSession as addUsbSessionEntry,
@@ -826,18 +826,24 @@ function showDriverInstallWindow(): void {
 }
 
 function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
-  if (!Notification.isSupported()) return;
   if (!isNotificationEnabled("firstBoot")) return;
-  const note = new Notification({
+  // Route through the Liquid Glass toast overlay so the visual language
+  // matches the rest of the app. A CTA opens the setup URL just like
+  // the old native-notification click handler did.
+  pushToast({
+    kind: "info",
     title: "rud1 device ready to configure",
-    body: `A first-boot device is on the LAN at ${probe.host}. Click to open the setup wizard.`,
-    silent: false,
+    body: `A first-boot device is on the LAN at ${probe.host}. Open the setup wizard to claim it.`,
+    autoDismissMs: 12_000,
+    action: { label: "Open wizard", channel: "first-boot:open-wizard:" + probe.host },
   });
-  note.on("click", () => {
+  // Per-probe handler — registered each time so the URL the user clicks
+  // matches the probe that fired the toast.
+  const off = onToastAction("first-boot:open-wizard:" + probe.host, () => {
     void shell.openExternal(probe.setupUrl);
     mainWindow?.show();
+    off();
   });
-  note.show();
 }
 
 app.whenReady().then(() => {
@@ -1017,6 +1023,7 @@ app.on("before-quit", (event) => {
   deviceListManager?.stop();
   notificationStream?.stop();
   tray?.destroy();
+  destroyToastOverlay();
 
   // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
   // timeouts so this can't hang indefinitely.

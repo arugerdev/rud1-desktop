@@ -1,8 +1,9 @@
 // SSE persistente; reconnect 1→2→4…60s; 401 backs off duro 60s.
-import { Notification, net } from "electron";
+import { net } from "electron";
 
 import { isNotificationEnabled } from "./preferences-manager";
 import { SseParser, type SseEvent } from "./sse-parser";
+import { onToastAction, pushToast, type ToastKind } from "./toast-overlay";
 
 const STREAM_PATH = "/api/v1/notifications/stream";
 const INITIAL_RECONNECT_MS = 1_000;
@@ -186,7 +187,6 @@ export class NotificationStreamManager {
       this.dedupeIds = new Set();
     }
 
-    if (!Notification.isSupported()) return;
     // `cloud` category isn't tracked by the local preferences-manager
     // (which only knows about firstBoot/vpn/usb local lifecycle
     // events). Honour the explicit local-side opt-outs by mapping
@@ -197,17 +197,40 @@ export class NotificationStreamManager {
       return;
     }
 
-    const notif = new Notification({
+    const linkAbsolute = parsed.link
+      ? (parsed.link.startsWith("http") ? parsed.link : `${this.deps.baseUrl}${parsed.link}`)
+      : null;
+
+    const action = linkAbsolute
+      ? { label: "Open", channel: `cloud-notif:open:${parsed.id}` }
+      : undefined;
+
+    pushToast({
+      kind: kindForCategory(parsed.category),
       title: parsed.title,
       body: parsed.body ?? "",
-      silent: parsed.category === "system",
+      autoDismissMs: parsed.category === "alert" || parsed.category === "security" ? 9_000 : 6_000,
+      action,
     });
-    if (parsed.link) {
-      const linkAbsolute = parsed.link.startsWith("http")
-        ? parsed.link
-        : `${this.deps.baseUrl}${parsed.link}`;
-      notif.on("click", () => this.deps.onNotificationClick(linkAbsolute));
+
+    if (action && linkAbsolute) {
+      const off = onToastAction(action.channel, () => {
+        this.deps.onNotificationClick(linkAbsolute);
+        off();
+      });
     }
-    notif.show();
+  }
+}
+
+function kindForCategory(category: CloudNotification["category"]): ToastKind {
+  switch (category) {
+    case "alert":
+    case "security":
+      return "error";
+    case "organization":
+      return "info";
+    case "system":
+    default:
+      return "info";
   }
 }
