@@ -175,6 +175,11 @@ export async function ensureTapDriverInstalled(): Promise<void> {
     );
   }
   await runElevatedSilentInstaller(tapInstaller);
+  // The NSIS installer auto-creates one default TAP adapter named
+  // something like "Ethernet N" (description "TAP-Windows Adapter V9").
+  // We don't want that — we want exactly one named "rud1-tap". Clean up
+  // any TAP adapters that aren't ours BEFORE creating the rud1-tap one.
+  await cleanupStrayTapAdapters();
 
   const inf = tapWindowsInfPath();
   // PowerShell's Start-Process with -Verb RunAs is the only way to
@@ -253,7 +258,108 @@ export async function ensureTapDriverInstalled(): Promise<void> {
           : "Re-run the rud1 installer to repopulate the bundled driver."),
     );
   }
+
+  // Rename the adapter's description so TIA Portal, Codesys, and other
+  // engineering tools list it as "rud1" in their PG/PC interface
+  // dropdowns instead of the generic "TAP-Windows Adapter V9". The
+  // adapter alias (Get-NetAdapter -Name) is already "rud1-tap" — this
+  // tweak only touches the InterfaceDescription / DriverDesc that
+  // Siemens & friends enumerate against.
+  await renameRud1TapAdapterDescription("rud1");
+
   await writeTapMarker();
+}
+
+/**
+ * Delete every TAP-Windows V9 adapter on the host EXCEPT the one named
+ * "rud1-tap". This runs right after the tap-windows NSIS installer (which
+ * unconditionally creates a default adapter, "Ethernet N") and on every
+ * driver-install retry so leftovers from earlier rud1-desktop test
+ * builds don't accumulate. Safe to call when no TAP adapters exist
+ * (no-op). Requires admin — the rud1-desktop NSIS manifest is already
+ * `requireAdministrator`.
+ */
+async function cleanupStrayTapAdapters(): Promise<void> {
+  if (process.platform !== "win32") return;
+  // List adapters matching the TAP-Windows V9 description that aren't
+  // named rud1-tap, then delete each via `tapctl delete <name>`. The
+  // adapter NAME (alias) is what tapctl uses — not the InterfaceGuid.
+  const tapctl = tapctlPath();
+  if (!tapctl) return;
+  const psCmd = [
+    "$ErrorActionPreference = 'SilentlyContinue';",
+    "$strays = Get-NetAdapter -IncludeHidden | " +
+      "Where-Object { $_.InterfaceDescription -match '^TAP-Windows Adapter V9' " +
+      "  -and $_.Name -ne 'rud1-tap' };",
+    "foreach ($a in $strays) {",
+    `  & '${tapctl.replace(/'/g, "''")}' delete $a.Name | Out-Null`,
+    "}",
+    "exit 0",
+  ].join(" ");
+  try {
+    await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+      { timeout: 30_000, windowsHide: true },
+    );
+  } catch (err) {
+    // Best-effort. A stray adapter is cosmetic, not blocking — log and
+    // continue so the rest of the install proceeds.
+    console.warn(
+      "openvpn-installer: cleanup of stray TAP adapters failed (non-fatal):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * Overwrite the rud1-tap adapter's `DriverDesc` registry value so its
+ * InterfaceDescription becomes the chosen string instead of the stock
+ * "TAP-Windows Adapter V9 #N". TIA Portal, Codesys, SinaProg, and the
+ * "Set PG/PC Interface" applet all enumerate by that description, so
+ * after this the dropdown shows "rud1" — a much friendlier identifier
+ * than the generic vendor name + index suffix.
+ *
+ * The DriverDesc value lives at
+ *   HKLM\SYSTEM\CurrentControlSet\Control\Class\
+ *     {4D36E972-E325-11CE-BFC1-08002BE10318}\<NNNN>
+ * where <NNNN> is the four-digit class instance index. We locate the
+ * right subkey by matching NetCfgInstanceId against rud1-tap's GUID
+ * (from Get-NetAdapter), then `Set-ItemProperty` the new DriverDesc.
+ *
+ * Non-fatal on failure: the VPN still works with the old name, the
+ * dropdown just stays ugly. Logged and ignored.
+ */
+async function renameRud1TapAdapterDescription(newDesc: string): Promise<void> {
+  if (process.platform !== "win32") return;
+  const safe = newDesc.replace(/'/g, "''");
+  const psCmd = [
+    "$ErrorActionPreference = 'Stop';",
+    "$adapter = Get-NetAdapter -Name 'rud1-tap' -ErrorAction Stop;",
+    "$guid = $adapter.InterfaceGuid;",
+    "$classRoot = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}';",
+    "$match = Get-ChildItem $classRoot | Where-Object {",
+    "  try { (Get-ItemProperty $_.PsPath -Name NetCfgInstanceId -ErrorAction Stop).NetCfgInstanceId -eq $guid } catch { $false }",
+    "} | Select-Object -First 1;",
+    "if (-not $match) { exit 3 }",
+    `Set-ItemProperty -Path $match.PsPath -Name 'DriverDesc' -Value '${safe}' -Force;`,
+    // Restart the adapter so PnP picks up the new description. Without
+    // this, Get-NetAdapter still shows the old string until next boot.
+    "Restart-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction SilentlyContinue;",
+    "exit 0",
+  ].join(" ");
+  try {
+    await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+      { timeout: 15_000, windowsHide: true },
+    );
+  } catch (err) {
+    console.warn(
+      "openvpn-installer: rename of rud1-tap description failed (non-fatal):",
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 /**
