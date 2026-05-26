@@ -82,6 +82,13 @@ async function probeTapDriverWindows(): Promise<{
   error: string | null;
 }> {
   if (process.platform !== "win32") return { installed: true, error: null };
+  // Two-stage probe: live adapter first (cheap), then the Windows driver
+  // store. The store probe catches the "driver installed but no adapter
+  // instance" case — a user who deleted the rud1-tap from Device Manager
+  // leaves the driver registered; we don't want to re-run the bundled
+  // installer in that case (it tends to error with the opaque "An error
+  // occurred installing the TAP device driver" dialog when the driver is
+  // already in the store), we just need `tapctl create`.
   try {
     const { stdout } = await execFileAsync(
       "powershell.exe",
@@ -89,17 +96,46 @@ async function probeTapDriverWindows(): Promise<{
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        // -ErrorAction SilentlyContinue keeps an empty pipeline from
-        // exiting non-zero when there are no matches; we rely on the
-        // stdout text being empty in that case.
         "Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | " +
           "Where-Object { $_.InterfaceDescription -match 'TAP-Windows Adapter V9' } | " +
           "Select-Object -First 1 | ConvertTo-Json -Compress",
       ],
       { timeout: 10_000, windowsHide: true, maxBuffer: 512 * 1024 },
     );
-    const trimmed = (stdout || "").trim();
-    return { installed: trimmed.length > 0, error: null };
+    if ((stdout || "").trim().length > 0) {
+      return { installed: true, error: null };
+    }
+  } catch {
+    /* fall through to the driver-store probe */
+  }
+  return probeTapDriverInDriverStore();
+}
+
+/**
+ * Look up the TAP-Windows V9 driver in the Windows third-party driver
+ * store via `pnputil /enum-drivers`. Match by published name suffix
+ * (`tap0901.inf`) AND by signer subject ("OpenVPN Technologies, Inc."
+ * or "OpenVPN Inc.") so a locale-translated pnputil header (Spanish:
+ * "Nombre del proveedor") doesn't false-negative.
+ *
+ * Returns `installed: true` when the driver is registered in the store
+ * even if no adapter instance exists right now — that's the failure
+ * mode we want to detect (driver present, adapter deleted manually).
+ */
+async function probeTapDriverInDriverStore(): Promise<{
+  installed: boolean;
+  error: string | null;
+}> {
+  try {
+    const { stdout } = await execFileAsync(
+      "pnputil.exe",
+      ["/enum-drivers"],
+      { timeout: 15_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+    );
+    const installed =
+      /tap0901\.inf/i.test(stdout) ||
+      /OpenVPN\s+Technologies,?\s*Inc/i.test(stdout);
+    return { installed, error: null };
   } catch (err) {
     return {
       installed: false,
@@ -219,29 +255,54 @@ export async function ensureTapDriverInstalled(): Promise<void> {
     );
   }
 
-  // Step 1: install the TAP-Windows V9 kernel driver on the host BEFORE
-  // calling tapctl. OpenVPN 2.6.x dropped the bundled driver from its
-  // MSI's administrative install, so the .inf/.cat/.sys live exclusively
-  // inside the standalone tap-windows-9.21.2.exe NSIS installer (signed
-  // by OpenVPN Technologies, Inc.). We run it silently with the `/S` flag
-  // and elevation; the installer is idempotent so re-runs on an already-
-  // installed host are a no-op (~1 s).
-  const tapInstaller = tapWindowsInstallerPath();
-  if (!tapInstaller) {
-    throw new Error(
-      "Bundled tap-windows-installer.exe is missing — run " +
-        "`npm run fetch:openvpn-win` to repopulate " +
-        "resources/win32/openvpn/driver/.",
-    );
+  // Step 1: ensure the TAP-Windows V9 kernel driver is in the Windows
+  // driver store. We skip the bundled NSIS installer when the driver is
+  // already registered — running it against an already-installed driver
+  // tends to bail with the opaque "An error occurred installing the TAP
+  // device driver" dialog (the installer's silent path treats an existing
+  // .inf in the store as a fatal collision). When the driver is present
+  // but no rud1-tap adapter exists (user deleted it from Device Manager),
+  // `tapctl create` alone is enough to recover.
+  //
+  // OpenVPN 2.6.x dropped the bundled TAP driver from its MSI's
+  // administrative install, so the .inf/.cat/.sys live exclusively inside
+  // the standalone tap-windows-9.21.2.exe NSIS installer (signed by
+  // OpenVPN Technologies, Inc.). When we DO need it, we run it silently
+  // with `/S` and elevation.
+  const driverProbe = await probeTapDriverInDriverStore();
+  if (!driverProbe.installed) {
+    const tapInstaller = tapWindowsInstallerPath();
+    if (!tapInstaller) {
+      throw new Error(
+        "Bundled tap-windows-installer.exe is missing — run " +
+          "`npm run fetch:openvpn-win` to repopulate " +
+          "resources/win32/openvpn/driver/.",
+      );
+    }
+    try {
+      await runElevatedSilentInstaller(tapInstaller);
+    } catch (err) {
+      // The NSIS installer occasionally surfaces "An error occurred
+      // installing the TAP device driver" even when the driver IS in the
+      // store on exit — typically when a partial prior install left
+      // residue. Re-probe; if the driver is now registered we forge ahead
+      // to `tapctl create` instead of bailing on the operator.
+      const postProbe = await probeTapDriverInDriverStore();
+      if (!postProbe.installed) throw err;
+      console.warn(
+        "openvpn-installer: installer threw but driver is in the store — continuing to tapctl create:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
-  await runElevatedSilentInstaller(tapInstaller);
   // The NSIS installer auto-creates one default TAP adapter named
   // something like "Ethernet N" (description "TAP-Windows Adapter V9").
   // We don't want that — we want exactly one named "rud1-tap". Clean up
   // any TAP adapters that aren't ours BEFORE creating the rud1-tap one.
+  // Safe to call even when we skipped the installer (no-op if there are
+  // no strays).
   await cleanupStrayTapAdapters();
 
-  const inf = tapWindowsInfPath();
   // PowerShell's Start-Process with -Verb RunAs is the only way to
   // trigger UAC for a non-admin parent. We're already
   // `requireAdministrator` per the NSIS manifest, so this is belt-and-
@@ -313,9 +374,8 @@ export async function ensureTapDriverInstalled(): Promise<void> {
     }
     throw new Error(
       `TAP driver install via tapctl failed (${msg}). ` +
-        (inf
-          ? `Manual fallback: right-click '${inf}' and choose Install.`
-          : "Re-run the rud1 installer to repopulate the bundled driver."),
+        "Open Device Manager → Network adapters and verify the " +
+        "TAP-Windows V9 driver is listed; if not, re-run the rud1 installer.",
     );
   }
 
