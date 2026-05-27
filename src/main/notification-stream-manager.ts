@@ -205,19 +205,25 @@ export class NotificationStreamManager {
       ? { label: "Open", channel: `cloud-notif:open:${parsed.id}` }
       : undefined;
 
+    const autoDismissMs =
+      parsed.category === "alert" || parsed.category === "security" ? 9_000 : 6_000;
     pushToast({
       kind: kindForCategory(parsed.category),
       title: parsed.title,
       body: parsed.body ?? "",
-      autoDismissMs: parsed.category === "alert" || parsed.category === "security" ? 9_000 : 6_000,
+      autoDismissMs,
       action,
     });
 
     if (action && linkAbsolute) {
-      const off = onToastAction(action.channel, () => {
-        this.deps.onNotificationClick(linkAbsolute);
-        off();
-      });
+      const off = onToastAction(
+        action.channel,
+        () => {
+          this.deps.onNotificationClick(linkAbsolute);
+          off();
+        },
+        { ttlMs: autoDismissMs + 1_000 },
+      );
     }
   }
 }

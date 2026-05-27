@@ -830,20 +830,24 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
   // Route through the Liquid Glass toast overlay so the visual language
   // matches the rest of the app. A CTA opens the setup URL just like
   // the old native-notification click handler did.
+  const channel = "first-boot:open-wizard:" + probe.host;
+  const autoDismissMs = 12_000;
   pushToast({
     kind: "info",
     title: "rud1 device ready to configure",
     body: `A first-boot device is on the LAN at ${probe.host}. Open the setup wizard to claim it.`,
-    autoDismissMs: 12_000,
-    action: { label: "Open wizard", channel: "first-boot:open-wizard:" + probe.host },
+    autoDismissMs,
+    action: { label: "Open wizard", channel },
   });
-  // Per-probe handler — registered each time so the URL the user clicks
-  // matches the probe that fired the toast.
-  const off = onToastAction("first-boot:open-wizard:" + probe.host, () => {
-    void shell.openExternal(probe.setupUrl);
-    mainWindow?.show();
-    off();
-  });
+  const off = onToastAction(
+    channel,
+    () => {
+      void shell.openExternal(probe.setupUrl);
+      mainWindow?.show();
+      off();
+    },
+    { ttlMs: autoDismissMs + 1_000 },
+  );
 }
 
 app.whenReady().then(() => {

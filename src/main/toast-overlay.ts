@@ -252,16 +252,25 @@ export function dismissToast(id: string): void {
 }
 
 /**
- * Subscribe to CTA-button clicks on a specific action channel. Used by
- * the IPC layer to wire e.g. "Open driver install modal" → the main-
- * process function that creates the BrowserWindow. Returns an
- * unsubscribe function for symmetric teardown.
+ * Subscribe to CTA-button clicks on a specific action channel. Returns
+ * an unsubscribe function. Pass `ttlMs` so the registration self-expires
+ * when the toast auto-dismisses — otherwise the handler leaks because
+ * the renderer only signals user-driven dismiss, not the dwell timeout.
  */
-export function onToastAction(channel: string, handler: (id: string) => void): () => void {
+export function onToastAction(
+  channel: string,
+  handler: (id: string) => void,
+  opts?: { ttlMs?: number },
+): () => void {
   actionHandlers.set(channel, handler);
-  return () => {
+  const cleanup = () => {
     if (actionHandlers.get(channel) === handler) actionHandlers.delete(channel);
   };
+  if (opts?.ttlMs && opts.ttlMs > 0) {
+    const t = setTimeout(cleanup, opts.ttlMs);
+    if (typeof t.unref === "function") t.unref();
+  }
+  return cleanup;
 }
 
 /**
@@ -287,6 +296,12 @@ export function isToastOverlayActive(): boolean {
 
 // Type-only export so consumers don't have to import from -html.
 export type { ToastOverlayHtmlOpts } from "./toast-overlay-html";
+
+export const __test = {
+  actionHandlerCount: () => actionHandlers.size,
+  hasActionHandler: (channel: string) => actionHandlers.has(channel),
+  clearActionHandlers: () => actionHandlers.clear(),
+};
 
 // Silence unused-import lint when app isn't referenced — kept for future
 // `app.whenReady()` gating in case we want to wait before init.
