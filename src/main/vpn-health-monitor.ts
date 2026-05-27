@@ -43,8 +43,6 @@ export function shouldReconnect(input: ShouldReconnectInput): boolean {
 
   if (input.reconnectInFlight) return false;
 
-  if (input.snapshot.kind === "no-tunnel") return false;
-
   if (input.lastReconnectAt > 0) {
     const sinceReconnect = input.now - input.lastReconnectAt;
     if (sinceReconnect < grace) return false;
@@ -61,6 +59,12 @@ export function shouldReconnect(input: ShouldReconnectInput): boolean {
   if (input.snapshot.kind === "no-handshake-yet") {
     // Conservative: nunca reconectar sin un previous reconnect que ancle el cómputo.
     if (input.lastReconnectAt === 0) return false;
+    return true;
+  }
+  if (input.snapshot.kind === "no-tunnel") {
+    // openvpn process died after a successful connect. The monitor is armed by
+    // vpnConnect and stopped by explicit vpnDisconnect, so reaching here while
+    // armed implies an unintended drop — auto-recover via cached config.
     return true;
   }
   return false;

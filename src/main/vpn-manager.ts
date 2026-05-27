@@ -555,10 +555,12 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
     });
   }
   proc.on("exit", () => {
-    // Whoever is observing `running` will see null on the next status
-    // call. We also drop the cached config so a subsequent connect
-    // re-reads from APPDATA.
-    if (running === live) running = null;
+    // Record the disconnect timestamp so vpnStatus() reports an accurate
+    // "Last disconnected at" instead of a stale value from a prior session.
+    if (running === live) {
+      running = null;
+      lastDisconnectedAt = Date.now();
+    }
   });
   return live;
 }

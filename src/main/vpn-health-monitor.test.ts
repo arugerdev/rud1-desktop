@@ -81,13 +81,36 @@ describe("shouldReconnect FSM", () => {
     ).toBe(false);
   });
 
-  it("never reconnects when no tunnel is up", () => {
+  it("reconnects immediately when no tunnel is up and there is no prior anchor", () => {
+    // The monitor is only armed by a successful connect and stopped by an
+    // explicit disconnect, so a "no-tunnel" tick means openvpn died after
+    // connecting — auto-recover.
     expect(
       shouldReconnect({
         ...baseInput,
         snapshot: { kind: "no-tunnel" },
       }),
+    ).toBe(true);
+  });
+
+  it("does NOT reconnect on no-tunnel while still inside the cooldown window", () => {
+    expect(
+      shouldReconnect({
+        ...baseInput,
+        lastReconnectAt: baseInput.now - 10_000, // 10 s ago, inside 20s cooldown
+        snapshot: { kind: "no-tunnel" },
+      }),
     ).toBe(false);
+  });
+
+  it("reconnects again on no-tunnel once the cooldown has elapsed", () => {
+    expect(
+      shouldReconnect({
+        ...baseInput,
+        lastReconnectAt: baseInput.now - 120_000, // 2 min ago
+        snapshot: { kind: "no-tunnel" },
+      }),
+    ).toBe(true);
   });
 
   it("never reconnects when the handshake is fresh", () => {
