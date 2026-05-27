@@ -34,6 +34,10 @@ import {
   type OpenVpnRuntimeStatus,
 } from "./openvpn-installer";
 import { writeOvpnConfig, defaultOvpnConfigPath } from "./ovpn-config-store";
+import {
+  maybeApplyApipaFallback,
+  parseLanFallbackHint,
+} from "./apipa-fallback";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -819,6 +823,30 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
   });
 
   lastConnectedAt = Date.now();
+
+  // APIPA fallback — fire-and-forget so the connect resolver returns now.
+  void (async () => {
+    try {
+      const hint = parseLanFallbackHint(ovpnConfig);
+      const result = await maybeApplyApipaFallback("rud1-tap", hint);
+      if (result.applied) {
+        console.info(
+          `[vpn] APIPA fallback applied: ${result.finalIp} (reason: ${result.reason})`,
+        );
+      } else if (
+        result.reason !== "dhcp-succeeded" &&
+        result.reason !== "no-hint" &&
+        result.reason !== "non-windows"
+      ) {
+        console.warn(`[vpn] APIPA fallback skipped: ${result.reason}`);
+      }
+    } catch (err) {
+      console.warn(
+        "[vpn] APIPA fallback errored (non-fatal):",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  })();
 }
 
 export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
