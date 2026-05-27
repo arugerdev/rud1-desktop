@@ -206,9 +206,9 @@ export class VpnHealthMonitor {
     try {
       snapshot = await this.deps.fetchSnapshot();
     } catch {
-      // A failed `wg show` (binary missing, permission flap) shouldn't
-      // panic the loop — the next tick retries.
-      this.lastDiagnostic = "wg show falló (¿permisos?)";
+      // Snapshot read failed (mgmt socket gone, openvpn not responding).
+      // The next tick retries.
+      this.lastDiagnostic = "No se pudo leer el estado del túnel";
       return;
     }
 
@@ -257,7 +257,7 @@ export class VpnHealthMonitor {
       // firewall) still needs to count as a failure so the ladder
       // stretches.
       this.consecutiveFailures = attempt;
-      this.lastDiagnostic = `Tunel re-instalado (intento ${attempt}); esperando handshake`;
+      this.lastDiagnostic = `Túnel re-instalado (intento ${attempt}); esperando handshake`;
     } catch (err) {
       this.consecutiveFailures = attempt;
       const reason = err instanceof Error ? err.message : "error desconocido";
