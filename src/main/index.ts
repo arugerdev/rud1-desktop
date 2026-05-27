@@ -1028,6 +1028,15 @@ app.on("before-quit", (event) => {
   // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
   // timeouts so this can't hang indefinitely.
   void (async () => {
+    // Detach USB sessions FIRST while the tunnel still routes — the vpn:disconnect
+    // IPC handler does this too, but before-quit calls vpnDisconnect() directly
+    // and would otherwise leave an orphan VHCI port + bound device on the Pi.
+    try {
+      const { usbDetachAll } = await import("./usb-manager");
+      await usbDetachAll();
+    } catch (err) {
+      console.warn("[lifecycle] usbDetachAll on quit failed:", err);
+    }
     try {
       const { vpnDisconnect } = await import("./vpn-manager");
       await vpnDisconnect();
