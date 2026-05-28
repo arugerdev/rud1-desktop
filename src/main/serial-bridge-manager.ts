@@ -761,18 +761,43 @@ function waitForReady(proc: ChildProcess, timeoutMs: number): Promise<{ path: st
       reject(new Error("rud1-bridge spawned without stdout"));
       return;
     }
-    let lastErrLine = "";
+    // Acumulamos TODO el stderr, no solo la última línea. Antes solo
+    // guardábamos `lastErrLine` con `.pop()`, lo cual perdía la línea
+    // del fmt.Fprintf "rud1-bridge: <err>" cuando otra línea posterior
+    // venía vacía. Resultado: error críptico "exited before ready
+    // (code=1)" sin pista de la causa real (típicamente serialport.Open
+    // fallando al abrir CNCBx o el par com0com).
+    const errLines: string[] = [];
     if (proc.stderr) {
-      proc.stderr.on("data", (chunk) => {
-        lastErrLine = chunk.toString().split(/\r?\n/).pop() || lastErrLine;
+      const errRl = readline.createInterface({ input: proc.stderr });
+      errRl.on("line", (line) => {
+        const trimmed = line.trim();
+        if (trimmed.length > 0) errLines.push(trimmed);
       });
     }
+    // Hint humano extraído del stderr crudo. Preferimos la línea
+    // `rud1-bridge: <msg>` (mensaje principal del binary) sobre los
+    // JSON events estructurados — esos son útiles para logging pero
+    // ilegibles en un toast.
+    const humanHint = (): string => {
+      const human = errLines.find((l) => l.startsWith("rud1-bridge:"));
+      if (human) return human;
+      const event = errLines.find((l) => l.includes('"error"'));
+      if (event) {
+        try {
+          const j = JSON.parse(event) as { error?: string; event?: string };
+          if (j.error) return `${j.event ?? "bridge.error"}: ${j.error}`;
+        } catch { /* ignore */ }
+      }
+      return errLines[errLines.length - 1] ?? "";
+    };
     const rl = readline.createInterface({ input: proc.stdout });
     const timer = setTimeout(() => {
       rl.close();
+      const hint = humanHint();
       reject(new Error(
         `rud1-bridge did not bind endpoint within ${timeoutMs}ms` +
-        (lastErrLine ? ` (stderr: ${lastErrLine})` : ""),
+        (hint ? ` (stderr: ${hint})` : ""),
       ));
     }, timeoutMs);
     rl.on("line", (line) => {
@@ -795,10 +820,16 @@ function waitForReady(proc: ChildProcess, timeoutMs: number): Promise<{ path: st
     proc.once("exit", (code) => {
       clearTimeout(timer);
       rl.close();
-      reject(new Error(
-        `rud1-bridge exited before ready (code=${code})` +
-        (lastErrLine ? `: ${lastErrLine}` : ""),
-      ));
+      // Dame al menos un microtick para que las últimas líneas de
+      // stderr lleguen — Node procesa exit y stderr en pipelines
+      // separados y el 'exit' puede ganar la carrera.
+      setImmediate(() => {
+        const hint = humanHint();
+        reject(new Error(
+          `rud1-bridge exited before ready (code=${code})` +
+          (hint ? `: ${hint}` : ""),
+        ));
+      });
     });
   });
 }
