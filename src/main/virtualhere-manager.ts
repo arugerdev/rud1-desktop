@@ -1,54 +1,39 @@
-// VirtualHere headless client orchestrator. Spawns vhclient.exe (or the
-// equivalent binary on macOS/Linux) en background sin ventana ni tray,
-// le envía comandos via -t "<cmd>" y parsea la salida estructurada.
+// VirtualHere headless orchestrator. Una sola instancia de vhui64.exe
+// corre en background (windowsHide: true) y expone un named pipe local
+// (\\.\pipe\vhclient en Windows, /tmp/vhclient en POSIX). Mandamos
+// comandos por ese pipe — NUNCA via -t porque cada spawn -t levanta una
+// instancia GUI que muestra modal "Aceptar".
 //
-// Comandos relevantes (https://www.virtualhere.com/client_command_line):
-//   - LIST              → lista hubs descubiertos y devices
-//   - USE,<address>      → attach (Windows monta vía WinUSB/usbser.sys)
-//   - STOP USING,<addr>  → detach
-//   - MANUAL HUB ADD,<host>:<port>  → fuerza descubrimiento de un server
+// Comandos relevantes (https://www.virtualhere.com/client_api):
+//   - LIST              → hubs descubiertos + devices
+//   - USE,<address>     → attach
+//   - STOP USING,<addr> → detach
+//   - HELP              → lista de verbos
 //
-// Free tier: 1 device a la vez. La UI bloquea el resto cuando hay uno
-// attached.
+// Free tier: 1 device a la vez. La UI bloquea el resto.
 
-import { execFile, spawn, ChildProcess } from "child_process";
-import { promisify } from "util";
+import { spawn, ChildProcess } from "child_process";
+import net from "net";
 
 import { virtualHereClientPath } from "./binary-helper";
+import {
+  parseListOutput,
+  type VirtualHereDevice,
+  type VirtualHereHub,
+} from "./virtualhere-parser";
 
-const execFileAsync = promisify(execFile);
+export type { VirtualHereDevice, VirtualHereHub };
 
-export interface VirtualHereDevice {
-  /** Dirección estable `<vendorId>:<productId>:<serial?>` o el address
-   *  raw que VirtualHere expone (formato `<hubName>.<port>`). */
-  address: string;
-  vendorId: string;
-  productId: string;
-  serial?: string;
-  productName?: string;
-  vendorName?: string;
-  inUse: boolean;
-  /** True cuando ESTE cliente lo tiene attached. */
-  inUseByThisClient: boolean;
-}
+const PIPE_PATH =
+  process.platform === "win32" ? "\\\\.\\pipe\\vhclient" : "/tmp/vhclient";
 
-export interface VirtualHereHub {
-  /** Nombre arbitrario de servidor publicado por vhusbd (config ServerName). */
-  serverName: string;
-  /** host:port donde el server escucha. */
-  endpoint: string;
-  devices: VirtualHereDevice[];
-}
+const PIPE_TIMEOUT_MS = 5_000;
 
 export interface VirtualHereStatus {
-  /** True cuando el binary está bundled. */
   binaryAvailable: boolean;
-  /** True cuando el proceso del client está corriendo en background. */
   daemonRunning: boolean;
   hubs: VirtualHereHub[];
-  /** Devices attached por este cliente; en free tier siempre length ≤ 1. */
   attached: VirtualHereDevice[];
-  /** Cuántos devices simultáneos permite la licencia. Free = 1. */
   maxSimultaneousDevices: number;
 }
 
@@ -56,16 +41,14 @@ export interface VirtualHereStatus {
 
 let daemon: ChildProcess | null = null;
 
-/**
- * Arranca el client en background. VirtualHere client en modo daemon
- * autodescubre hubs por broadcast UDP + persiste IPC para los comandos
- * -t "<cmd>". Llamar una vez al boot de rud1-desktop; idempotente.
- */
 export function startVirtualHereDaemon(): { ok: boolean; error?: string } {
   if (daemon && !daemon.killed) return { ok: true };
   const binary = virtualHereClientPath();
   if (!binary) {
-    return { ok: false, error: "vhclient binary missing — run fetch:virtualhere-win during build." };
+    return {
+      ok: false,
+      error: "vhclient binary missing — run fetch:virtualhere-win during build.",
+    };
   }
   try {
     daemon = spawn(binary, [], {
@@ -97,99 +80,90 @@ export function isVirtualHereDaemonRunning(): boolean {
   return daemon !== null && !daemon.killed;
 }
 
-// ─── Command execution ────────────────────────────────────────────────
-
-async function runCommand(cmd: string): Promise<string> {
-  const binary = virtualHereClientPath();
-  if (!binary) {
-    throw new Error("vhclient binary missing");
-  }
-  const { stdout, stderr } = await execFileAsync(binary, ["-t", cmd], {
-    windowsHide: true,
-    timeout: 10_000,
-    maxBuffer: 1_048_576,
-  });
-  if (stderr && stderr.trim().length > 0 && !stdout) {
-    throw new Error(stderr.trim());
-  }
-  return stdout;
-}
-
-// ─── LIST parser ─────────────────────────────────────────────────────
+// ─── Named pipe IPC ──────────────────────────────────────────────────
 
 /**
- * Parsea la salida de `vhclient -t LIST`. Formato típico:
+ * Manda un comando al daemon vía named pipe. El protocolo VirtualHere es
+ * petición + respuesta en un único stream: escribimos `<verbo>[,arg]\n`,
+ * leemos hasta que el server cierra el lado escritura.
  *
- *   VirtualHere Client (v5.6.5)
- *   ServerHub.local (192.168.1.10:7575)
- *     --> Arduino Uno (vendor 0x2a03 product 0x0043)
- *
- * VirtualHere no documenta un schema estricto y el formato cambia entre
- * versiones; el parser es defensivo y omite líneas que no matchea.
+ * Reintenta hasta 5s si el daemon aún no levantó el pipe (típico tras
+ * spawn del proceso). Devuelve string crudo — el caller parsea según
+ * el comando.
  */
-export function parseListOutput(out: string): VirtualHereHub[] {
-  const hubs: VirtualHereHub[] = [];
-  let current: VirtualHereHub | null = null;
-
-  for (const raw of out.split(/\r?\n/)) {
-    const line = raw.trimEnd();
-    if (!line) continue;
-    // Hub heading: `<name> (<host>:<port>)`
-    const hubMatch = line.match(/^([^\s].*?)\s*\(([^)]+:\d+)\)\s*$/);
-    if (hubMatch && !line.includes("vendor")) {
-      current = {
-        serverName: hubMatch[1]!.trim(),
-        endpoint: hubMatch[2]!,
-        devices: [],
-      };
-      hubs.push(current);
-      continue;
-    }
-    if (!current) continue;
-    // Device line: `--> <name> (vendor 0xVVVV product 0xPPPP[ serial=...])`
-    const devMatch = line.match(
-      /^\s*-+>\s*(.+?)\s*\(vendor\s+0x([0-9a-fA-F]+)\s+product\s+0x([0-9a-fA-F]+)(?:\s+serial=([^)]*))?\)(.*)$/,
-    );
-    if (devMatch) {
-      const tail = devMatch[5] || "";
-      const inUse = /\bin-use\b/i.test(tail) || /\bin use\b/i.test(tail);
-      const inUseByThisClient = /by you/i.test(tail);
-      current.devices.push({
-        address: `${current.serverName}.${current.devices.length + 1}`,
-        vendorId: devMatch[2]!.toLowerCase().padStart(4, "0"),
-        productId: devMatch[3]!.toLowerCase().padStart(4, "0"),
-        serial: devMatch[4]?.trim() || undefined,
-        productName: devMatch[1]!.trim() || undefined,
-        inUse,
-        inUseByThisClient,
-      });
-      continue;
+async function sendPipeCommand(cmd: string): Promise<string> {
+  const deadline = Date.now() + PIPE_TIMEOUT_MS;
+  let lastErr: Error | null = null;
+  while (Date.now() < deadline) {
+    try {
+      return await sendOnce(cmd);
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      // Pipe aún no existe: esperar 200ms y reintentar.
+      if (lastErr.message.includes("ENOENT") || lastErr.message.includes("does not exist")) {
+        await new Promise((r) => setTimeout(r, 200));
+        continue;
+      }
+      throw lastErr;
     }
   }
-  return hubs;
+  throw lastErr ?? new Error("vhclient pipe timeout");
+}
+
+function sendOnce(cmd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(PIPE_PATH);
+    let buf = "";
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("pipe command timeout"));
+    }, PIPE_TIMEOUT_MS);
+
+    socket.on("connect", () => {
+      socket.write(`${cmd}\n`);
+    });
+    socket.on("data", (chunk) => {
+      buf += chunk.toString("utf8");
+    });
+    socket.on("end", () => {
+      clearTimeout(timer);
+      resolve(buf);
+    });
+    socket.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
 }
 
 export async function listVirtualHere(): Promise<VirtualHereHub[]> {
-  const out = await runCommand("LIST");
+  const out = await sendPipeCommand("LIST");
   return parseListOutput(out);
 }
 
 // ─── USE / STOP USING ────────────────────────────────────────────────
 
-export async function useDevice(address: string): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function useDevice(
+  address: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const out = await runCommand(`USE,${address}`);
-    if (/IN USE BY ANOTHER CLIENT/i.test(out)) {
-      return { ok: false, error: "Device in use by another client" };
+    const out = await sendPipeCommand(`USE,${address}`);
+    const trimmed = out.trim();
+    if (/^OK\b/i.test(trimmed)) return { ok: true };
+    if (/^FAILED\b/i.test(trimmed)) {
+      if (/license/i.test(trimmed) || /max/i.test(trimmed)) {
+        return {
+          ok: false,
+          error: "VirtualHere free license allows 1 device at a time. Disconnect the other one first.",
+        };
+      }
+      if (/in.?use/i.test(trimmed)) {
+        return { ok: false, error: "Device in use by another client" };
+      }
+      return { ok: false, error: trimmed };
     }
-    if (/NO LICENSE AVAILABLE/i.test(out) || /maximum.*reached/i.test(out)) {
-      return {
-        ok: false,
-        error: "VirtualHere free license allows 1 device at a time. Disconnect the other one first.",
-      };
-    }
-    if (/USE failed/i.test(out)) {
-      return { ok: false, error: out.trim() };
+    if (/^ERROR/i.test(trimmed)) {
+      return { ok: false, error: trimmed.replace(/^ERROR:\s*/i, "") };
     }
     return { ok: true };
   } catch (err) {
@@ -197,9 +171,17 @@ export async function useDevice(address: string): Promise<{ ok: true } | { ok: f
   }
 }
 
-export async function stopUsingDevice(address: string): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function stopUsingDevice(
+  address: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    await runCommand(`STOP USING,${address}`);
+    const out = await sendPipeCommand(`STOP USING,${address}`);
+    const trimmed = out.trim();
+    if (/^OK\b/i.test(trimmed) || trimmed.length === 0) return { ok: true };
+    if (/^FAILED\b/i.test(trimmed)) return { ok: false, error: trimmed };
+    if (/^ERROR/i.test(trimmed)) {
+      return { ok: false, error: trimmed.replace(/^ERROR:\s*/i, "") };
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -236,9 +218,7 @@ export async function statusSnapshot(): Promise<VirtualHereStatus> {
     daemonRunning: isVirtualHereDaemonRunning(),
     hubs,
     attached,
-    maxSimultaneousDevices: 1, // free tier
+    maxSimultaneousDevices: 1,
   };
 }
 
-/** Test-only — expone el parser puro. */
-export const __test = { parseListOutput };
