@@ -43,6 +43,7 @@ import {
   statusSnapshot as virtualHereStatus,
   useDevice as virtualHereUse,
   stopUsingDevice as virtualHereStopUsing,
+  debugSnapshot as virtualHereDebug,
 } from "./virtualhere-manager";
 import {
   notifyVpnConnected,
@@ -953,6 +954,19 @@ export function registerIpcHandlers(opts: {
       return { ok: false as const, error: "address required" };
     }
     return virtualHereStopUsing(address);
+  });
+
+  ipcMain.handle("virtualhere:debug", async (event) => {
+    if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
+    try {
+      const result = await virtualHereDebug();
+      return { ok: true as const, result };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   });
 
   ipcMain.handle("net:ping", async (event, host: string) => {

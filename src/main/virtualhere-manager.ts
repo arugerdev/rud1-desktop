@@ -178,6 +178,69 @@ export async function isVirtualHereDaemonRunning(): Promise<boolean> {
   return daemon !== null && !daemon.killed;
 }
 
+// ─── Diagnostic snapshot ─────────────────────────────────────────────
+//
+// Para que el operador pueda compartir el estado completo cuando algo
+// no funciona y no tenemos forma de inspeccionarlo remotamente. Cada
+// campo es independiente: un fallo en pipeRawOutput no impide reportar
+// serviceRunning, etc.
+
+export interface VirtualHereDebug {
+  binaryPath: string | null;
+  binaryExists: boolean;
+  platform: string;
+  serviceInstalled: boolean;
+  serviceRunning: boolean;
+  pipeReachable: boolean;
+  pipeError?: string;
+  pipeRawOutput?: string;
+  parsedHubs: number;
+  parsedDevices: number;
+  serviceQueryRaw?: string;
+}
+
+export async function debugSnapshot(): Promise<VirtualHereDebug> {
+  const binaryPath = virtualHereClientPath();
+  const out: VirtualHereDebug = {
+    binaryPath,
+    binaryExists: Boolean(binaryPath),
+    platform: process.platform,
+    serviceInstalled: false,
+    serviceRunning: false,
+    pipeReachable: false,
+    parsedHubs: 0,
+    parsedDevices: 0,
+  };
+  if (process.platform === "win32") {
+    out.serviceInstalled = await isWindowsServiceInstalled();
+    try {
+      const { stdout } = await execFileAsync("sc.exe", ["query", SERVICE_NAME], {
+        windowsHide: true,
+        timeout: 5_000,
+      });
+      out.serviceQueryRaw = stdout;
+      out.serviceRunning = /STATE\s*:\s*\d+\s+RUNNING/i.test(stdout);
+    } catch (err) {
+      out.serviceQueryRaw = err instanceof Error ? err.message : String(err);
+    }
+  } else {
+    out.serviceRunning = await isVirtualHereDaemonRunning();
+  }
+  // Intentar leer el pipe aunque el servicio diga STOPPED — a veces
+  // hay drift entre sc.exe y la realidad.
+  try {
+    const raw = await sendOnce("LIST");
+    out.pipeReachable = true;
+    out.pipeRawOutput = raw;
+    const hubs = parseListOutput(raw);
+    out.parsedHubs = hubs.length;
+    out.parsedDevices = hubs.reduce((n, h) => n + h.devices.length, 0);
+  } catch (err) {
+    out.pipeError = err instanceof Error ? err.message : String(err);
+  }
+  return out;
+}
+
 // ─── Named pipe IPC ──────────────────────────────────────────────────
 
 /**

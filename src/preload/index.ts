@@ -290,6 +290,30 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("virtualhere:stopUsing", address) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+
+    /** Snapshot diagnóstico para troubleshooting. Devuelve estado del
+     *  binario, servicio Windows y named pipe + el output crudo del
+     *  LIST. Para compartir cuando "Esperando al servidor…" no avanza. */
+    debug: () =>
+      ipcRenderer.invoke("virtualhere:debug") as Promise<
+        | {
+            ok: true;
+            result: {
+              binaryPath: string | null;
+              binaryExists: boolean;
+              platform: string;
+              serviceInstalled: boolean;
+              serviceRunning: boolean;
+              pipeReachable: boolean;
+              pipeError?: string;
+              pipeRawOutput?: string;
+              parsedHubs: number;
+              parsedDevices: number;
+              serviceQueryRaw?: string;
+            };
+          }
+        | { ok: false; error: string }
+      >,
   },
 
   net: {
