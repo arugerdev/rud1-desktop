@@ -53,36 +53,67 @@ export interface VirtualHereStatus {
 // En POSIX el binario sí soporta -n para daemon mode sin UI.
 
 let daemon: ChildProcess | null = null;
+let windowHider: ChildProcess | null = null;
 
-/**
- * Oculta la ventana principal de vhui64.exe usando Win32 ShowWindow.
- * Se llama después de spawn cuando la ventana ya existe (~1.5s típico).
- * Si la ventana no aparece a tiempo, simplemente loguea — no es fatal,
- * el operador podría ver la ventana brevemente.
- */
-async function hideWindowsClientWindow(pid: number): Promise<void> {
-  const psCmd = [
-    "Add-Type -Name win -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(int handle, int state);' -Namespace native -ErrorAction SilentlyContinue;",
-    `$end = (Get-Date).AddSeconds(8);`,
-    `while ((Get-Date) -lt $end) {`,
-    `  $p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue;`,
-    `  if ($p -and $p.MainWindowHandle -ne 0) {`,
-    `    [native.win]::ShowWindow($p.MainWindowHandle.ToInt32(), 0) | Out-Null;`,
-    `    exit 0;`,
-    `  }`,
-    `  Start-Sleep -Milliseconds 200;`,
-    `}`,
-    `exit 1;`,
-  ].join(" ");
+// vhui64.exe abre ventanas en distintos momentos: MainWindow al boot, popup
+// "Trial Edition" cada vez que conecta al server, popups de versión, etc.
+// MainWindowHandle solo da la principal y un single-shot ShowWindow no cubre
+// las que aparecen después. Arrancamos un PowerShell persistente que enumera
+// TODAS las top-level windows del PID cada 800ms y las oculta. Muere solo
+// cuando vhui64 muere — chequea Get-Process en cada iteración.
+function startWindowHider(targetPid: number): void {
+  stopWindowHider();
+  const psScript = `
+$ErrorActionPreference = 'SilentlyContinue';
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class VHHide {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int s);
+  public delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+}
+"@;
+$target = ${targetPid};
+$cb = [VHHide+EnumProc]{
+  param($h, $p)
+  $pid = 0
+  [void][VHHide]::GetWindowThreadProcessId($h, [ref]$pid)
+  if ($pid -eq $target -and [VHHide]::IsWindowVisible($h)) {
+    [void][VHHide]::ShowWindow($h, 0)
+  }
+  return $true
+}
+while ($true) {
+  if (-not (Get-Process -Id $target -ErrorAction SilentlyContinue)) { break }
+  [void][VHHide]::EnumWindows($cb, [IntPtr]::Zero)
+  Start-Sleep -Milliseconds 800
+}
+`.trim();
   try {
-    await execFileAsync(
+    windowHider = spawn(
       "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", psCmd],
-      { windowsHide: true, timeout: 12_000 },
+      ["-NoProfile", "-NonInteractive", "-Command", psScript],
+      { windowsHide: true, stdio: "ignore", detached: false },
     );
+    windowHider.on("exit", () => {
+      windowHider = null;
+    });
+  } catch {
+    windowHider = null;
+  }
+}
+
+function stopWindowHider(): void {
+  if (!windowHider) return;
+  try {
+    windowHider.kill();
   } catch {
     /* best-effort */
   }
+  windowHider = null;
 }
 
 export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: string }> {
@@ -103,10 +134,10 @@ export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: s
     });
     daemon.on("exit", () => {
       daemon = null;
+      stopWindowHider();
     });
     if (process.platform === "win32" && daemon.pid) {
-      // No await — corre en background mientras el resto del boot continúa.
-      void hideWindowsClientWindow(daemon.pid);
+      startWindowHider(daemon.pid);
     }
     return { ok: true };
   } catch (err) {
@@ -116,6 +147,7 @@ export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: s
 }
 
 export async function stopVirtualHereDaemon(): Promise<void> {
+  stopWindowHider();
   if (!daemon) return;
   try {
     daemon.kill();
