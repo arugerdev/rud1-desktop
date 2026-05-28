@@ -853,14 +853,13 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
 
-  // Arranca el cliente headless de VirtualHere en background. Sin
-  // ventana ni tray icon: queda como daemon controlable via comandos
-  // CLI (-t "<cmd>") que los IPC handlers de virtualhere:* invocan.
-  void import("./virtualhere-manager").then((vh) => {
-    const res = vh.startVirtualHereDaemon();
+  // Arranca el daemon de VirtualHere — en Windows lo instala como
+  // servicio (UAC una sola vez al primer arranque), en POSIX usa modo
+  // -n daemon. La interfaz luego se controla por named pipe sin GUI
+  // ni tray icon ni popups de free trial.
+  void import("./virtualhere-manager").then(async (vh) => {
+    const res = await vh.startVirtualHereDaemon();
     if (!res.ok) {
-      // No es fatal — el user verá un mensaje en la UI cuando intente
-      // attach. Si el binary no está bundled tampoco rompemos el boot.
       console.warn("[virtualhere] daemon failed to start:", res.error);
     }
   });
@@ -1044,11 +1043,12 @@ app.on("before-quit", (event) => {
   // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
   // timeouts so this can't hang indefinitely.
   void (async () => {
-    // Stop VirtualHere daemon — los devices attached caen al closing
-    // del proceso. El user lo abrirá de nuevo cuando reabre la app.
+    // En Windows el servicio queda corriendo aunque cerremos la app —
+    // así el user no pierde el attach del USB. En POSIX paramos el
+    // daemon -n que arrancamos.
     try {
       const { stopVirtualHereDaemon } = await import("./virtualhere-manager");
-      stopVirtualHereDaemon();
+      await stopVirtualHereDaemon();
     } catch {
       /* best-effort */
     }

@@ -33,6 +33,25 @@ describe("parseListOutput", () => {
     });
   });
 
+  it("parses device line with (COMx) prefix when attached (real user case)", () => {
+    // El cliente Windows añade "(COMx)" como prefix cuando el device
+    // está attached por este cliente. Reproduce el screenshot real.
+    const out = [
+      "rud1 (rud1-CF0A:7575)",
+      "  --> (COM3) Arduino Uno (rud1-CF0A.114) (In use by you)",
+      "Auto-Find currently on",
+    ].join("\n");
+    const hubs = parseListOutput(out);
+    expect(hubs).toHaveLength(1);
+    expect(hubs[0].devices).toHaveLength(1);
+    expect(hubs[0].devices[0]).toMatchObject({
+      address: "rud1-CF0A.114",
+      productName: "Arduino Uno",
+      inUse: true,
+      inUseByThisClient: true,
+    });
+  });
+
   it("flags in-use devices and by-this-client", () => {
     const out = [
       "myhub (192.168.1.10:7575)",

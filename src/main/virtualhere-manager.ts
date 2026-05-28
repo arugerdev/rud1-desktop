@@ -12,8 +12,9 @@
 //
 // Free tier: 1 device a la vez. La UI bloquea el resto.
 
-import { spawn, ChildProcess } from "child_process";
+import { execFile, spawn, ChildProcess } from "child_process";
 import net from "net";
+import { promisify } from "util";
 
 import { virtualHereClientPath } from "./binary-helper";
 import {
@@ -23,6 +24,9 @@ import {
 } from "./virtualhere-parser";
 
 export type { VirtualHereDevice, VirtualHereHub };
+
+const execFileAsync = promisify(execFile);
+const SERVICE_NAME = "VirtualHereClient";
 
 const PIPE_PATH =
   process.platform === "win32" ? "\\\\.\\pipe\\vhclient" : "/tmp/vhclient";
@@ -38,11 +42,81 @@ export interface VirtualHereStatus {
 }
 
 // ─── Daemon lifecycle ─────────────────────────────────────────────────
+//
+// En Windows el binario vhui64.exe SIEMPRE levanta ventana y popup de
+// free trial cuando corre en modo app, incluso con windowsHide. La
+// única forma documentada de tenerlo headless es instalarlo como
+// servicio Windows: `vhui64.exe -i` lo registra y queda corriendo en
+// background sin tray icon. El servicio expone el mismo named pipe
+// \\.\pipe\vhclient que consumimos. Requiere UAC una sola vez (al
+// primer arranque del desktop) y persiste hasta `vhui64.exe -u`.
+//
+// En POSIX el binario sí soporta -n para daemon mode sin GUI.
 
 let daemon: ChildProcess | null = null;
 
-export function startVirtualHereDaemon(): { ok: boolean; error?: string } {
-  if (daemon && !daemon.killed) return { ok: true };
+async function isWindowsServiceInstalled(): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  try {
+    await execFileAsync("sc.exe", ["query", SERVICE_NAME], {
+      windowsHide: true,
+      timeout: 5_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isWindowsServiceRunning(): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  try {
+    const { stdout } = await execFileAsync("sc.exe", ["query", SERVICE_NAME], {
+      windowsHide: true,
+      timeout: 5_000,
+    });
+    return /STATE\s*:\s*\d+\s+RUNNING/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+async function installWindowsService(binary: string): Promise<{ ok: boolean; error?: string }> {
+  // `vhui64.exe -i` registra el servicio + requiere elevación. Usamos
+  // PowerShell Start-Process -Verb RunAs para que Windows muestre UNA
+  // UAC visible al user — mismo patrón que el TAP driver de OpenVPN.
+  const psCmd = `Start-Process -FilePath '${binary}' -ArgumentList '-i' -Verb RunAs -Wait`;
+  try {
+    await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+      { windowsHide: true, timeout: 60_000 },
+    );
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function startWindowsService(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await execFileAsync("sc.exe", ["start", SERVICE_NAME], {
+      windowsHide: true,
+      timeout: 10_000,
+    });
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Service already running es success.
+    if (/already.*started|1056/i.test(msg)) return { ok: true };
+    return { ok: false, error: msg };
+  }
+}
+
+export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: string }> {
   const binary = virtualHereClientPath();
   if (!binary) {
     return {
@@ -50,9 +124,24 @@ export function startVirtualHereDaemon(): { ok: boolean; error?: string } {
       error: "vhclient binary missing — run fetch:virtualhere-win during build.",
     };
   }
+  if (process.platform === "win32") {
+    // Camino preferido: servicio Windows headless.
+    if (!(await isWindowsServiceInstalled())) {
+      const inst = await installWindowsService(binary);
+      if (!inst.ok) {
+        return inst;
+      }
+    }
+    if (!(await isWindowsServiceRunning())) {
+      const start = await startWindowsService();
+      if (!start.ok) return start;
+    }
+    return { ok: true };
+  }
+  // POSIX: -n daemon mode.
+  if (daemon && !daemon.killed) return { ok: true };
   try {
-    daemon = spawn(binary, [], {
-      windowsHide: true,
+    daemon = spawn(binary, ["-n"], {
       stdio: ["ignore", "ignore", "ignore"],
       detached: false,
     });
@@ -66,7 +155,13 @@ export function startVirtualHereDaemon(): { ok: boolean; error?: string } {
   }
 }
 
-export function stopVirtualHereDaemon(): void {
+export async function stopVirtualHereDaemon(): Promise<void> {
+  if (process.platform === "win32") {
+    // El servicio queda corriendo aunque la app cierre — eso es lo que
+    // queremos: el user no pierde su attach al cerrar/abrir el desktop.
+    // Si quieres pararlo del todo, ejecuta `sc stop VirtualHereClient`.
+    return;
+  }
   if (!daemon) return;
   try {
     daemon.kill();
@@ -76,7 +171,10 @@ export function stopVirtualHereDaemon(): void {
   daemon = null;
 }
 
-export function isVirtualHereDaemonRunning(): boolean {
+export async function isVirtualHereDaemonRunning(): Promise<boolean> {
+  if (process.platform === "win32") {
+    return isWindowsServiceRunning();
+  }
   return daemon !== null && !daemon.killed;
 }
 
@@ -215,7 +313,7 @@ export async function statusSnapshot(): Promise<VirtualHereStatus> {
   }
   return {
     binaryAvailable: true,
-    daemonRunning: isVirtualHereDaemonRunning(),
+    daemonRunning: await isVirtualHereDaemonRunning(),
     hubs,
     attached,
     maxSimultaneousDevices: 1,
