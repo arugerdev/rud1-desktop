@@ -1,25 +1,24 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Fetches the VirtualHere headless client into resources/win32/ so
+  Fetches the VirtualHere Windows client into resources/win32/ so
   electron-builder bundles it via extraResources.
 
 .DESCRIPTION
-  VirtualHere replaces the com0com + rud1-bridge stack that didn't
-  survive Windows HVCI. The Windows client uses WinUSB (in-box,
-  Microsoft-signed, HVCI-friendly) plus usbser.sys for CDC devices.
-  Arduinos appear as native COM ports without any kernel driver
-  installation step for the operator.
+  VirtualHere replaces com0com + rud1-bridge. Its Windows client uses
+  WinUSB (in-box, Microsoft-signed, HVCI-friendly) and usbser.sys for
+  CDC devices. Arduinos appear as native COM ports without any kernel
+  driver installation step for the operator.
 
-  We bundle vhclientx86_64.exe — the headless variant controllable
-  via -t "<command>" CLI args. The tray-icon client (vhui64.exe) is
-  NOT what we want: it surfaces its own UI that competes with rud1.
+  Upstream only distributes the GUI client binary for Windows
+  (vhui64.exe). It supports the same -t "<command>" CLI interface as
+  the Linux console client, so we can drive it headlessly from the
+  rud1-desktop main process. When spawned with windowsHide: true and
+  no user interaction, the tray icon stays out of the way.
 
   License: VirtualHere is proprietary. Free tier limits each server
-  to 1 simultaneous device, which we surface in the rud1 UI. For
-  redistribution at scale we'd need to negotiate an embedded licence
-  with the upstream; the fetch URL below is the publicly-available
-  binary.
+  to 1 simultaneous device, surfaced in the rud1 UI. For redistribution
+  at scale negotiate an embedded licence with upstream.
 
   Idempotent: skips when the file is already present.
 #>
@@ -29,13 +28,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$VH_VERSION = "5.6.5"
-$VH_URL     = "https://www.virtualhere.com/sites/default/files/usbclient/vhclientx86_64.exe"
+$VH_VERSION = "5.9.8"
+$VH_URL     = "https://www.virtualhere.com/sites/default/files/usbclient/vhui64.exe"
 
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot    = Split-Path -Parent $ScriptDir
 $ResourceDir = Join-Path $RepoRoot "resources\win32"
-$OutBin      = Join-Path $ResourceDir "vhclient.exe"
+$OutBin      = Join-Path $ResourceDir "vhui64.exe"
 $OutVersion  = Join-Path $ResourceDir "virtualhere.version"
 
 if (-not (Test-Path $ResourceDir)) {

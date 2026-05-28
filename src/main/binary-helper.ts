@@ -201,11 +201,15 @@ export function virtualHereClientPath(): string | null {
   const base = resourcesDir();
   let candidate: string;
   if (process.platform === "win32") {
-    candidate = path.join(base, "vhclient.exe");
+    // Upstream sólo distribuye el binario GUI vhui64.exe en Windows
+    // pero acepta el flag -t "<command>" idéntico al cliente Linux
+    // console-only, con lo que podemos usarlo headless lanzándolo con
+    // windowsHide: true desde spawn(). El tray icon queda suprimido.
+    candidate = path.join(base, "vhui64.exe");
   } else if (process.platform === "darwin") {
     candidate = path.join(base, "vhclient-darwin");
   } else {
-    candidate = path.join(base, "vhclient-linux");
+    candidate = path.join(base, "vhclientx86_64");
   }
   return fs.existsSync(candidate) ? candidate : null;
 }
