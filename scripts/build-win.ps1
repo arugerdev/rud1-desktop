@@ -72,6 +72,14 @@ if ($SkipFetch) {
   } catch {
     throw "fetch-usbip-win.ps1 failed: $_"
   }
+
+  # ── 1c. Fetch VirtualHere headless client ──────────────────────────────
+  Step "Fetching VirtualHere client (idempotent)"
+  try {
+    & (Join-Path $ScriptDir "fetch-virtualhere-win.ps1")
+  } catch {
+    throw "fetch-virtualhere-win.ps1 failed: $_"
+  }
 }
 
 # ── 1c. Generate app icons from rud1-es favicon ─────────────────────────────

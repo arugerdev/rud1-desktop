@@ -169,34 +169,6 @@ export function usbipdPath(): string {
  * haven't shipped a binary for — useful during dev when running
  * against a hand-built copy on PATH.
  */
-export function rud1BridgePath(): string {
-  const base = resourcesDir();
-  let candidate: string;
-  if (process.platform === "darwin") {
-    const arch = process.arch === "arm64" ? "arm64" : "x64";
-    candidate = path.join(base, `rud1-bridge-${arch}`);
-  } else if (process.platform === "win32") {
-    candidate = path.join(base, "rud1-bridge.exe");
-  } else {
-    candidate = path.join(base, "rud1-bridge");
-  }
-  if (fs.existsSync(candidate)) return candidate;
-  // Dev fallback: a developer-installed copy on PATH.
-  return process.platform === "win32" ? "rud1-bridge.exe" : "rud1-bridge";
-}
-
-/**
- * True when the bundled rud1-bridge binary is present (i.e. the
- * `npm run build:bridge` step has been run). Used by the panel to
- * decide whether to even render the bridge-mode option for CDC
- * devices: a desktop build without the bridge binary should treat
- * Arduino-style devices as "USB/IP only" rather than offering a
- * button that's going to ENOENT on click.
- */
-export function isRud1BridgeAvailable(): boolean {
-  return path.isAbsolute(rud1BridgePath());
-}
-
 /**
  * Returns true when `binaryPath(name)` resolved to a real file. Useful
  * for preflight checks that need to give the user an actionable error
@@ -209,11 +181,8 @@ export function isBinaryAvailable(name: string): boolean {
 
 /**
  * Path to the bundled USB/IP for Windows installer (`USBip-X.Y.Z-x64.exe`).
- * Returns `null` on non-Windows platforms or when the installer wasn't
- * bundled (developer skipped `npm run fetch:usbip-win`). The caller can
- * spawn this via `shell.openPath` to walk the user through a one-time
- * driver install — usbip-win2 ships a kernel-mode VHCI driver, so a
- * userspace-only bundle wouldn't be enough.
+ * Mantenido como fallback (no-CDC) cuando VirtualHere free queda agotada
+ * a 1 device.
  */
 export function usbipInstallerPath(): string | null {
   if (process.platform !== "win32") return null;
@@ -222,17 +191,21 @@ export function usbipInstallerPath(): string | null {
 }
 
 /**
- * Path to the bundled com0com installer (`com0com-installer.exe`).
- * Returns `null` on non-Windows platforms or when the installer wasn't
- * bundled (developer skipped `npm run fetch:com0com-win`). The serial
- * bridge depends on com0com to expose a virtual COM port pair the
- * operator opens in their Arduino IDE — we surface this path through
- * the `serial:launchInstaller` IPC channel so the Connect tab can
- * render a one-click CTA when the bridge fails because com0com is
- * missing.
+ * Path al binario headless de VirtualHere bundled. Reemplaza al combo
+ * com0com + rud1-bridge: el client usa WinUSB / usbser.sys in-box de
+ * Microsoft, sin driver kernel custom y compatible con HVCI activo.
+ * Devuelve null si el desktop build no lo incluye (fetch script no
+ * ejecutado).
  */
-export function com0comInstallerPath(): string | null {
-  if (process.platform !== "win32") return null;
-  const candidate = path.join(resourcesDir(), "com0com-installer.exe");
+export function virtualHereClientPath(): string | null {
+  const base = resourcesDir();
+  let candidate: string;
+  if (process.platform === "win32") {
+    candidate = path.join(base, "vhclient.exe");
+  } else if (process.platform === "darwin") {
+    candidate = path.join(base, "vhclient-darwin");
+  } else {
+    candidate = path.join(base, "vhclient-linux");
+  }
   return fs.existsSync(candidate) ? candidate : null;
 }

@@ -231,151 +231,64 @@ contextBridge.exposeInMainWorld("electronAPI", {
    * builds (< this iter) don't expose it and the panel falls back
    * to USB/IP for every device, which is the pre-bridge behaviour.
    */
-  serial: {
-    /** Spin up a TCP↔serial bridge for `busId`. Returns the local
-     *  path (Windows COM port the user opens, or Unix pty symlink)
-     *  once rud1-bridge has bound the endpoint. */
-    open: (opts: {
-      busId: string;
-      piHost: string;
-      baud?: number;
-      dataBits?: number;
-      parity?: string;
-      stopBits?: string;
-      label?: string;
-    }) =>
-      ipcRenderer.invoke("serial:open", opts) as Promise<
-        | {
-            ok: true;
-            result: {
-              busId: string;
-              endpointPath: string;
-              userVisiblePath: string;
-              pid: number;
-            };
-          }
-        | {
-            ok: false;
-            error: string;
-            /** Set when com0com is missing or has no pairs configured.
-             *  The renderer surfaces a CTA banner with setup steps. */
-            com0comMissing?: boolean;
-            setupcPath?: string | null;
-            hasPairs?: boolean;
-            /** Set when a com0com pair exists but lacks COMxx aliases —
-             *  Arduino IDE won't list CNCAx/CNCBx in its port picker.
-             *  Renderer surfaces the "Configurar par COM" CTA. */
-            com0comPairNotAliased?: boolean;
-            /** Set when a com0com pair has COM aliases but is missing
-             *  EmuBR=yes on the user side — Arduino IDE 2.x filters
-             *  Tools > Port on the PNP attributes EmuBR enables, so
-             *  the COM is reachable via `mode COMx` but invisible to
-             *  the IDE. Same recovery path as `com0comPairNotAliased`
-             *  (the Configure CTA re-runs setupc with EmuBR=yes). */
-            com0comPairNoEmuBR?: boolean;
-            pair?: {
-              pairId: string;
-              userPort: string;
-              bridgePort: string;
-              hasComAlias: boolean;
-              emuBR?: boolean;
-            };
-          }
-      >,
-
-    /** Tear down the bridge for `busId`. Idempotent. */
-    close: (busId: string) =>
-      ipcRenderer.invoke("serial:close", busId) as Promise<
-        { ok: true } | { ok: false; error: string }
-      >,
-
-    /**
-     * Manual DTR pulse for an open bridge session. The firmware drives
-     * DTR low on the live `/dev/ttyACMx` for `pulseMs` (default 50)
-     * then re-asserts it — same shape Arduino's reset circuit expects.
-     * The session must already be open (Connect first); the firmware
-     * returns 404 otherwise. `pulseMs` is clamped firmware-side to
-     * [10, 5000].
-     */
-    reset: (opts: { busId: string; piHost: string; pulseMs?: number }) =>
-      ipcRenderer.invoke("serial:reset", opts) as Promise<
-        { ok: true } | { ok: false; error: string }
-      >,
-
-    /** Snapshot of the bridge subsystem: bundled binary present,
-     *  com0com state on Windows, currently-active sessions. */
+  /**
+   * VirtualHere namespace — único transporte para USB remoto en este
+   * build. Sustituye al combo serial-bridge + com0com + usbip-win2
+   * porque su client Windows usa WinUSB / usbser.sys in-box, compatibles
+   * con HVCI activo. El daemon vhclient se arranca en background al
+   * inicio de la app; estos handlers le mandan comandos vía CLI.
+   */
+  virtualhere: {
+    /** Snapshot del estado: hubs descubiertos, devices, attached actuales,
+     *  límite de devices simultáneos según licencia (free = 1). */
     status: () =>
-      ipcRenderer.invoke("serial:status") as Promise<
+      ipcRenderer.invoke("virtualhere:status") as Promise<
         | {
             ok: true;
             result: {
               binaryAvailable: boolean;
-              com0com: {
-                installed: boolean;
-                setupcPath: string | null;
-                pairs: { pairId: string; userPort: string; bridgePort: string }[];
-                error?: string;
-              } | null;
-              sessions: {
-                busId: string;
-                pid: number;
-                endpointPath: string;
-                startedAt: string;
-                lastEvent?: string;
+              daemonRunning: boolean;
+              hubs: {
+                serverName: string;
+                endpoint: string;
+                devices: {
+                  address: string;
+                  vendorId: string;
+                  productId: string;
+                  serial?: string;
+                  productName?: string;
+                  vendorName?: string;
+                  inUse: boolean;
+                  inUseByThisClient: boolean;
+                }[];
               }[];
+              attached: {
+                address: string;
+                vendorId: string;
+                productId: string;
+                serial?: string;
+                productName?: string;
+                vendorName?: string;
+                inUse: boolean;
+                inUseByThisClient: boolean;
+              }[];
+              maxSimultaneousDevices: number;
             };
           }
         | { ok: false; error: string }
       >,
 
-    /** Drill-down: live session for one bus id, or null. */
-    sessionFor: (busId: string) =>
-      ipcRenderer.invoke("serial:sessionFor", busId) as Promise<
-        | {
-            ok: true;
-            result: {
-              busId: string;
-              pid: number;
-              endpointPath: string;
-              startedAt: string;
-              lastEvent?: string;
-            } | null;
-          }
-        | { ok: false; error: string }
-      >,
-
-    /**
-     * Run the bundled com0com installer (Windows only). Symmetric to
-     * `usb.launchInstaller` for the USB/IP driver. The user sees the
-     * com0com install dialog and walks through driver acceptance; the
-     * panel should retry `serial.status()` after the user closes the
-     * installer to detect the new install.
-     */
-    launchInstaller: () =>
-      ipcRenderer.invoke("serial:launchInstaller") as Promise<
+    /** Attacha un device por su address VirtualHere. Free tier rechaza
+     *  con "license available" si ya hay 1 device en uso. */
+    use: (address: string) =>
+      ipcRenderer.invoke("virtualhere:use", address) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
 
-    /**
-     * Assign COMxx aliases to a com0com pair that's currently named
-     * CNCAxxx/CNCBxxx. Triggers UAC because setupc.exe needs admin
-     * to drive the kernel driver's IOCTLs. Defaults to COM200/COM201
-     * so we don't collide with real COM ports the user may have.
-     * Idempotent: returns the existing aliased pair if one already
-     * exists.
-     */
-    configurePair: (opts?: { userPortAlias?: string; bridgePortAlias?: string }) =>
-      ipcRenderer.invoke("serial:configurePair", opts) as Promise<
-        | {
-            ok: true;
-            result: {
-              pairId: string;
-              userPort: string;
-              bridgePort: string;
-              hasComAlias: boolean;
-            };
-          }
-        | { ok: false; error: string; com0comMissing?: boolean }
+    /** Detacha un device. Idempotente: address no usado responde ok. */
+    stopUsing: (address: string) =>
+      ipcRenderer.invoke("virtualhere:stopUsing", address) as Promise<
+        { ok: true } | { ok: false; error: string }
       >,
   },
 

@@ -853,6 +853,18 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
 
+  // Arranca el cliente headless de VirtualHere en background. Sin
+  // ventana ni tray icon: queda como daemon controlable via comandos
+  // CLI (-t "<cmd>") que los IPC handlers de virtualhere:* invocan.
+  void import("./virtualhere-manager").then((vh) => {
+    const res = vh.startVirtualHereDaemon();
+    if (!res.ok) {
+      // No es fatal — el user verá un mensaje en la UI cuando intente
+      // attach. Si el binary no está bundled tampoco rompemos el boot.
+      console.warn("[virtualhere] daemon failed to start:", res.error);
+    }
+  });
+
   registerIpcHandlers({
     firstBootDedupe: {
       list: () => notifiedHosts,
@@ -1032,6 +1044,14 @@ app.on("before-quit", (event) => {
   // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
   // timeouts so this can't hang indefinitely.
   void (async () => {
+    // Stop VirtualHere daemon — los devices attached caen al closing
+    // del proceso. El user lo abrirá de nuevo cuando reabre la app.
+    try {
+      const { stopVirtualHereDaemon } = await import("./virtualhere-manager");
+      stopVirtualHereDaemon();
+    } catch {
+      /* best-effort */
+    }
     // Detach USB sessions FIRST while the tunnel still routes — the vpn:disconnect
     // IPC handler does this too, but before-quit calls vpnDisconnect() directly
     // and would otherwise leave an orphan VHCI port + bound device on the Pi.
