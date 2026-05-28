@@ -13,7 +13,7 @@
 // Free tier: 1 device a la vez. La UI bloquea el resto.
 
 import { execFile, spawn, ChildProcess } from "child_process";
-import net from "net";
+import * as net from "net";
 import { promisify } from "util";
 
 import { virtualHereClientPath } from "./binary-helper";
@@ -26,7 +26,6 @@ import {
 export type { VirtualHereDevice, VirtualHereHub };
 
 const execFileAsync = promisify(execFile);
-const SERVICE_NAME = "VirtualHereClient";
 
 const PIPE_PATH =
   process.platform === "win32" ? "\\\\.\\pipe\\vhclient" : "/tmp/vhclient";
@@ -43,80 +42,51 @@ export interface VirtualHereStatus {
 
 // ─── Daemon lifecycle ─────────────────────────────────────────────────
 //
-// En Windows el binario vhui64.exe SIEMPRE levanta ventana y popup de
-// free trial cuando corre en modo app, incluso con windowsHide. La
-// única forma documentada de tenerlo headless es instalarlo como
-// servicio Windows: `vhui64.exe -i` lo registra y queda corriendo en
-// background sin tray icon. El servicio expone el mismo named pipe
-// \\.\pipe\vhclient que consumimos. Requiere UAC una sola vez (al
-// primer arranque del desktop) y persiste hasta `vhui64.exe -u`.
+// Modo app, no servicio. La doc oficial de VirtualHere especifica que el
+// servicio se instala desde el menú "Right click USB Hubs → Install Client
+// as a Service" del GUI — no existe flag CLI documentado para registrarlo.
+// Spawneamos vhui64.exe como app normal y ocultamos la ventana principal
+// con ShowWindow(SW_HIDE) via PowerShell. El tray icon de VirtualHere se
+// queda visible (free tier no permite eliminarlo) pero NO hay ventana ni
+// popup molesto al user.
 //
-// En POSIX el binario sí soporta -n para daemon mode sin GUI.
+// En POSIX el binario sí soporta -n para daemon mode sin UI.
 
 let daemon: ChildProcess | null = null;
 
-async function isWindowsServiceInstalled(): Promise<boolean> {
-  if (process.platform !== "win32") return false;
-  try {
-    await execFileAsync("sc.exe", ["query", SERVICE_NAME], {
-      windowsHide: true,
-      timeout: 5_000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function isWindowsServiceRunning(): Promise<boolean> {
-  if (process.platform !== "win32") return false;
-  try {
-    const { stdout } = await execFileAsync("sc.exe", ["query", SERVICE_NAME], {
-      windowsHide: true,
-      timeout: 5_000,
-    });
-    return /STATE\s*:\s*\d+\s+RUNNING/i.test(stdout);
-  } catch {
-    return false;
-  }
-}
-
-async function installWindowsService(binary: string): Promise<{ ok: boolean; error?: string }> {
-  // `vhui64.exe -i` registra el servicio + requiere elevación. Usamos
-  // PowerShell Start-Process -Verb RunAs para que Windows muestre UNA
-  // UAC visible al user — mismo patrón que el TAP driver de OpenVPN.
-  const psCmd = `Start-Process -FilePath '${binary}' -ArgumentList '-i' -Verb RunAs -Wait`;
+/**
+ * Oculta la ventana principal de vhui64.exe usando Win32 ShowWindow.
+ * Se llama después de spawn cuando la ventana ya existe (~1.5s típico).
+ * Si la ventana no aparece a tiempo, simplemente loguea — no es fatal,
+ * el operador podría ver la ventana brevemente.
+ */
+async function hideWindowsClientWindow(pid: number): Promise<void> {
+  const psCmd = [
+    "Add-Type -Name win -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(int handle, int state);' -Namespace native -ErrorAction SilentlyContinue;",
+    `$end = (Get-Date).AddSeconds(8);`,
+    `while ((Get-Date) -lt $end) {`,
+    `  $p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue;`,
+    `  if ($p -and $p.MainWindowHandle -ne 0) {`,
+    `    [native.win]::ShowWindow($p.MainWindowHandle.ToInt32(), 0) | Out-Null;`,
+    `    exit 0;`,
+    `  }`,
+    `  Start-Sleep -Milliseconds 200;`,
+    `}`,
+    `exit 1;`,
+  ].join(" ");
   try {
     await execFileAsync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", psCmd],
-      { windowsHide: true, timeout: 60_000 },
+      { windowsHide: true, timeout: 12_000 },
     );
-    return { ok: true };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function startWindowsService(): Promise<{ ok: boolean; error?: string }> {
-  try {
-    await execFileAsync("sc.exe", ["start", SERVICE_NAME], {
-      windowsHide: true,
-      timeout: 10_000,
-    });
-    return { ok: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Service already running es success.
-    if (/already.*started|1056/i.test(msg)) return { ok: true };
-    return { ok: false, error: msg };
+  } catch {
+    /* best-effort */
   }
 }
 
 export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: string }> {
+  if (daemon && !daemon.killed) return { ok: true };
   const binary = virtualHereClientPath();
   if (!binary) {
     return {
@@ -124,30 +94,20 @@ export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: s
       error: "vhclient binary missing — run fetch:virtualhere-win during build.",
     };
   }
-  if (process.platform === "win32") {
-    // Camino preferido: servicio Windows headless.
-    if (!(await isWindowsServiceInstalled())) {
-      const inst = await installWindowsService(binary);
-      if (!inst.ok) {
-        return inst;
-      }
-    }
-    if (!(await isWindowsServiceRunning())) {
-      const start = await startWindowsService();
-      if (!start.ok) return start;
-    }
-    return { ok: true };
-  }
-  // POSIX: -n daemon mode.
-  if (daemon && !daemon.killed) return { ok: true };
   try {
-    daemon = spawn(binary, ["-n"], {
+    const args = process.platform === "win32" ? [] : ["-n"];
+    daemon = spawn(binary, args, {
+      windowsHide: true,
       stdio: ["ignore", "ignore", "ignore"],
       detached: false,
     });
     daemon.on("exit", () => {
       daemon = null;
     });
+    if (process.platform === "win32" && daemon.pid) {
+      // No await — corre en background mientras el resto del boot continúa.
+      void hideWindowsClientWindow(daemon.pid);
+    }
     return { ok: true };
   } catch (err) {
     daemon = null;
@@ -156,12 +116,6 @@ export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: s
 }
 
 export async function stopVirtualHereDaemon(): Promise<void> {
-  if (process.platform === "win32") {
-    // El servicio queda corriendo aunque la app cierre — eso es lo que
-    // queremos: el user no pierde su attach al cerrar/abrir el desktop.
-    // Si quieres pararlo del todo, ejecuta `sc stop VirtualHereClient`.
-    return;
-  }
   if (!daemon) return;
   try {
     daemon.kill();
@@ -172,9 +126,6 @@ export async function stopVirtualHereDaemon(): Promise<void> {
 }
 
 export async function isVirtualHereDaemonRunning(): Promise<boolean> {
-  if (process.platform === "win32") {
-    return isWindowsServiceRunning();
-  }
   return daemon !== null && !daemon.killed;
 }
 
@@ -211,21 +162,7 @@ export async function debugSnapshot(): Promise<VirtualHereDebug> {
     parsedHubs: 0,
     parsedDevices: 0,
   };
-  if (process.platform === "win32") {
-    out.serviceInstalled = await isWindowsServiceInstalled();
-    try {
-      const { stdout } = await execFileAsync("sc.exe", ["query", SERVICE_NAME], {
-        windowsHide: true,
-        timeout: 5_000,
-      });
-      out.serviceQueryRaw = stdout;
-      out.serviceRunning = /STATE\s*:\s*\d+\s+RUNNING/i.test(stdout);
-    } catch (err) {
-      out.serviceQueryRaw = err instanceof Error ? err.message : String(err);
-    }
-  } else {
-    out.serviceRunning = await isVirtualHereDaemonRunning();
-  }
+  out.serviceRunning = await isVirtualHereDaemonRunning();
   // Intentar leer el pipe aunque el servicio diga STOPPED — a veces
   // hay drift entre sc.exe y la realidad.
   try {
@@ -272,6 +209,39 @@ async function sendPipeCommand(cmd: string): Promise<string> {
 }
 
 function sendOnce(cmd: string): Promise<string> {
+  return process.platform === "win32"
+    ? sendOnceWindowsPipe(cmd)
+    : sendOnceUnixSocket(cmd);
+}
+
+// VirtualHere en Windows expone un named pipe en modo mensaje. Node `net`
+// no negocia ese modo: el socket conecta pero nunca recibe data. PowerShell
+// con System.IO.Pipes.NamedPipeClientStream sí maneja message-mode.
+async function sendOnceWindowsPipe(cmd: string): Promise<string> {
+  const escaped = cmd.replace(/'/g, "''");
+  const psCmd = [
+    `$ErrorActionPreference = 'Stop';`,
+    `$pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'vhclient', [System.IO.Pipes.PipeDirection]::InOut);`,
+    `$pipe.Connect(${PIPE_TIMEOUT_MS});`,
+    `$pipe.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message;`,
+    `$writer = New-Object System.IO.StreamWriter($pipe, [System.Text.Encoding]::ASCII);`,
+    `$writer.AutoFlush = $true;`,
+    `$writer.WriteLine('${escaped}');`,
+    `$buf = New-Object byte[] 65536;`,
+    `$sb = New-Object System.Text.StringBuilder;`,
+    `do { $n = $pipe.Read($buf, 0, $buf.Length); if ($n -gt 0) { [void]$sb.Append([System.Text.Encoding]::ASCII.GetString($buf, 0, $n)); } } while (-not $pipe.IsMessageComplete);`,
+    `$pipe.Dispose();`,
+    `[Console]::Out.Write($sb.ToString());`,
+  ].join(" ");
+  const { stdout } = await execFileAsync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+    { windowsHide: true, timeout: PIPE_TIMEOUT_MS + 5_000 },
+  );
+  return stdout;
+}
+
+function sendOnceUnixSocket(cmd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(PIPE_PATH);
     let buf = "";
