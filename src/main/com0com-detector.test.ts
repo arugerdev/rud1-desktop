@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { parseSetupcList, pickPair, pickFreeAliasPair } from "./com0com-detector";
+import {
+  parseSetupcList,
+  pickPair,
+  pickFreeAliasPair,
+  parseComDBBitmap,
+} from "./com0com-detector";
+
+describe("parseComDBBitmap", () => {
+  it("returns empty for empty input", () => {
+    expect(parseComDBBitmap("")).toEqual([]);
+  });
+  it("maps bit 0 of byte 0 to COM1", () => {
+    expect(parseComDBBitmap("01")).toEqual(["COM1"]);
+  });
+  it("maps 0x1F to COM1..COM5 (typical clean install)", () => {
+    expect(parseComDBBitmap("1f")).toEqual(["COM1", "COM2", "COM3", "COM4", "COM5"]);
+  });
+  it("maps bit across byte boundary (COM9)", () => {
+    expect(parseComDBBitmap("0001")).toEqual(["COM9"]);
+  });
+  it("tolerates whitespace and uppercase", () => {
+    expect(parseComDBBitmap("1F 00 00 00")).toEqual([
+      "COM1",
+      "COM2",
+      "COM3",
+      "COM4",
+      "COM5",
+    ]);
+  });
+});
 
 describe("parseSetupcList", () => {
   it("parses a single pair with COM aliases", () => {

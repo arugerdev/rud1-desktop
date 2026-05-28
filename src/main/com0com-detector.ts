@@ -121,6 +121,56 @@ export async function enumerateExistingComPorts(): Promise<string[]> {
   }
 }
 
+/**
+ * Parsea HKLM\SYSTEM\CurrentControlSet\Control\COM Name Arbiter\ComDB.
+ *
+ * ComDB es un bitmap REG_BINARY donde el bit N (LSB-first dentro del
+ * byte, byte 0 primero) representa COM(N+1). Si el bit está set, el
+ * puerto está reservado — aunque el device esté desconectado.
+ *
+ * Esto es lo que `setupc` consulta para rechazar "PortName=COM5 is
+ * already logged as in use": SERIALCOMM lista sólo lo ENCHUFADO HOY,
+ * ComDB es la lista persistente. Sin leer ComDB, pickFreePair sugiere
+ * COM5 y setupc rebota con el popup que vio el usuario.
+ */
+export function parseComDBBitmap(hex: string): string[] {
+  const clean = hex.replace(/[^0-9a-fA-F]/g, "");
+  const reserved: string[] = [];
+  for (let byteIdx = 0; byteIdx < clean.length; byteIdx += 2) {
+    const byte = parseInt(clean.slice(byteIdx, byteIdx + 2), 16);
+    if (Number.isNaN(byte)) continue;
+    for (let bit = 0; bit < 8; bit++) {
+      if ((byte >> bit) & 1) {
+        const comNum = byteIdx / 2 * 8 + bit + 1;
+        reserved.push(`COM${comNum}`);
+      }
+    }
+  }
+  return reserved;
+}
+
+export async function enumerateReservedComPortsFromDB(): Promise<string[]> {
+  if (process.platform !== "win32") return [];
+  try {
+    const { stdout } = await execFileAsync(
+      "reg",
+      [
+        "query",
+        "HKLM\\SYSTEM\\CurrentControlSet\\Control\\COM Name Arbiter",
+        "/v",
+        "ComDB",
+      ],
+      { windowsHide: true, timeout: 5000 },
+    );
+    // Línea típica: `    ComDB    REG_BINARY    01000000...`
+    const m = stdout.match(/REG_BINARY\s+([0-9A-Fa-f]+)/);
+    if (!m) return [];
+    return parseComDBBitmap(m[1]!);
+  } catch {
+    return [];
+  }
+}
+
 // COM5-49 (skip 1-4 hardware tradicional); fallback COM200/201.
 const COM_LOW_FLOOR = 5;
 const COM_LOW_CEIL = 49;
@@ -153,7 +203,14 @@ export async function pickFreePair(status: Com0comStatus): Promise<{
   for (const p of status.pairs) {
     occupied.push(p.userPort, p.bridgePort);
   }
-  occupied.push(...(await enumerateExistingComPorts()));
+  // Tres fuentes: pares com0com existentes + COM enchufados ahora
+  // (SERIALCOMM) + COM reservados aunque desconectados (ComDB). Sin
+  // ComDB, setupc rechaza con "already logged as in use".
+  const [active, reserved] = await Promise.all([
+    enumerateExistingComPorts(),
+    enumerateReservedComPortsFromDB(),
+  ]);
+  occupied.push(...active, ...reserved);
   return pickFreeAliasPair(occupied);
 }
 
