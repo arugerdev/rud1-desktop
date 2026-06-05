@@ -30,6 +30,7 @@ import { openvpnPath, isBinaryAvailable, openvpnBundledDir } from "./binary-help
 import {
   detectOpenVpnRuntime,
   ensureTapDriverInstalled,
+  ensureRud1TapEnabled,
   renameTapAdapterToRud1,
   type OpenVpnRuntimeStatus,
 } from "./openvpn-installer";
@@ -741,6 +742,10 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
         err instanceof Error ? err.message : err,
       );
     }
+    // openvpn can't open a disabled adapter (CreateFile errno=2) even though
+    // it still enumerates as present — ensure it's enabled before we spawn.
+    // Fatal: a clear message here beats openvpn's cryptic open_tun failure.
+    await ensureRud1TapEnabled();
   }
 
   const configPath = await writeOvpnConfig(ovpnConfig);

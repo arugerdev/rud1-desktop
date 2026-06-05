@@ -193,6 +193,89 @@ async function probeRud1TapAdapter(): Promise<{
   }
 }
 
+// True when a rud1-tap with this NetAdapter Status needs re-enabling before
+// openvpn can open it. 'Up'/'Disconnected' are usable; ''/null means the
+// adapter is absent (the create path's job); anything else ('Disabled',
+// 'Not Present') still enumerates under -IncludeHidden but openvpn can't open
+// it (CreateFile errno=2), so it has to be re-enabled.
+export function tapAdapterNeedsEnable(status: string | null | undefined): boolean {
+  if (typeof status !== "string") return false;
+  const s = status.trim().toLowerCase();
+  if (s === "") return false;
+  return s !== "up" && s !== "disconnected";
+}
+
+// Cheap, non-elevated read of the rud1-tap NetAdapter Status. null = absent.
+async function probeRud1TapStatus(): Promise<{
+  status: string | null;
+  error: string | null;
+}> {
+  if (process.platform !== "win32") return { status: null, error: null };
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$a = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction SilentlyContinue; " +
+          "if ($a) { ($a | Select-Object -First 1).Status }",
+      ],
+      { timeout: 10_000, windowsHide: true, maxBuffer: 256 * 1024 },
+    );
+    const status = (stdout || "").trim();
+    return { status: status.length > 0 ? status : null, error: null };
+  } catch (err) {
+    return { status: null, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Re-enable rud1-tap when Windows has it administratively disabled. A
+ * disabled adapter still enumerates as "present" (so detectOpenVpnRuntime
+ * passes) but openvpn can't open it — CreateFile fails errno=2 right after
+ * the TLS handshake. This is the missing "re-enable it later" half of
+ * probeRud1TapAdapter's contract. Cheap no-op when already up; throws with
+ * a Device Manager hint when the enable can't be made to stick.
+ */
+export async function ensureRud1TapEnabled(): Promise<void> {
+  if (process.platform !== "win32") return;
+  const { status } = await probeRud1TapStatus();
+  if (!tapAdapterNeedsEnable(status)) return;
+
+  // Enable via the NetAdapter cmdlet, falling back to the PnP layer
+  // (PnpDeviceID is the ROOT\NET\NNNN instance id, straight off the adapter).
+  // Verify with a short retry loop — the PnP enable is async. Runs in the
+  // app's already-elevated context (requireAdministrator manifest).
+  const psCmd = [
+    "$ErrorActionPreference = 'Stop';",
+    "$a = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction SilentlyContinue;",
+    "if (-not $a) { exit 0 }",
+    "try { $a | Enable-NetAdapter -Confirm:$false -ErrorAction Stop } catch {",
+    "  if ($a.PnpDeviceID) { Enable-PnpDevice -InstanceId $a.PnpDeviceID -Confirm:$false -ErrorAction Stop }",
+    "}",
+    "for ($i = 0; $i -lt 25; $i++) {",
+    "  Start-Sleep -Milliseconds 200;",
+    "  $a = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction SilentlyContinue;",
+    "  if ($a -and ($a.Status -eq 'Up' -or $a.Status -eq 'Disconnected')) { exit 0 }",
+    "}",
+    "exit 5",
+  ].join(" ");
+  try {
+    await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCmd],
+      { timeout: 30_000, windowsHide: true },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not re-enable the rud1-tap adapter (${msg}). Open Device ` +
+        "Manager → Network adapters, right-click rud1-tap → Enable, then retry Connect.",
+    );
+  }
+}
+
 /**
  * Read the install marker so a subsequent app launch can short-circuit
  * the (slow) NetAdapter driver probe. Returns false on missing /
@@ -525,7 +608,20 @@ async function renameRud1TapAdapterDescription(newDesc: string): Promise<void> {
     // Disable+Enable so PnP re-publishes DeviceDesc → NDIS IfDescr.
     "try { Disable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }",
     "Start-Sleep -Milliseconds 1200;",
-    "try { Enable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }",
+    // Re-enable with retries + verify: the early-exit above means later
+    // connects won't revisit this, so a swallowed Enable failure here would
+    // strand the adapter disabled (openvpn then dies with errno=2).
+    "$enabled = $false;",
+    "for ($j = 0; $j -lt 10; $j++) {",
+    "  try { Enable-NetAdapter -Name 'rud1-tap' -Confirm:$false -ErrorAction Stop } catch { }",
+    "  Start-Sleep -Milliseconds 300;",
+    "  $chk = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction SilentlyContinue;",
+    "  if ($chk -and ($chk.Status -eq 'Up' -or $chk.Status -eq 'Disconnected')) { $enabled = $true; break }",
+    "}",
+    "if (-not $enabled) {",
+    "  $chk = Get-NetAdapter -Name 'rud1-tap' -IncludeHidden -ErrorAction SilentlyContinue;",
+    "  if ($chk -and $chk.PnpDeviceID) { try { Enable-PnpDevice -InstanceId $chk.PnpDeviceID -Confirm:$false -ErrorAction Stop } catch { } }",
+    "}",
     "exit 0",
   ].join(" ");
   try {
