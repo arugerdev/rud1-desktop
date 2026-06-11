@@ -1381,6 +1381,13 @@ export function registerIpcHandlers(opts: {
     ) {
       cleaned.theme = patch.theme;
     }
+    if (
+      patch.language === "system" ||
+      patch.language === "es" ||
+      patch.language === "en"
+    ) {
+      cleaned.language = patch.language;
+    }
     const rawN = patch.notifications;
     if (rawN && typeof rawN === "object") {
       const n = rawN as Record<string, unknown>;

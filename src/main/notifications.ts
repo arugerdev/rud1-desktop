@@ -18,6 +18,7 @@ import {
   type NotificationToggles,
 } from "./preferences-manager";
 import { pushToast, type ToastKind } from "./toast-overlay";
+import { t } from "./i18n";
 
 const MAX_TITLE = 80;
 const MAX_BODY = 240;
@@ -64,8 +65,10 @@ function show(title: string, body: string, opts?: ShowOpts) {
 
 export function notifyVpnConnected(deviceName?: string) {
   show(
-    "VPN Connected",
-    deviceName ? `Tunnel up to ${deviceName}.` : "Tunnel is up.",
+    t("notifications.vpnConnectedTitle"),
+    deviceName
+      ? t("notifications.vpnConnectedBodyNamed", { name: deviceName })
+      : t("notifications.vpnConnectedBody"),
     { kind: "success", category: "vpn" },
   );
 }
@@ -80,10 +83,10 @@ export function notifyVpnConnected(deviceName?: string) {
  */
 export function notifyVpnCgnatWarning(deviceName?: string) {
   show(
-    "VPN connecting (CGNAT detected)",
+    t("notifications.vpnCgnatTitle"),
     deviceName
-      ? `${deviceName} appears to be behind carrier-grade NAT. The OpenVPN client opens an outbound TLS connection, so this typically still works.`
-      : "Carrier-grade NAT was detected on the device side. The OpenVPN client opens an outbound TLS connection, so this typically still works.",
+      ? t("notifications.vpnCgnatBodyNamed", { name: deviceName })
+      : t("notifications.vpnCgnatBody"),
     { kind: "warning", category: "vpn" },
   );
 }
@@ -95,8 +98,8 @@ export function notifyVpnCgnatWarning(deviceName?: string) {
  */
 export function notifyVpnTapDriverMissing() {
   show(
-    "TAP driver required",
-    "rud1 needs to install the TAP-Windows V9 driver. Click Connect and accept the elevation prompt.",
+    t("notifications.vpnTapTitle"),
+    t("notifications.vpnTapBody"),
     { kind: "warning", category: "vpn" },
   );
 }
@@ -105,10 +108,15 @@ export function notifyVpnDisconnected(
   deviceName?: string,
   uptimeLabel?: string | null,
 ) {
-  const target = deviceName ? `Tunnel to ${deviceName} dropped` : "Tunnel is down";
-  const suffix = uptimeLabel && uptimeLabel.trim() ? ` after ${uptimeLabel.trim()}` : "";
+  const target = deviceName
+    ? t("notifications.vpnDisconnectedTunnelTo", { name: deviceName })
+    : t("notifications.vpnDisconnectedTunnelDown");
+  const suffix =
+    uptimeLabel && uptimeLabel.trim()
+      ? t("notifications.vpnDisconnectedAfter", { uptime: uptimeLabel.trim() })
+      : "";
   show(
-    "VPN Disconnected",
+    t("notifications.vpnDisconnectedTitle"),
     `${target}${suffix}.`,
     { kind: "info", category: "vpn" },
   );
@@ -117,35 +125,56 @@ export function notifyVpnDisconnected(
 /** Used when the bridge surfaces a structured failure rather than a
  *  successful state transition. */
 export function notifyVpnError(message: string) {
-  show("VPN Error", message, { kind: "error", category: "vpn", autoDismissMs: 9_000 });
+  show(t("notifications.vpnErrorTitle"), message, {
+    kind: "error",
+    category: "vpn",
+    autoDismissMs: 9_000,
+  });
 }
 
 // ─── USB ────────────────────────────────────────────────────────────────────
 
 export function notifyUsbAttached(label: string | null, busId: string) {
-  const subject = label && label.trim() ? label.trim() : `USB ${busId}`;
-  show("USB Attached", `${subject} is now mounted on this machine.`, {
-    kind: "success",
-    category: "usb",
-  });
+  const subject =
+    label && label.trim() ? label.trim() : t("notifications.usbFallback", { busId });
+  show(
+    t("notifications.usbAttachedTitle"),
+    t("notifications.usbAttachedBody", { subject }),
+    {
+      kind: "success",
+      category: "usb",
+    },
+  );
 }
 
 export function notifyUsbDetached(label: string | null, busId: string) {
-  const subject = label && label.trim() ? label.trim() : `USB ${busId}`;
-  show("USB Detached", `${subject} was unmounted.`, {
-    kind: "info",
-    category: "usb",
-  });
+  const subject =
+    label && label.trim() ? label.trim() : t("notifications.usbFallback", { busId });
+  show(
+    t("notifications.usbDetachedTitle"),
+    t("notifications.usbDetachedBody", { subject }),
+    {
+      kind: "info",
+      category: "usb",
+    },
+  );
 }
 
 // ─── Device lifecycle ───────────────────────────────────────────────────────
 
 export function notifyDeviceReady(deviceName: string | null | undefined) {
-  const subject = deviceName && deviceName.trim() ? deviceName.trim() : "Device";
-  show(`${subject} connected`, `${subject} is online and ready to use.`, {
-    kind: "success",
-    category: "deviceReady",
-  });
+  const subject =
+    deviceName && deviceName.trim()
+      ? deviceName.trim()
+      : t("notifications.deviceFallback");
+  show(
+    t("notifications.deviceReadyTitle", { name: subject }),
+    t("notifications.deviceReadyBody", { name: subject }),
+    {
+      kind: "success",
+      category: "deviceReady",
+    },
+  );
 }
 
 /**

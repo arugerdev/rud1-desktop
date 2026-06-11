@@ -1,4 +1,6 @@
 // Pure: macOS usa setTitle, Win/Linux usa tooltip + icon swap.
+import { t } from "./i18n";
+
 export interface TrayAttentionState {
   count: number;
   title: string;
@@ -32,9 +34,9 @@ export function formatTrayTitle(count: number): string {
 
 export function formatTrayTooltip(count: number): string {
   const n = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
-  if (n <= 0) return "rud1 Desktop";
-  if (n === 1) return "rud1 Desktop — 1 device ready to configure";
-  return `rud1 Desktop — ${n} devices ready to configure`;
+  if (n <= 0) return t("tray.tooltipBase");
+  if (n === 1) return t("tray.tooltipOneDevice");
+  return t("tray.tooltipManyDevices", { count: n });
 }
 
 export type TrayVpnHealth = "unknown" | "up" | "down" | "recovering";
@@ -44,8 +46,8 @@ export function formatTrayTooltipWithVpn(
   vpn: TrayVpnHealth,
 ): string {
   const base = formatTrayTooltip(count);
-  if (vpn === "down") return `${base} — VPN desconectada`;
-  if (vpn === "recovering") return `${base} — VPN reconectando…`;
+  if (vpn === "down") return `${base} — ${t("tray.vpnDown")}`;
+  if (vpn === "recovering") return `${base} — ${t("tray.vpnRecovering")}`;
   return base;
 }
 

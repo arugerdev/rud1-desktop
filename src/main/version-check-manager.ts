@@ -2,6 +2,7 @@
 import { createHash, createPublicKey, verify as cryptoVerify } from "crypto";
 
 import { __test as autoUpdaterInternals, type AutoUpdateState } from "./auto-updater";
+import { t } from "./i18n";
 
 const { isValidFeedUrl, parseSemver, isNewerVersion, compareSemver } = autoUpdaterInternals;
 
@@ -1076,14 +1077,14 @@ export function buildVersionCheckMenuItems(
       ? Math.min(100, Math.floor((auto.bytesReceived / auto.totalBytes) * 100))
       : null;
     const label = pct != null
-      ? `Downloading update… ${pct}%`
-      : `Downloading update… ${formatBytes(auto.bytesReceived)}`;
+      ? t("updates.downloadingPct", { pct })
+      : t("updates.downloadingBytes", { bytes: formatBytes(auto.bytesReceived) });
     return [{ label, enabled: false, sublabel: progressBar(pct) }];
   }
   if (auto && auto.kind === "ready-to-apply") {
     return [
       {
-        label: "Download ready — Restart to install",
+        label: t("updates.readyRestart"),
         click: () => { handlers.applyAndRestart?.(); },
       },
     ];
@@ -1091,11 +1092,11 @@ export function buildVersionCheckMenuItems(
   if (auto && auto.kind === "error") {
     return [
       {
-        label: `Update download failed: ${auto.message}`,
+        label: t("updates.downloadFailed", { message: auto.message }),
         enabled: false,
       },
       {
-        label: "Reset and retry update check",
+        label: t("updates.resetAndRetry"),
         click: () => {
           handlers.resetAutoUpdate?.();
           handlers.recheck?.();
@@ -1110,7 +1111,7 @@ export function buildVersionCheckMenuItems(
     const isAuto = auto != null;
     const items: MenuItemShape[] = [
       {
-        label: `▲ Update available — v${state.latest}`,
+        label: t("updates.available", { latest: state.latest }),
         click: () => {
           if (!url) return;
           if (isAuto && handlers.startDownload) {
@@ -1122,7 +1123,7 @@ export function buildVersionCheckMenuItems(
         enabled: url != null,
       },
       {
-        label: `Currently installed: v${state.current}`,
+        label: t("updates.currentlyInstalled", { current: state.current }),
         enabled: false,
       },
     ];
@@ -1132,14 +1133,14 @@ export function buildVersionCheckMenuItems(
     // payload — keep them out of the auto-update download path).
     if (state.releaseNotesUrl) {
       items.push({
-        label: "What's new — view release notes",
+        label: t("updates.whatsNew"),
         click: () => {
           handlers.openExternal?.(state.releaseNotesUrl as string);
         },
       });
     }
     items.push({
-      label: "Check for updates now",
+      label: t("updates.checkNow"),
       click: () => { handlers.recheck?.(); },
     });
     return items;
@@ -1147,11 +1148,11 @@ export function buildVersionCheckMenuItems(
   if (state.kind === "up-to-date") {
     return [
       {
-        label: `Up to date (v${state.current})`,
+        label: t("updates.upToDate", { current: state.current }),
         enabled: false,
       },
       {
-        label: "Check for updates now",
+        label: t("updates.checkNow"),
         click: () => { handlers.recheck?.(); },
       },
     ];
@@ -1166,28 +1167,28 @@ export function buildVersionCheckMenuItems(
   if (state.kind === "update-blocked-by-min-bootstrap") {
     const items: MenuItemShape[] = [
       {
-        label: `Update requires manual install: download v${state.requiredMinVersion} first`,
+        label: t("updates.manualInstallRequired", { version: state.requiredMinVersion }),
         enabled: false,
       },
       {
-        label: `Currently installed: v${state.currentVersion}`,
+        label: t("updates.currentlyInstalled", { current: state.currentVersion }),
         enabled: false,
       },
       {
-        label: `Target version: v${state.targetVersion}`,
+        label: t("updates.targetVersion", { version: state.targetVersion }),
         enabled: false,
       },
     ];
     if (state.releaseNotesUrl) {
       items.push({
-        label: "What's new — view release notes",
+        label: t("updates.whatsNew"),
         click: () => {
           handlers.openExternal?.(state.releaseNotesUrl as string);
         },
       });
     }
     items.push({
-      label: "Check for updates now",
+      label: t("updates.checkNow"),
       click: () => { handlers.recheck?.(); },
     });
     return items;
@@ -1200,28 +1201,28 @@ export function buildVersionCheckMenuItems(
   if (state.kind === "update-blocked-by-signature-fetch") {
     const items: MenuItemShape[] = [
       {
-        label: `Update blocked: signature could not be verified (${state.reason})`,
+        label: t("updates.blockedSignature", { reason: state.reason }),
         enabled: false,
       },
       {
-        label: `Currently installed: v${state.currentVersion}`,
+        label: t("updates.currentlyInstalled", { current: state.currentVersion }),
         enabled: false,
       },
       {
-        label: `Target version: v${state.targetVersion}`,
+        label: t("updates.targetVersion", { version: state.targetVersion }),
         enabled: false,
       },
     ];
     if (state.releaseNotesUrl) {
       items.push({
-        label: "What's new — view release notes",
+        label: t("updates.whatsNew"),
         click: () => {
           handlers.openExternal?.(state.releaseNotesUrl as string);
         },
       });
     }
     items.push({
-      label: "Check for updates now",
+      label: t("updates.checkNow"),
       click: () => { handlers.recheck?.(); },
     });
     return items;
@@ -1229,11 +1230,11 @@ export function buildVersionCheckMenuItems(
   // error
   return [
     {
-      label: `Couldn't check for updates: ${state.message}`,
+      label: t("updates.checkFailed", { message: state.message }),
       enabled: false,
     },
     {
-      label: "Retry update check",
+      label: t("updates.retryCheck"),
       click: () => { handlers.recheck?.(); },
     },
   ];
@@ -1324,19 +1325,19 @@ export function formatBlockedStateMessage(
 ): BlockedStateMessage {
   if (state.kind === "update-blocked-by-signature-fetch") {
     return {
-      banner: `Update blocked: signature could not be verified (${state.reason})`,
-      currentLine: `Currently installed: v${state.currentVersion}`,
-      targetLine: `Target: v${state.targetVersion}`,
-      downloadHint: `Reason: ${state.reason}`,
+      banner: t("updates.blockedSignature", { reason: state.reason }),
+      currentLine: t("updates.lineCurrentlyInstalled", { version: state.currentVersion }),
+      targetLine: t("updates.lineTarget", { version: state.targetVersion }),
+      downloadHint: t("updates.hintReason", { reason: state.reason }),
       releaseNotesUrl: state.releaseNotesUrl,
       verifyModeChip: formatVerifyModeChip(state.signedDataMode),
     };
   }
   return {
-    banner: `Download v${state.requiredMinVersion} manually first to continue receiving updates`,
-    currentLine: `Currently installed: v${state.currentVersion}`,
-    targetLine: `Target: v${state.targetVersion}`,
-    downloadHint: `Manual download required for v${state.requiredMinVersion}`,
+    banner: t("updates.bannerDownloadManual", { version: state.requiredMinVersion }),
+    currentLine: t("updates.lineCurrentlyInstalled", { version: state.currentVersion }),
+    targetLine: t("updates.lineTarget", { version: state.targetVersion }),
+    downloadHint: t("updates.hintManualDownload", { version: state.requiredMinVersion }),
     releaseNotesUrl: state.releaseNotesUrl,
     // The min-bootstrap verdict has no signedDataMode field — the chip
     // is a sig-gate concept. Always null on this branch.
@@ -1395,24 +1396,24 @@ function formatVerifyModeChip(
 export function formatVersionCheckSummary(state: VersionCheckState): string {
   switch (state.kind) {
     case "idle":
-      return "Update check has not run yet.";
+      return t("updates.summaryIdle");
     case "checking":
-      return "Checking for updates…";
+      return t("updates.summaryChecking");
     case "up-to-date":
-      return `Up to date (v${state.current}).`;
+      return t("updates.summaryUpToDate", { current: state.current });
     case "update-available":
-      return `Update available — v${state.latest} (currently v${state.current}).`;
+      return t("updates.summaryAvailable", { latest: state.latest, current: state.current });
     case "update-blocked-by-min-bootstrap":
       // Headline summary; the full blocked-state UI is rendered from
       // `formatBlockedStateMessage` and a dedicated banner.
-      return `Update blocked: install v${state.requiredMinVersion} manually first.`;
+      return t("updates.summaryBlockedBootstrap", { version: state.requiredMinVersion });
     case "update-blocked-by-signature-fetch":
       // Iter 48 — sig-strict gate fired. Headline names the reason in
       // operator-readable form so the panel banner is self-explanatory
       // without expanding the diagnostics envelope.
-      return `Update blocked by sig-strict: ${state.reason}.`;
+      return t("updates.summaryBlockedSignature", { reason: state.reason });
     case "error":
-      return `Couldn't check for updates: ${state.message}`;
+      return t("updates.summaryError", { message: state.message });
   }
 }
 

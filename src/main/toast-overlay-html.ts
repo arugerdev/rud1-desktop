@@ -19,6 +19,8 @@
  *     - "toast:action"  payload: { id, channel: string } (CTA click)
  */
 
+import { getLocale, t } from "./i18n";
+
 export interface ToastOverlayHtmlOpts {
   /** Resolved theme. The shell only knows light/dark — "system" is
    *  resolved by the main process before rendering so the iframe never
@@ -28,12 +30,13 @@ export interface ToastOverlayHtmlOpts {
 
 export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
   const themeAttr = ` data-theme="${opts.theme}"`;
+  const lang = getLocale();
   const html = `<!doctype html>
-<html lang="en"${themeAttr}>
+<html lang="${lang}"${themeAttr}>
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
-<title>rud1 notifications</title>
+<title>${t("toast.regionLabel")}</title>
 <style>
   /* Tokens cloned from vpn-driver-install-html.ts. Keep in sync. */
   :root {
@@ -261,8 +264,9 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
 </style>
 </head>
 <body>
-  <div id="stack" role="region" aria-label="rud1 notifications"></div>
+  <div id="stack" role="region" aria-label="${t("toast.regionLabel")}"></div>
 <script>
+  var DISMISS_LABEL = ${JSON.stringify(t("toast.dismiss"))};
   // ---- shared helpers ----
   function escapeText(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -310,7 +314,7 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
           '<p class="desc">' + escapeText(t.body) + '</p>' +
           actionHtml +
         '</div>' +
-        '<button class="close" aria-label="Dismiss">×</button>' +
+        '<button class="close" aria-label="' + escapeText(DISMISS_LABEL) + '">×</button>' +
       '</div>' +
       '<div class="progress" style="transform:scaleX(1)"></div>';
 
