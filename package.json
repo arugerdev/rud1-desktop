@@ -1,6 +1,6 @@
 {
   "name": "rud1-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
   "main": "dist/main/index.js",
   "author": "rud1",
@@ -50,11 +50,24 @@
     ],
     "publish": null,
     "win": {
-      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "resources/icon.ico",
       "requestedExecutionLevel": "requireAdministrator",
       "extraResources": [
-        { "from": "resources/win32", "to": "bin", "filter": ["**/*"] }
+        {
+          "from": "resources/win32",
+          "to": "bin",
+          "filter": [
+            "**/*"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -66,28 +79,60 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "resources/icon.png",
       "category": "Network",
       "maintainer": "rud1 <noreply@rud1.es>",
       "extraResources": [
-        { "from": "resources/linux", "to": "bin", "filter": ["**/*"] }
+        {
+          "from": "resources/linux",
+          "to": "bin",
+          "filter": [
+            "**/*"
+          ]
+        }
       ]
     },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
       "category": "public.app-category.utilities",
       "identity": null,
       "extraResources": [
-        { "from": "resources/darwin", "to": "bin", "filter": ["**/*"] }
+        {
+          "from": "resources/darwin",
+          "to": "bin",
+          "filter": [
+            "**/*"
+          ]
+        }
       ]
     },
     "protocols": [
       {
         "name": "rud1",
-        "schemes": ["rud1"]
+        "schemes": [
+          "rud1"
+        ]
       }
     ]
   }
