@@ -19,7 +19,7 @@
  * might (NaN, negative, fractional). They're collapsed to 0.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   computeTrayState,
@@ -27,6 +27,7 @@ import {
   formatTrayTooltip,
   formatTrayTooltipWithVpn,
 } from "./tray-attention";
+import { setLocale } from "./i18n";
 
 describe("formatTrayTitle", () => {
   it("returns empty for zero", () => {
@@ -136,9 +137,15 @@ describe("computeTrayState — transitions", () => {
 });
 
 // Iter 71: VPN overlay on the tray tooltip. Composes the existing
-// first-boot count formatter with a "VPN desconectada" / "reconectando"
+// first-boot count formatter with a "VPN disconnected" / "reconnecting"
 // suffix so the user sees both signals without leaving the menubar.
+// i18n: the tooltip + suffix now route through t(); the suite pins the
+// English locale so the default-locale assertions remain stable, plus a
+// Spanish spot-check proving the localization actually swaps.
 describe("formatTrayTooltipWithVpn (iter 71)", () => {
+  beforeEach(() => setLocale("en"));
+  afterEach(() => setLocale("en"));
+
   it("returns the bare tooltip when VPN is up", () => {
     expect(formatTrayTooltipWithVpn(0, "up")).toBe("rud1 Desktop");
     expect(formatTrayTooltipWithVpn(1, "up")).toBe(
@@ -156,30 +163,40 @@ describe("formatTrayTooltipWithVpn (iter 71)", () => {
     );
   });
 
-  it("appends 'VPN desconectada' on a down state", () => {
+  it("appends the disconnected suffix on a down state", () => {
     expect(formatTrayTooltipWithVpn(0, "down")).toBe(
-      "rud1 Desktop — VPN desconectada",
+      "rud1 Desktop — VPN disconnected",
     );
     expect(formatTrayTooltipWithVpn(2, "down")).toBe(
-      "rud1 Desktop — 2 devices ready to configure — VPN desconectada",
+      "rud1 Desktop — 2 devices ready to configure — VPN disconnected",
     );
   });
 
-  it("appends 'VPN reconectando…' on a recovering state", () => {
+  it("appends the reconnecting suffix on a recovering state", () => {
     expect(formatTrayTooltipWithVpn(0, "recovering")).toBe(
-      "rud1 Desktop — VPN reconectando…",
+      "rud1 Desktop — VPN reconnecting…",
     );
     expect(formatTrayTooltipWithVpn(1, "recovering")).toBe(
-      "rud1 Desktop — 1 device ready to configure — VPN reconectando…",
+      "rud1 Desktop — 1 device ready to configure — VPN reconnecting…",
     );
   });
 
   it("treats non-finite / negative counts the same as the base helper", () => {
     expect(formatTrayTooltipWithVpn(Number.NaN, "down")).toBe(
-      "rud1 Desktop — VPN desconectada",
+      "rud1 Desktop — VPN disconnected",
     );
     expect(formatTrayTooltipWithVpn(-1, "recovering")).toBe(
-      "rud1 Desktop — VPN reconectando…",
+      "rud1 Desktop — VPN reconnecting…",
+    );
+  });
+
+  it("localizes the tooltip + suffix to Spanish when the locale is es", () => {
+    setLocale("es");
+    expect(formatTrayTooltipWithVpn(0, "down")).toBe(
+      "rud1 Desktop — VPN desconectada",
+    );
+    expect(formatTrayTooltipWithVpn(2, "recovering")).toBe(
+      "rud1 Desktop — 2 dispositivos listos para configurar — VPN reconectando…",
     );
   });
 });

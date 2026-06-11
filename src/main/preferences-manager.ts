@@ -25,6 +25,9 @@ import * as path from "path";
 
 export type ThemePreference = "system" | "light" | "dark";
 
+/** UI language. "system" defers to Electron's app.getLocale() at runtime. */
+export type LanguagePreference = "system" | "es" | "en";
+
 export interface NotificationToggles {
   /** Tray "first-boot device on LAN" toast (firmware-discovery probe). */
   firstBoot: boolean;
@@ -43,6 +46,12 @@ export interface NotificationToggles {
 
 export interface Preferences {
   theme: ThemePreference;
+  /**
+   * UI language for the main process (tray, dialogs, toasts, generated
+   * windows). "system" (default) follows Electron's app.getLocale();
+   * "es"/"en" pin the language regardless of OS locale. Spanish-first.
+   */
+  language: LanguagePreference;
   notifications: NotificationToggles;
   /**
    * Iter 8 — auto-reconnect when the WireGuard handshake goes stale
@@ -57,6 +66,7 @@ const SCHEMA_VERSION = 1;
 
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",
+  language: "system",
   notifications: { firstBoot: true, vpn: true, usb: true, deviceReady: true },
   vpnAutoReconnect: true,
 };
@@ -70,9 +80,14 @@ function isThemePreference(v: unknown): v is ThemePreference {
   return v === "system" || v === "light" || v === "dark";
 }
 
+function isLanguagePreference(v: unknown): v is LanguagePreference {
+  return v === "system" || v === "es" || v === "en";
+}
+
 function clonePreferences(p: Preferences): Preferences {
   return {
     theme: p.theme,
+    language: p.language,
     notifications: { ...p.notifications },
     vpnAutoReconnect: p.vpnAutoReconnect,
   };
@@ -91,9 +106,17 @@ export function sanitizePreferences(parsed: unknown): Preferences {
   if (!raw || typeof raw !== "object") return clonePreferences(DEFAULT_PREFERENCES);
 
   const theme = isThemePreference(raw.theme) ? raw.theme : DEFAULT_PREFERENCES.theme;
+  // Tolerant parse: a preferences file written before the `language`
+  // field existed simply gets the default ("system"). We do NOT bump
+  // SCHEMA_VERSION for this — a bump would wipe every existing prefs file
+  // via the version gate above.
+  const language = isLanguagePreference(raw.language)
+    ? raw.language
+    : DEFAULT_PREFERENCES.language;
   const rawN = (raw.notifications as Record<string, unknown> | undefined) ?? {};
   return {
     theme,
+    language,
     notifications: {
       firstBoot:
         typeof rawN.firstBoot === "boolean"
@@ -146,6 +169,7 @@ async function persist(targetPath: string, prefs: Preferences): Promise<void> {
 
 export interface PreferencesPatch {
   theme?: ThemePreference;
+  language?: LanguagePreference;
   notifications?: Partial<NotificationToggles>;
   vpnAutoReconnect?: boolean;
 }
@@ -180,6 +204,7 @@ export async function setPreferences(patch: PreferencesPatch): Promise<Preferenc
   };
   const next: Preferences = {
     theme: isThemePreference(patch.theme) ? patch.theme : current.theme,
+    language: isLanguagePreference(patch.language) ? patch.language : current.language,
     notifications: nextNotifications,
     vpnAutoReconnect:
       typeof patch.vpnAutoReconnect === "boolean"

@@ -54,6 +54,7 @@ import {
   loadPreferences,
   type ThemePreference,
 } from "./preferences-manager";
+import { detectLocale, getLocale, setLocale, t } from "./i18n";
 import { NotificationStreamManager } from "./notification-stream-manager";
 import { notifyDeviceReady } from "./notifications";
 import { destroyToastOverlay, onToastAction, pushToast } from "./toast-overlay";
@@ -193,9 +194,9 @@ function createTray(): void {
 function rebuildTrayMenu(): void {
   if (!tray) return;
   const items: Electron.MenuItemConstructorOptions[] = [
-    { label: `rud1 v${app.getVersion()}`, enabled: false },
+    { label: t("app.versionLabel", { version: app.getVersion() }), enabled: false },
     { type: "separator" },
-    { label: "Open rud1", click: () => { showOrCreateMainWindow(); } },
+    { label: t("tray.open"), click: () => { showOrCreateMainWindow(); } },
   ];
 
   appendMyDevicesSubmenu(items);
@@ -203,26 +204,26 @@ function rebuildTrayMenu(): void {
     const url = lastFirmwareProbe.setupUrl;
     items.push({ type: "separator" });
     items.push({
-      label: `Configure local rud1 (${lastFirmwareProbe.host})`,
+      label: t("tray.configureLocal", { host: lastFirmwareProbe.host }),
       click: () => { void shell.openExternal(url); },
     });
   } else if (lastFirmwareProbe && lastFirmwareProbe.reachable) {
     items.push({ type: "separator" });
     items.push({
-      label: `Open local rud1 panel (${lastFirmwareProbe.host})`,
+      label: t("tray.openLocalPanel", { host: lastFirmwareProbe.host }),
       click: () => { void shell.openExternal(lastFirmwareProbe!.panelUrl); },
     });
   }
   items.push({ type: "separator" });
   items.push({
-    label: `First-boot notifications (${notifiedHosts.length})`,
+    label: t("firstBoot.menuTitle", { count: notifiedHosts.length }),
     submenu: [
       {
-        label: `Show notified hosts (${notifiedHosts.length})`,
+        label: t("firstBoot.showHosts", { count: notifiedHosts.length }),
         click: () => { showDedupeWindow(); },
       },
       {
-        label: "Clear all notified hosts",
+        label: t("firstBoot.clearAll"),
         enabled: notifiedHosts.length > 0,
         click: () => { void clearAllNotifiedHosts(); },
       },
@@ -274,11 +275,11 @@ function rebuildTrayMenu(): void {
   }
   items.push({ type: "separator" });
   items.push({
-    label: "Settings & About…",
+    label: t("tray.settings"),
     click: () => { showSettingsWindow(); },
   });
   items.push({ type: "separator" });
-  items.push({ label: "Quit", click: () => app.quit() });
+  items.push({ label: t("tray.quit"), click: () => app.quit() });
   tray.setContextMenu(Menu.buildFromTemplate(items));
 }
 
@@ -291,7 +292,7 @@ function appendMyDevicesSubmenu(
   if (state.kind === "idle" || state.kind === "loading") {
     if (lastDevices == null) {
       items.push({ type: "separator" });
-      items.push({ label: "Loading devices…", enabled: false });
+      items.push({ label: t("devices.loading"), enabled: false });
       return;
     }
   }
@@ -299,17 +300,17 @@ function appendMyDevicesSubmenu(
     items.push({ type: "separator" });
     if (state.reason === "signed-out") {
       items.push({
-        label: "Sign in to view your devices",
+        label: t("devices.signIn"),
         click: () => { showOrCreateMainWindow(); },
       });
       return;
     }
     items.push({
-      label: `Couldn't load devices (${state.reason})`,
+      label: t("devices.loadFailed", { reason: state.reason }),
       enabled: false,
     });
     items.push({
-      label: "Retry now",
+      label: t("devices.retry"),
       click: () => { void deviceListManager?.refreshNow(); },
     });
     if (lastDevices == null) return;
@@ -318,9 +319,9 @@ function appendMyDevicesSubmenu(
   const devices = lastDevices ?? [];
   if (devices.length === 0) {
     items.push({ type: "separator" });
-    items.push({ label: "No devices yet", enabled: false });
+    items.push({ label: t("devices.none"), enabled: false });
     items.push({
-      label: "Open dashboard to add one",
+      label: t("devices.openDashboardToAdd"),
       click: () => { showOrCreateMainWindow(); },
     });
     return;
@@ -332,7 +333,7 @@ function appendMyDevicesSubmenu(
 
   items.push({ type: "separator" });
   items.push({
-    label: `My devices — ${onlineCount}/${devices.length} online`,
+    label: t("devices.myDevices", { online: onlineCount, total: devices.length }),
     submenu: [
       ...visible.map<Electron.MenuItemConstructorOptions>((d) => ({
         label: `${d.name}  ·  ${statusGlyph(d.status)}`,
@@ -343,14 +344,14 @@ function appendMyDevicesSubmenu(
         ? [
             { type: "separator" as const },
             {
-              label: `…and ${devices.length - MAX_VISIBLE} more`,
+              label: t("devices.andMore", { count: devices.length - MAX_VISIBLE }),
               enabled: false,
             },
           ]
         : []),
       { type: "separator" },
       {
-        label: "View all in dashboard",
+        label: t("devices.viewAll"),
         click: () => {
           if (mainWindow) {
             showOrCreateMainWindow();
@@ -361,7 +362,7 @@ function appendMyDevicesSubmenu(
         },
       },
       {
-        label: "Refresh now",
+        label: t("devices.refresh"),
         click: () => { void deviceListManager?.refreshNow(); },
       },
     ],
@@ -505,7 +506,7 @@ function showDedupeWindow(): void {
   dedupeWindow = new BrowserWindow({
     width: 540,
     height: 480,
-    title: "rud1 — First-boot notifications",
+    title: t("firstBoot.windowTitle"),
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
     minimizable: false,
     maximizable: false,
@@ -529,12 +530,25 @@ function showDedupeWindow(): void {
 }
 
 function buildDedupeWindowHtml(): string {
+  const lang = getLocale();
+  // i18n strings consumed by the inline render() script — JSON-encoded so
+  // quotes / accents survive the data: URL round-trip safely.
+  const L = JSON.stringify({
+    empty: t("firstBoot.empty"),
+    clear: t("firstBoot.clear"),
+    clearAll: t("firstBoot.clearAllBtn"),
+    colHost: t("firstBoot.colHost"),
+    colNotified: t("firstBoot.colNotified"),
+    countOne: t("firstBoot.hostCountOne"),
+    countMany: t("firstBoot.hostCountMany", { count: "{count}" }),
+    confirmClearAll: t("firstBoot.confirmClearAll"),
+  });
   const html = `<!doctype html>
-<html lang="en">
+<html lang="${lang}">
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
-<title>rud1 — First-boot notifications</title>
+<title>${t("firstBoot.windowTitle")}</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -640,14 +654,15 @@ function buildDedupeWindowHtml(): string {
 </style>
 </head>
 <body>
-  <h1>First-boot notifications</h1>
-  <p class="help">Hosts the desktop app has already notified you about. Entries expire automatically after 30 days; a host that was finished and re-flashed will re-notify on its next first-boot detection.</p>
+  <h1>${t("firstBoot.heading")}</h1>
+  <p class="help">${t("firstBoot.help")}</p>
   <div id="list"></div>
   <div class="footer">
     <span id="status"></span>
-    <button id="clear-all" class="danger" disabled>Clear all</button>
+    <button id="clear-all" class="danger" disabled>${t("firstBoot.clearAllBtn")}</button>
   </div>
 <script>
+  const L = ${L};
   const listEl = document.getElementById('list');
   const statusEl = document.getElementById('status');
   const clearAllBtn = document.getElementById('clear-all');
@@ -671,21 +686,23 @@ function buildDedupeWindowHtml(): string {
   }
   function render(hosts) {
     if (!hosts || hosts.length === 0) {
-      listEl.innerHTML = '<div class="empty">No notified hosts.</div>';
+      listEl.innerHTML = '<div class="empty">' + escape(L.empty) + '</div>';
       clearAllBtn.disabled = true;
       statusEl.textContent = '';
       return;
     }
     clearAllBtn.disabled = false;
-    statusEl.textContent = hosts.length + ' notified host' + (hosts.length === 1 ? '' : 's');
+    statusEl.textContent = hosts.length === 1
+      ? L.countOne
+      : L.countMany.replace('{count}', String(hosts.length));
     var rows = hosts.map(function(h) {
       return '<tr>' +
         '<td class="host">' + escape(h.host) + '</td>' +
         '<td class="when" title="' + escape(h.notifiedAt) + '">' + escape(relativeTime(h.notifiedAt)) + '</td>' +
-        '<td style="text-align:right;"><button data-host="' + escape(h.host) + '" class="row-clear">Clear</button></td>' +
+        '<td style="text-align:right;"><button data-host="' + escape(h.host) + '" class="row-clear">' + escape(L.clear) + '</button></td>' +
       '</tr>';
     }).join('');
-    listEl.innerHTML = '<table><thead><tr><th>Host</th><th>Notified</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+    listEl.innerHTML = '<table><thead><tr><th>' + escape(L.colHost) + '</th><th>' + escape(L.colNotified) + '</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
     Array.prototype.forEach.call(document.querySelectorAll('button.row-clear'), function(btn) {
       btn.addEventListener('click', function() {
         const host = btn.getAttribute('data-host');
@@ -698,7 +715,7 @@ function buildDedupeWindowHtml(): string {
     });
   }
   clearAllBtn.addEventListener('click', function() {
-    if (!confirm('Clear all notified hosts? They will re-notify on the next first-boot detection.')) return;
+    if (!confirm(L.confirmClearAll)) return;
     clearAllBtn.disabled = true;
     window.electronAPI.firstBootDedupe.clearAll().then(function() {
       render([]);
@@ -737,7 +754,7 @@ function showSettingsWindow(): void {
   settingsWindow = new BrowserWindow({
     width: 580,
     height: 540,
-    title: "rud1 — Settings & About",
+    title: t("settings.windowTitle"),
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
     minimizable: false,
     maximizable: false,
@@ -756,6 +773,8 @@ function showSettingsWindow(): void {
     buildSettingsWindowHtmlWithRuntimeVersion(
       app.getVersion(),
       getPreferences().theme,
+      getPreferences().language,
+      getLocale(),
     ),
   );
   settingsWindow.on("closed", () => {
@@ -779,7 +798,7 @@ function showDriverInstallWindow(): void {
   driverInstallWindow = new BrowserWindow({
     width: 560,
     height: 520,
-    title: "rud1 — Install VPN driver",
+    title: t("vpnDriver.windowTitle"),
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
     minimizable: false,
     maximizable: false,
@@ -817,6 +836,7 @@ function showDriverInstallWindow(): void {
     buildDriverInstallWindowHtml({
       currentTheme: getPreferences().theme,
       bundledFiles: wellKnownBundle,
+      locale: getLocale(),
     }),
   );
   driverInstallWindow.on("closed", () => {
@@ -834,10 +854,10 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
   const autoDismissMs = 12_000;
   pushToast({
     kind: "info",
-    title: "rud1 device ready to configure",
-    body: `A first-boot device is on the LAN at ${probe.host}. Open the setup wizard to claim it.`,
+    title: t("firstBoot.toastTitle"),
+    body: t("firstBoot.toastBody", { host: probe.host }),
     autoDismissMs,
-    action: { label: "Open wizard", channel },
+    action: { label: t("firstBoot.openWizard"), channel },
   });
   const off = onToastAction(
     channel,
@@ -872,6 +892,12 @@ app.whenReady().then(() => {
     },
     onPreferencesUpdated: (prefs) => {
       applyThemeFromPreference(prefs.theme);
+      // Re-resolve the locale (the language preference may have changed)
+      // and rebuild the tray + menus so the new language takes effect
+      // without an app restart. Open data-URL windows render the locale
+      // baked at open time; they pick up the change on next open.
+      setLocale(detectLocale());
+      rebuildTrayMenu();
     },
     versionCheck: {
       getState: () =>
@@ -960,6 +986,12 @@ app.whenReady().then(() => {
   const preferencesPath = path.join(app.getPath("userData"), PREFERENCES_FILENAME);
   void loadPreferences(preferencesPath).then((prefs) => {
     applyThemeFromPreference(prefs.theme);
+    // Now that the persisted `language` preference is in the cache,
+    // resolve + apply the UI locale and rebuild any chrome that was
+    // built with the boot-time default ("en"). detectLocale() reads the
+    // preference (es/en pin) or falls back to app.getLocale() (es-first).
+    setLocale(detectLocale());
+    rebuildTrayMenu();
   });
   void loadUsbSessions(usbSessionFilepath, new Date()).then((loaded) => {
     usbSessions = loaded;

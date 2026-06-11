@@ -1,7 +1,11 @@
 // Renderer carga via data: URL en sandboxed BrowserWindow; CSP default-src 'none'.
+import { t, type Locale } from "./i18n";
+
 export function buildSettingsWindowHtml(
   currentVersion: string,
   currentTheme: "system" | "light" | "dark" = "system",
+  currentLanguage: "system" | "es" | "en" = "system",
+  locale: Locale = "en",
 ): string {
   // CSP mirrors the dedupe inspector — deny everything by default,
   // allow inline scripts/styles only (the bridge runs in the isolated
@@ -21,12 +25,67 @@ export function buildSettingsWindowHtml(
       ? ` data-theme="${currentTheme}"`
       : "";
   const initialThemeLiteral = JSON.stringify(currentTheme);
+  const initialLanguageLiteral = JSON.stringify(currentLanguage);
+  // Localized strings consumed by the inline renderer JS. `t()` reads the
+  // module-level locale, which the runtime sets to `locale` before calling
+  // this builder (and which defaults to "en" in the vitest suite — keeping
+  // the byte-for-byte HTML pins green). JSON-encoded so accents survive
+  // the data: URL round-trip.
+  const L = JSON.stringify({
+    statusUnavailable: t("settings.statusUnavailable"),
+    currentlyInstalled: t("settings.currentlyInstalled"),
+    targetVersion: t("settings.targetVersionRow"),
+    requiredIntermediate: t("settings.requiredIntermediate"),
+    reason: t("settings.reasonRow"),
+    signatureUrl: t("settings.signatureUrlRow"),
+    httpStatus: t("settings.httpStatusRow"),
+    expectedSha: t("settings.expectedSha"),
+    verifyHashHelp: t("settings.verifyHashHelp", {
+      winCmd: "<code>Get-FileHash -Algorithm SHA256 &lt;file&gt;</code>",
+      unixCmd: "<code>shasum -a 256 &lt;file&gt;</code>",
+    }),
+    copyDownloadUrl: t("settings.copyDownloadUrl"),
+    copyExpectedSha: t("settings.copyExpectedSha"),
+    copyDiagnostics: t("settings.copyDiagnostics"),
+    copiedDownloadUrl: t("settings.copiedDownloadUrl"),
+    copiedExpectedSha: t("settings.copiedExpectedSha"),
+    copiedDiagnostics: t("settings.copiedDiagnostics"),
+    copyFailedPrefix: t("settings.copyFailed", { error: "" }),
+    recheckToast: t("settings.recheckToast"),
+    checkNow: t("updates.checkNow"),
+    whatsNew: t("updates.whatsNew"),
+    bannerDownloadManual: t("updates.bannerDownloadManual", { version: "{version}" }),
+    blockedSignature: t("updates.blockedSignature", { reason: "{reason}" }),
+    summaryIdle: t("updates.summaryIdle"),
+    summaryChecking: t("updates.summaryChecking"),
+    summaryUpToDate: t("updates.summaryUpToDate", { current: "{current}" }),
+    summaryAvailable: t("updates.summaryAvailable", { latest: "{latest}", current: "{current}" }),
+    summaryError: t("updates.summaryError", { message: "{message}" }),
+    autoStartWin: t("settings.autoStartWin"),
+    autoStartMac: t("settings.autoStartMac"),
+    autoStartLinux: t("settings.autoStartLinux"),
+    autoStartUnsupported: t("settings.autoStartUnsupported"),
+    autoStartStateUnavailable: t("settings.autoStartStateUnavailable"),
+    autoStartApiUnavailable: t("settings.autoStartApiUnavailable"),
+    autoStartEnabled: t("settings.autoStartEnabled"),
+    autoStartDisabled: t("settings.autoStartDisabled"),
+    autoStartChangeFailedPrefix: t("settings.autoStartChangeFailed", { error: "" }),
+    themeToastPrefix: t("settings.themeToast", { theme: "" }),
+    themeSaveFailedPrefix: t("settings.themeSaveFailed", { error: "" }),
+    languageToastPrefix: t("settings.languageToast", { language: "" }),
+    languageSaveFailedPrefix: t("settings.languageSaveFailed", { error: "" }),
+    notifSavedOn: t("settings.notifSavedOn", { key: "{key}" }),
+    notifSavedOff: t("settings.notifSavedOff", { key: "{key}" }),
+    saveFailedPrefix: t("settings.saveFailed", { error: "" }),
+    openFromTray: t("settings.openFromTray"),
+    unknownError: t("settings.unknownError"),
+  });
   const html = `<!doctype html>
-<html lang="en"${themeAttr}>
+<html lang="${locale}"${themeAttr}>
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
-<title>rud1 — Settings & About</title>
+<title>${t("settings.windowTitle")}</title>
 <style>
   /*
    * rud1 Liquid Glass — Settings panel.
@@ -395,73 +454,84 @@ export function buildSettingsWindowHtml(
 </style>
 </head>
 <body>
-  <h1>Settings &amp; About</h1>
-  <p class="muted">rud1 desktop — operator controls and update status.</p>
+  <h1>${t("settings.heading")}</h1>
+  <p class="muted">${t("settings.subtitle")}</p>
 
-  <h2>Updates</h2>
-  <div id="updates"><p class="muted">Loading…</p></div>
+  <h2>${t("settings.updatesHeading")}</h2>
+  <div id="updates"><p class="muted">${t("settings.loading")}</p></div>
 
-  <h2>Appearance</h2>
+  <h2>${t("settings.appearanceHeading")}</h2>
   <div class="pref-row">
     <div class="pref-text">
-      <div class="label">Theme</div>
-      <div class="hint">Pick how the Settings panel looks. Other surfaces follow the cloud dashboard.</div>
+      <div class="label">${t("settings.themeLabel")}</div>
+      <div class="hint">${t("settings.themeHint")}</div>
     </div>
-    <div class="theme-picker" role="radiogroup" aria-label="Theme">
-      <label><input type="radio" name="theme-pick" value="system" /><span>System</span></label>
-      <label><input type="radio" name="theme-pick" value="light" /><span>Light</span></label>
-      <label><input type="radio" name="theme-pick" value="dark" /><span>Dark</span></label>
+    <div class="theme-picker" role="radiogroup" aria-label="${t("settings.themeLabel")}">
+      <label><input type="radio" name="theme-pick" value="system" /><span>${t("settings.themeSystem")}</span></label>
+      <label><input type="radio" name="theme-pick" value="light" /><span>${t("settings.themeLight")}</span></label>
+      <label><input type="radio" name="theme-pick" value="dark" /><span>${t("settings.themeDark")}</span></label>
+    </div>
+  </div>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">${t("settings.languageLabel")}</div>
+      <div class="hint">${t("settings.languageHint")}</div>
+    </div>
+    <div class="theme-picker" role="radiogroup" aria-label="${t("settings.languageLabel")}">
+      <label><input type="radio" name="lang-pick" value="system" /><span>${t("settings.languageSystem")}</span></label>
+      <label><input type="radio" name="lang-pick" value="es" /><span>${t("settings.languageEs")}</span></label>
+      <label><input type="radio" name="lang-pick" value="en" /><span>${t("settings.languageEn")}</span></label>
     </div>
   </div>
 
-  <h2>Notifications</h2>
+  <h2>${t("settings.notificationsHeading")}</h2>
   <div class="pref-row">
     <div class="pref-text">
-      <div class="label">First-boot devices</div>
-      <div class="hint">Toast when a freshly-flashed rud1 appears on the LAN.</div>
+      <div class="label">${t("settings.notifFirstBootLabel")}</div>
+      <div class="hint">${t("settings.notifFirstBootHint")}</div>
     </div>
-    <label class="toggle" aria-label="Toggle first-boot notifications">
+    <label class="toggle" aria-label="${t("settings.notifFirstBootLabel")}">
       <input type="checkbox" id="notif-firstBoot" />
       <span class="slider"></span>
     </label>
   </div>
   <div class="pref-row">
     <div class="pref-text">
-      <div class="label">VPN events</div>
-      <div class="hint">Tunnel connect / disconnect / CGNAT-warning toasts.</div>
+      <div class="label">${t("settings.notifVpnLabel")}</div>
+      <div class="hint">${t("settings.notifVpnHint")}</div>
     </div>
-    <label class="toggle" aria-label="Toggle VPN notifications">
+    <label class="toggle" aria-label="${t("settings.notifVpnLabel")}">
       <input type="checkbox" id="notif-vpn" />
       <span class="slider"></span>
     </label>
   </div>
   <div class="pref-row">
     <div class="pref-text">
-      <div class="label">USB events</div>
-      <div class="hint">Device attach / detach toasts after a USB/IP session change.</div>
+      <div class="label">${t("settings.notifUsbLabel")}</div>
+      <div class="hint">${t("settings.notifUsbHint")}</div>
     </div>
-    <label class="toggle" aria-label="Toggle USB notifications">
+    <label class="toggle" aria-label="${t("settings.notifUsbLabel")}">
       <input type="checkbox" id="notif-usb" />
       <span class="slider"></span>
     </label>
   </div>
 
-  <h2>Startup</h2>
+  <h2>${t("settings.startupHeading")}</h2>
   <div id="auto-start" class="pref-row">
     <div class="pref-text">
-      <div class="label">Launch rud1 at login</div>
-      <div class="hint" id="auto-start-hint">Loading…</div>
+      <div class="label">${t("settings.autoStartLabel")}</div>
+      <div class="hint" id="auto-start-hint">${t("settings.loading")}</div>
     </div>
-    <label class="toggle" aria-label="Toggle launch at login">
+    <label class="toggle" aria-label="${t("settings.autoStartLabel")}">
       <input type="checkbox" id="auto-start-toggle" disabled />
       <span class="slider"></span>
     </label>
   </div>
 
-  <h2>First-boot notifications</h2>
-  <p class="muted">Manage hosts the desktop app has already notified you about.</p>
+  <h2>${t("settings.firstBootHeading")}</h2>
+  <p class="muted">${t("settings.firstBootHelp")}</p>
   <div class="actions">
-    <button id="open-dedupe">Open notified-hosts inspector…</button>
+    <button id="open-dedupe">${t("settings.openInspector")}</button>
   </div>
 
   <div id="toast" class="toast" aria-live="polite"></div>
@@ -477,6 +547,13 @@ export function buildSettingsWindowHtml(
   // cannot read it off state). Mirrors buildErrorDiagnosticsBlob in
   // version-check-manager.ts byte-for-byte.
   var APP_VERSION = ${currentVersionLiteral};
+  var L = ${L};
+  var INITIAL_LANGUAGE = ${initialLanguageLiteral};
+  function fmt(template, vars) {
+    return String(template).replace(/\\{(\\w+)\\}/g, function (m, k) {
+      return Object.prototype.hasOwnProperty.call(vars, k) ? String(vars[k]) : m;
+    });
+  }
   var updatesEl = document.getElementById('updates');
   var toastEl = document.getElementById('toast');
   var toastTimer = null;
@@ -500,9 +577,9 @@ export function buildSettingsWindowHtml(
     // self-contained inside the data URL — the formatters' contracts
     // are what's tested in the main-process suite; this script only
     // handles the DOM mapping.
-    var banner = 'Download v' + escape(state.requiredMinVersion) + ' manually first to continue receiving updates';
+    var banner = fmt(L.bannerDownloadManual, { version: escape(state.requiredMinVersion) });
     var notes = state.releaseNotesUrl
-      ? '<p><a id="rn-link">What\\'s new — view release notes</a></p>'
+      ? '<p><a id="rn-link">' + escape(L.whatsNew) + '</a></p>'
       : '';
     // Iter 41 — surface the optional bridgeSha256 hex inline so the
     // operator can verify the artifact integrity after manual download.
@@ -514,32 +591,28 @@ export function buildSettingsWindowHtml(
       ? rawHash.toLowerCase()
       : null;
     var hashRow = hashHex
-      ? '<div class="row"><span class="k">Expected SHA-256</span>' +
+      ? '<div class="row"><span class="k">' + escape(L.expectedSha) + '</span>' +
           '<span class="v"><code class="hash" id="bridge-hash">' + escape(hashHex) + '</code></span>' +
         '</div>'
       : '';
     var hashHelp = hashHex
-      ? '<p class="muted hash-help" id="bridge-hash-help">' +
-          'Verify hash before running installer — ' +
-          '<code>Get-FileHash -Algorithm SHA256 &lt;file&gt;</code> on Windows or ' +
-          '<code>shasum -a 256 &lt;file&gt;</code> on macOS / Linux.' +
-        '</p>'
+      ? '<p class="muted hash-help" id="bridge-hash-help">' + L.verifyHashHelp + '</p>'
       : '';
     var hashBtn = hashHex
-      ? '<button id="copy-hash" aria-describedby="bridge-hash-help">Copy expected sha256</button>'
+      ? '<button id="copy-hash" aria-describedby="bridge-hash-help">' + escape(L.copyExpectedSha) + '</button>'
       : '';
     updatesEl.innerHTML =
       '<div class="banner">' + banner + '</div>' +
       '<div class="summary">' +
-        '<div class="row"><span class="k">Currently installed</span><span class="v">v' + escape(state.currentVersion) + '</span></div>' +
-        '<div class="row"><span class="k">Target version</span><span class="v">v' + escape(state.targetVersion) + '</span></div>' +
-        '<div class="row"><span class="k">Required intermediate</span><span class="v">v' + escape(state.requiredMinVersion) + '</span></div>' +
+        '<div class="row"><span class="k">' + escape(L.currentlyInstalled) + '</span><span class="v">v' + escape(state.currentVersion) + '</span></div>' +
+        '<div class="row"><span class="k">' + escape(L.targetVersion) + '</span><span class="v">v' + escape(state.targetVersion) + '</span></div>' +
+        '<div class="row"><span class="k">' + escape(L.requiredIntermediate) + '</span><span class="v">v' + escape(state.requiredMinVersion) + '</span></div>' +
         hashRow +
       '</div>' +
       hashHelp +
       notes +
       '<div class="actions">' +
-        '<button id="copy-url" class="primary"' + (hashHex ? ' aria-describedby="bridge-hash-help"' : '') + '>Copy download URL</button>' +
+        '<button id="copy-url" class="primary"' + (hashHex ? ' aria-describedby="bridge-hash-help"' : '') + '>' + escape(L.copyDownloadUrl) + '</button>' +
         hashBtn +
         // Iter 42 — copy a JSON diagnostics envelope (capturedAt + all
         // blocked-state fields + resolved download URL via pickDownloadUrl
@@ -547,8 +620,8 @@ export function buildSettingsWindowHtml(
         // pattern on the AuditForwardStatusCard. Always rendered: the
         // envelope is always meaningful (versions are guaranteed
         // populated by parseManifest) regardless of optional fields.
-        '<button id="copy-diagnostics">Copy diagnostics</button>' +
-        '<button id="recheck">Check for updates now</button>' +
+        '<button id="copy-diagnostics">' + escape(L.copyDiagnostics) + '</button>' +
+        '<button id="recheck">' + escape(L.checkNow) + '</button>' +
       '</div>';
 
     document.getElementById('copy-url').addEventListener('click', function() {
@@ -595,15 +668,15 @@ export function buildSettingsWindowHtml(
       // byte-for-byte.
       var clip = hashHex ? (url + '  (sha256: ' + hashHex + ')') : url;
       window.electronAPI.clipboard.writeText(clip).then(function(res) {
-        if (res && res.ok) toast('Copied download URL to clipboard');
-        else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+        if (res && res.ok) toast(L.copiedDownloadUrl);
+        else toast(L.copyFailedPrefix + (res && res.error ? res.error : L.unknownError));
       });
     });
     if (hashHex) {
       document.getElementById('copy-hash').addEventListener('click', function() {
         window.electronAPI.clipboard.writeText(hashHex).then(function(res) {
-          if (res && res.ok) toast('Copied expected sha256 to clipboard');
-          else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+          if (res && res.ok) toast(L.copiedExpectedSha);
+          else toast(L.copyFailedPrefix + (res && res.error ? res.error : L.unknownError));
         });
       });
     }
@@ -686,13 +759,13 @@ export function buildSettingsWindowHtml(
       }
       var blob = JSON.stringify(envelope, null, 2);
       window.electronAPI.clipboard.writeText(blob).then(function(res) {
-        if (res && res.ok) toast('Copied diagnostics to clipboard');
-        else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+        if (res && res.ok) toast(L.copiedDiagnostics);
+        else toast(L.copyFailedPrefix + (res && res.error ? res.error : L.unknownError));
       });
     });
     document.getElementById('recheck').addEventListener('click', function() {
       window.electronAPI.versionCheck.recheck();
-      toast('Re-checking for updates…');
+      toast(L.recheckToast);
     });
     if (state.releaseNotesUrl) {
       document.getElementById('rn-link').addEventListener('click', function() {
@@ -710,13 +783,13 @@ export function buildSettingsWindowHtml(
     // version-check-manager.ts byte-for-byte — the iter-48 helper test
     // is the ground truth.
     var reason = String(state.reason || '');
-    var banner = 'Update blocked: signature could not be verified (' + escape(reason) + ')';
+    var banner = fmt(L.blockedSignature, { reason: escape(reason) });
     var sigRow = state.signatureUrl
-      ? '<div class="row"><span class="k">Signature URL</span>' +
+      ? '<div class="row"><span class="k">' + escape(L.signatureUrl) + '</span>' +
           '<span class="v"><code>' + escape(state.signatureUrl) + '</code></span></div>'
       : '';
     var statusRow = (typeof state.httpStatus === 'number')
-      ? '<div class="row"><span class="k">HTTP status</span><span class="v">' + escape(state.httpStatus) + '</span></div>'
+      ? '<div class="row"><span class="k">' + escape(L.httpStatus) + '</span><span class="v">' + escape(state.httpStatus) + '</span></div>'
       : '';
     // Iter 54 — small chip surfacing the iter-53 signedDataMode label.
     // Mirrors formatVerifyModeChip in version-check-manager.ts:
@@ -742,22 +815,22 @@ export function buildSettingsWindowHtml(
       ? '<div class="chip" id="verify-mode-chip">' + escape(chipText) + '</div>'
       : '';
     var notes = state.releaseNotesUrl
-      ? '<p><a id="rn-link">What\\'s new — view release notes</a></p>'
+      ? '<p><a id="rn-link">' + escape(L.whatsNew) + '</a></p>'
       : '';
     updatesEl.innerHTML =
       '<div class="banner">' + banner + '</div>' +
       '<div class="summary">' +
-        '<div class="row"><span class="k">Currently installed</span><span class="v">v' + escape(state.currentVersion) + '</span></div>' +
-        '<div class="row"><span class="k">Target version</span><span class="v">v' + escape(state.targetVersion) + '</span></div>' +
-        '<div class="row"><span class="k">Reason</span><span class="v">' + escape(reason) + '</span></div>' +
+        '<div class="row"><span class="k">' + escape(L.currentlyInstalled) + '</span><span class="v">v' + escape(state.currentVersion) + '</span></div>' +
+        '<div class="row"><span class="k">' + escape(L.targetVersion) + '</span><span class="v">v' + escape(state.targetVersion) + '</span></div>' +
+        '<div class="row"><span class="k">' + escape(L.reason) + '</span><span class="v">' + escape(reason) + '</span></div>' +
         sigRow +
         statusRow +
         chipRow +
       '</div>' +
       notes +
       '<div class="actions">' +
-        '<button id="copy-diagnostics">Copy diagnostics</button>' +
-        '<button id="recheck">Check for updates now</button>' +
+        '<button id="copy-diagnostics">' + escape(L.copyDiagnostics) + '</button>' +
+        '<button id="recheck">' + escape(L.checkNow) + '</button>' +
       '</div>';
 
     document.getElementById('copy-diagnostics').addEventListener('click', function() {
@@ -808,13 +881,13 @@ export function buildSettingsWindowHtml(
       envelope.manifestVersion = state.manifestVersion != null ? state.manifestVersion : null;
       var blob = JSON.stringify(envelope, null, 2);
       window.electronAPI.clipboard.writeText(blob).then(function(res) {
-        if (res && res.ok) toast('Copied diagnostics to clipboard');
-        else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+        if (res && res.ok) toast(L.copiedDiagnostics);
+        else toast(L.copyFailedPrefix + (res && res.error ? res.error : L.unknownError));
       });
     });
     document.getElementById('recheck').addEventListener('click', function() {
       window.electronAPI.versionCheck.recheck();
-      toast('Re-checking for updates…');
+      toast(L.recheckToast);
     });
     if (state.releaseNotesUrl) {
       document.getElementById('rn-link').addEventListener('click', function() {
@@ -825,7 +898,7 @@ export function buildSettingsWindowHtml(
 
   function renderState(state) {
     if (!state) {
-      updatesEl.innerHTML = '<p class="muted">Update status unavailable.</p>';
+      updatesEl.innerHTML = '<p class="muted">' + escape(L.statusUnavailable) + '</p>';
       return;
     }
     if (state.kind === 'update-blocked-by-min-bootstrap') {
@@ -838,17 +911,17 @@ export function buildSettingsWindowHtml(
     }
     var summary = '';
     var bannerCls = '';
-    if (state.kind === 'idle') summary = 'Update check has not run yet.';
-    else if (state.kind === 'checking') summary = 'Checking for updates…';
+    if (state.kind === 'idle') summary = escape(L.summaryIdle);
+    else if (state.kind === 'checking') summary = escape(L.summaryChecking);
     else if (state.kind === 'up-to-date') {
-      summary = 'Up to date (v' + escape(state.current) + ').';
+      summary = fmt(L.summaryUpToDate, { current: escape(state.current) });
       bannerCls = 'ok';
     }
     else if (state.kind === 'update-available') {
-      summary = 'Update available — v' + escape(state.latest) + ' (currently v' + escape(state.current) + ').';
+      summary = fmt(L.summaryAvailable, { latest: escape(state.latest), current: escape(state.current) });
       bannerCls = 'warn';
     }
-    else if (state.kind === 'error') summary = "Couldn't check for updates: " + escape(state.message);
+    else if (state.kind === 'error') summary = fmt(L.summaryError, { message: escape(state.message) });
     var banner = bannerCls ? '<div class="banner ' + bannerCls + '">' + summary + '</div>' : '<p>' + summary + '</p>';
     // Iter 43 — extend iter-42 "Copy diagnostics" coverage to the three
     // non-blocked verdicts (up-to-date, update-available, error) so a
@@ -862,12 +935,12 @@ export function buildSettingsWindowHtml(
     var diagBtn = (state.kind === 'up-to-date' ||
                    state.kind === 'update-available' ||
                    state.kind === 'error')
-      ? '<button id="copy-diagnostics">Copy diagnostics</button>'
+      ? '<button id="copy-diagnostics">' + escape(L.copyDiagnostics) + '</button>'
       : '';
     updatesEl.innerHTML = banner +
       '<div class="actions">' +
         diagBtn +
-        '<button id="recheck">Check for updates now</button>' +
+        '<button id="recheck">' + escape(L.checkNow) + '</button>' +
       '</div>';
     if (diagBtn) {
       document.getElementById('copy-diagnostics').addEventListener('click', function() {
@@ -975,14 +1048,14 @@ export function buildSettingsWindowHtml(
         }
         var blob = JSON.stringify(envelope, null, 2);
         window.electronAPI.clipboard.writeText(blob).then(function(res) {
-          if (res && res.ok) toast('Copied diagnostics to clipboard');
-          else toast('Copy failed: ' + (res && res.error ? res.error : 'unknown'));
+          if (res && res.ok) toast(L.copiedDiagnostics);
+          else toast(L.copyFailedPrefix + (res && res.error ? res.error : L.unknownError));
         });
       });
     }
     document.getElementById('recheck').addEventListener('click', function() {
       window.electronAPI.versionCheck.recheck();
-      toast('Re-checking for updates…');
+      toast(L.recheckToast);
     });
   }
 
@@ -1003,7 +1076,7 @@ export function buildSettingsWindowHtml(
     // No direct IPC: surface a hint that the inspector is on the tray
     // submenu. This is honest about the iter-28 boundary without
     // pretending we can launch it from a sibling panel.
-    toast('Open from the tray menu → First-boot notifications');
+    toast(L.openFromTray);
   });
 
   // Auto-start preference. The toggle reflects the OS state — we read
@@ -1013,16 +1086,16 @@ export function buildSettingsWindowHtml(
   var autoStartHint = document.getElementById('auto-start-hint');
   function autoStartHintFor(state) {
     if (state.unsupported) {
-      return state.reason || 'Auto-start is not available on this build.';
+      return state.reason || L.autoStartUnsupported;
     }
     if (state.platform === 'win32') {
-      return 'rud1 launches minimized into the tray on Windows sign-in.';
+      return L.autoStartWin;
     }
     if (state.platform === 'darwin') {
-      return 'rud1 starts hidden on macOS login (Login Items entry).';
+      return L.autoStartMac;
     }
     if (state.platform === 'linux') {
-      return 'Manages an entry in ~/.config/autostart/. Effective on next login.';
+      return L.autoStartLinux;
     }
     return '';
   }
@@ -1034,7 +1107,7 @@ export function buildSettingsWindowHtml(
   if (window.electronAPI && window.electronAPI.app && typeof window.electronAPI.app.getAutoStart === 'function') {
     window.electronAPI.app.getAutoStart().then(function(res) {
       if (res && res.ok) applyAutoStart(res.result);
-      else autoStartHint.textContent = 'Auto-start state unavailable.';
+      else autoStartHint.textContent = L.autoStartStateUnavailable;
     });
     autoStartToggle.addEventListener('change', function() {
       var desired = !!autoStartToggle.checked;
@@ -1042,17 +1115,17 @@ export function buildSettingsWindowHtml(
       window.electronAPI.app.setAutoStart(desired).then(function(res) {
         if (res && res.ok) {
           applyAutoStart(res.result);
-          toast(res.result.enabled ? 'Auto-start enabled' : 'Auto-start disabled');
+          toast(res.result.enabled ? L.autoStartEnabled : L.autoStartDisabled);
         } else {
           // Revert optimistic flip; surface the underlying error.
           autoStartToggle.checked = !desired;
           autoStartToggle.disabled = false;
-          toast('Could not change auto-start: ' + (res && res.error ? res.error : 'unknown'));
+          toast(L.autoStartChangeFailedPrefix + (res && res.error ? res.error : L.unknownError));
         }
       });
     });
   } else {
-    autoStartHint.textContent = 'Auto-start API unavailable in this build.';
+    autoStartHint.textContent = L.autoStartApiUnavailable;
   }
 
   // Persisted preferences (theme + per-category notification toggles).
@@ -1079,13 +1152,21 @@ export function buildSettingsWindowHtml(
     document.getElementById('notif-vpn').checked = !!notifs.vpn;
     document.getElementById('notif-usb').checked = !!notifs.usb;
   }
+  function syncLangPicker(language) {
+    var radios = document.querySelectorAll('input[name="lang-pick"]');
+    for (var i = 0; i < radios.length; i++) {
+      radios[i].checked = radios[i].value === language;
+    }
+  }
   syncThemePicker(INITIAL_THEME);
+  syncLangPicker(INITIAL_LANGUAGE);
 
   if (window.electronAPI && window.electronAPI.app && typeof window.electronAPI.app.getPreferences === 'function') {
     window.electronAPI.app.getPreferences().then(function(res) {
       if (!res || !res.ok) return;
       applyThemeToDom(res.result.theme);
       syncThemePicker(res.result.theme);
+      syncLangPicker(res.result.language);
       syncNotifToggles(res.result.notifications);
     });
 
@@ -1100,9 +1181,29 @@ export function buildSettingsWindowHtml(
             // optimistic flip, but a malformed value would snap back.
             applyThemeToDom(res.result.theme);
             syncThemePicker(res.result.theme);
-            toast('Theme: ' + res.result.theme);
+            toast(L.themeToastPrefix + res.result.theme);
           } else {
-            toast('Could not save theme: ' + (res && res.error ? res.error : 'unknown'));
+            toast(L.themeSaveFailedPrefix + (res && res.error ? res.error : L.unknownError));
+          }
+        });
+      });
+    }
+
+    // Language picker. Changing the language re-renders main-process
+    // chrome (tray, menus) via the onPreferencesUpdated hook; this panel
+    // keeps its baked-at-open-time copy until reopened, so we surface a
+    // toast confirming the saved value.
+    var langRadios = document.querySelectorAll('input[name="lang-pick"]');
+    for (var j = 0; j < langRadios.length; j++) {
+      langRadios[j].addEventListener('change', function(e) {
+        var nextLang = e.target.value;
+        syncLangPicker(nextLang);
+        window.electronAPI.app.setPreferences({ language: nextLang }).then(function(res) {
+          if (res && res.ok) {
+            syncLangPicker(res.result.language);
+            toast(L.languageToastPrefix + res.result.language);
+          } else {
+            toast(L.languageSaveFailedPrefix + (res && res.error ? res.error : L.unknownError));
           }
         });
       });
@@ -1119,11 +1220,11 @@ export function buildSettingsWindowHtml(
           el.disabled = false;
           if (res && res.ok) {
             syncNotifToggles(res.result.notifications);
-            toast(key + ' notifications: ' + (res.result.notifications[key] ? 'on' : 'off'));
+            toast(fmt(res.result.notifications[key] ? L.notifSavedOn : L.notifSavedOff, { key: key }));
           } else {
             // Revert optimistic flip.
             el.checked = !desired;
-            toast('Could not save: ' + (res && res.error ? res.error : 'unknown'));
+            toast(L.saveFailedPrefix + (res && res.error ? res.error : L.unknownError));
           }
         });
       });
@@ -1184,6 +1285,13 @@ export function buildSettingsWindowHtml(
 export function buildSettingsWindowHtmlWithRuntimeVersion(
   runtimeAppVersion: string,
   initialTheme: "system" | "light" | "dark" = "system",
+  initialLanguage: "system" | "es" | "en" = "system",
+  locale: Locale = "en",
 ): string {
-  return buildSettingsWindowHtml(runtimeAppVersion, initialTheme);
+  return buildSettingsWindowHtml(
+    runtimeAppVersion,
+    initialTheme,
+    initialLanguage,
+    locale,
+  );
 }

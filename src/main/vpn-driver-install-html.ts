@@ -27,12 +27,17 @@
  * data-URL window doesn't depend on the panel being responsive.
  */
 
+import { t, type Locale } from "./i18n";
+
 export interface DriverInstallWindowOpts {
   currentTheme: "system" | "light" | "dark";
   /** Pre-computed list of file paths the renderer will mention as
    *  "files installed" for transparency. Optional; main passes
    *  `[]` to suppress the section. */
   bundledFiles?: readonly string[];
+  /** UI locale for the modal copy. Defaults to the current i18n locale
+   *  (already set by the time the modal opens at runtime). */
+  locale?: Locale;
 }
 
 export function buildDriverInstallWindowHtml(
@@ -42,13 +47,24 @@ export function buildDriverInstallWindowHtml(
     opts.currentTheme === "light" || opts.currentTheme === "dark"
       ? ` data-theme="${opts.currentTheme}"`
       : "";
+  const lang = opts.locale ?? "en";
   const filesJson = JSON.stringify(opts.bundledFiles ?? []);
+  // i18n strings consumed by the inline install script — JSON-encoded so
+  // accents survive the data: URL round-trip.
+  const L = JSON.stringify({
+    bridgeUnavailable: t("vpnDriver.bridgeUnavailable"),
+    waitingElevation: t("vpnDriver.waitingElevation"),
+    installedOk: t("vpnDriver.installedOk"),
+    installCancelled: t("vpnDriver.installCancelled"),
+    installFailed: t("vpnDriver.installFailed"),
+    done: t("vpnDriver.done"),
+  });
   const html = `<!doctype html>
-<html lang="en"${themeAttr}>
+<html lang="${lang}"${themeAttr}>
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
-<title>rud1 — Install VPN driver</title>
+<title>${t("vpnDriver.windowTitle")}</title>
 <style>
   /*
    * Liquid Glass tokens — cloned from settings-window-html.ts. Keep them
@@ -289,36 +305,34 @@ export function buildDriverInstallWindowHtml(
 <body>
   <div class="card">
     <h1>
-      Install the VPN driver
-      <span class="badge">One-time setup</span>
+      ${t("vpnDriver.heading")}
+      <span class="badge">${t("vpnDriver.badge")}</span>
     </h1>
     <p>
-      rud1 needs to install the <strong>TAP-Windows V9</strong> kernel driver
-      so the OpenVPN client can expose a virtual network adapter to your
-      engineering tools (TIA Portal, Codesys, OPC UA discovery, etc).
+      ${t("vpnDriver.intro")}
     </p>
     <p class="muted">
-      Windows will ask you to approve the install. The driver is signed by
-      OpenVPN Inc. and bundled with rud1 — no external download is required.
+      ${t("vpnDriver.introMuted")}
     </p>
     <ul class="steps">
-      <li>Click <strong>Install driver</strong> below.</li>
-      <li>Approve the OS elevation prompt (User Account Control).</li>
-      <li>Click <strong>Connect</strong> on the device page in rud1.</li>
+      <li>${t("vpnDriver.step1Prefix")}<strong>${t("vpnDriver.step1Bold")}</strong>${t("vpnDriver.step1Suffix")}</li>
+      <li>${t("vpnDriver.step2")}</li>
+      <li>${t("vpnDriver.step3Prefix")}<strong>${t("vpnDriver.step3Bold")}</strong>${t("vpnDriver.step3Suffix")}</li>
     </ul>
     <details class="files">
-      <summary>Files installed (signed by OpenVPN Inc.)</summary>
+      <summary>${t("vpnDriver.filesSummary")}</summary>
       <ul id="files"></ul>
     </details>
     <div class="actions">
-      <button id="cancel">Cancel</button>
-      <button id="install" class="primary">Install driver</button>
+      <button id="cancel">${t("vpnDriver.cancel")}</button>
+      <button id="install" class="primary">${t("vpnDriver.install")}</button>
     </div>
     <div id="status" class="status" role="status" aria-live="polite"></div>
   </div>
 <script>
   // ESM-safe inline runtime — runs in the isolated renderer context but
   // shares the preload's electronAPI bridge.
+  const L = ${L};
   const files = ${filesJson};
   const filesEl = document.getElementById('files');
   if (files.length === 0) {
@@ -340,6 +354,11 @@ export function buildDriverInstallWindowHtml(
   const cancelBtn = document.getElementById('cancel');
   const statusEl = document.getElementById('status');
 
+  function escapeStatus(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
   function setStatus(text, isError) {
     statusEl.textContent = text || '';
     statusEl.classList.toggle('error', !!isError);
@@ -349,7 +368,7 @@ export function buildDriverInstallWindowHtml(
       installBtn.disabled = true;
       cancelBtn.disabled = true;
       setStatus('');
-      statusEl.innerHTML = '<span class="spinner"></span>Waiting for the OS elevation prompt…';
+      statusEl.innerHTML = '<span class="spinner"></span>' + escapeStatus(L.waitingElevation);
     } else {
       installBtn.disabled = false;
       cancelBtn.disabled = false;
@@ -362,25 +381,25 @@ export function buildDriverInstallWindowHtml(
 
   installBtn.addEventListener('click', function () {
     if (!window.electronAPI || !window.electronAPI.vpn || !window.electronAPI.vpn.installTapDriver) {
-      setStatus('Bridge unavailable. Please relaunch rud1 and try again.', true);
+      setStatus(L.bridgeUnavailable, true);
       return;
     }
     setLoading(true);
     window.electronAPI.vpn.installTapDriver().then(function (res) {
       setLoading(false);
       if (res && res.ok) {
-        setStatus('Driver installed. You can close this window and click Connect.', false);
-        installBtn.textContent = 'Done';
+        setStatus(L.installedOk, false);
+        installBtn.textContent = L.done;
         installBtn.classList.remove('primary');
         installBtn.addEventListener('click', function () { window.close(); }, { once: true });
         installBtn.disabled = false;
         cancelBtn.style.display = 'none';
       } else {
-        setStatus((res && res.error) || 'The driver install was cancelled or failed.', true);
+        setStatus((res && res.error) || L.installCancelled, true);
       }
     }, function (err) {
       setLoading(false);
-      setStatus(err && err.message ? err.message : 'The driver install failed.', true);
+      setStatus(err && err.message ? err.message : L.installFailed, true);
     });
   });
 </script>

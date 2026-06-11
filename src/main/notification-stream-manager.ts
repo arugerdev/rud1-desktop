@@ -4,6 +4,7 @@ import { net } from "electron";
 import { isNotificationEnabled } from "./preferences-manager";
 import { SseParser, type SseEvent } from "./sse-parser";
 import { onToastAction, pushToast, type ToastKind } from "./toast-overlay";
+import { t } from "./i18n";
 
 const STREAM_PATH = "/api/v1/notifications/stream";
 const INITIAL_RECONNECT_MS = 1_000;
@@ -202,7 +203,7 @@ export class NotificationStreamManager {
       : null;
 
     const action = linkAbsolute
-      ? { label: "Open", channel: `cloud-notif:open:${parsed.id}` }
+      ? { label: t("notifications.cloudOpen"), channel: `cloud-notif:open:${parsed.id}` }
       : undefined;
 
     const autoDismissMs =
