@@ -1,10 +1,11 @@
 // Renderer carga via data: URL en sandboxed BrowserWindow; CSP default-src 'none'.
 import { t, type Locale } from "./i18n";
+import type { LanguagePreference } from "./preferences-manager";
 
 export function buildSettingsWindowHtml(
   currentVersion: string,
   currentTheme: "system" | "light" | "dark" = "system",
-  currentLanguage: "system" | "es" | "en" = "system",
+  currentLanguage: LanguagePreference = "system",
   locale: Locale = "en",
 ): string {
   // CSP mirrors the dedupe inspector — deny everything by default,
@@ -371,6 +372,9 @@ export function buildSettingsWindowHtml(
   }
   .theme-picker input { display: none; }
   .theme-picker label:hover { color: var(--fg); }
+  /* Language picker hosts 12 options — let it wrap instead of overflowing
+     the narrow Settings modal. */
+  .lang-picker { flex-wrap: wrap; justify-content: flex-end; max-width: 60%; }
   .theme-picker input:checked + span {
     color: var(--primary-fg);
   }
@@ -477,10 +481,19 @@ export function buildSettingsWindowHtml(
       <div class="label">${t("settings.languageLabel")}</div>
       <div class="hint">${t("settings.languageHint")}</div>
     </div>
-    <div class="theme-picker" role="radiogroup" aria-label="${t("settings.languageLabel")}">
+    <div class="theme-picker lang-picker" role="radiogroup" aria-label="${t("settings.languageLabel")}">
       <label><input type="radio" name="lang-pick" value="system" /><span>${t("settings.languageSystem")}</span></label>
-      <label><input type="radio" name="lang-pick" value="es" /><span>${t("settings.languageEs")}</span></label>
-      <label><input type="radio" name="lang-pick" value="en" /><span>${t("settings.languageEn")}</span></label>
+      <label><input type="radio" name="lang-pick" value="es" /><span>Español</span></label>
+      <label><input type="radio" name="lang-pick" value="en" /><span>English</span></label>
+      <label><input type="radio" name="lang-pick" value="fr" /><span>Français</span></label>
+      <label><input type="radio" name="lang-pick" value="it" /><span>Italiano</span></label>
+      <label><input type="radio" name="lang-pick" value="de" /><span>Deutsch</span></label>
+      <label><input type="radio" name="lang-pick" value="ptBR" /><span>Português (BR)</span></label>
+      <label><input type="radio" name="lang-pick" value="zh" /><span>简体中文</span></label>
+      <label><input type="radio" name="lang-pick" value="ja" /><span>日本語</span></label>
+      <label><input type="radio" name="lang-pick" value="ko" /><span>한국어</span></label>
+      <label><input type="radio" name="lang-pick" value="ru" /><span>Русский</span></label>
+      <label><input type="radio" name="lang-pick" value="ar" /><span>العربية</span></label>
     </div>
   </div>
 
@@ -1285,7 +1298,7 @@ export function buildSettingsWindowHtml(
 export function buildSettingsWindowHtmlWithRuntimeVersion(
   runtimeAppVersion: string,
   initialTheme: "system" | "light" | "dark" = "system",
-  initialLanguage: "system" | "es" | "en" = "system",
+  initialLanguage: LanguagePreference = "system",
   locale: Locale = "en",
 ): string {
   return buildSettingsWindowHtml(

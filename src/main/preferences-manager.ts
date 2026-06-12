@@ -26,7 +26,34 @@ import * as path from "path";
 export type ThemePreference = "system" | "light" | "dark";
 
 /** UI language. "system" defers to Electron's app.getLocale() at runtime. */
-export type LanguagePreference = "system" | "es" | "en";
+export type LanguagePreference =
+  | "system"
+  | "es"
+  | "en"
+  | "fr"
+  | "it"
+  | "de"
+  | "ptBR"
+  | "zh"
+  | "ja"
+  | "ko"
+  | "ru"
+  | "ar";
+
+const LANGUAGE_PREFERENCES: readonly LanguagePreference[] = [
+  "system",
+  "es",
+  "en",
+  "fr",
+  "it",
+  "de",
+  "ptBR",
+  "zh",
+  "ja",
+  "ko",
+  "ru",
+  "ar",
+];
 
 export interface NotificationToggles {
   /** Tray "first-boot device on LAN" toast (firmware-discovery probe). */
@@ -81,7 +108,7 @@ function isThemePreference(v: unknown): v is ThemePreference {
 }
 
 function isLanguagePreference(v: unknown): v is LanguagePreference {
-  return v === "system" || v === "es" || v === "en";
+  return typeof v === "string" && (LANGUAGE_PREFERENCES as readonly string[]).includes(v);
 }
 
 function clonePreferences(p: Preferences): Preferences {

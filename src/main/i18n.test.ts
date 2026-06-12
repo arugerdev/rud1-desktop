@@ -26,28 +26,36 @@ function collectKeys(tree: Tree, prefix = ""): string[] {
   return out;
 }
 
-describe("translations key parity", () => {
-  it("es and en have identical key sets", () => {
-    const esKeys = collectKeys(translations.es as Tree).sort();
-    const enKeys = collectKeys(translations.en as Tree).sort();
-    // Surface the offending keys directly so a missing translation is
-    // obvious in the failure output.
-    const onlyEs = esKeys.filter((k) => !enKeys.includes(k));
-    const onlyEn = enKeys.filter((k) => !esKeys.includes(k));
-    expect(onlyEs).toEqual([]);
-    expect(onlyEn).toEqual([]);
-    expect(esKeys).toEqual(enKeys);
-  });
+// Every locale tree must mirror the English (fallback) tree key-for-key.
+// "en" is the source of truth because `t()` falls back to it.
+const ALL_LOCALES = Object.keys(translations) as Locale[];
+const NON_EN_LOCALES = ALL_LOCALES.filter((l) => l !== "en");
 
-  it("every leaf is a non-empty string in both locales", () => {
-    for (const locale of ["es", "en"] as Locale[]) {
+describe("translations key parity", () => {
+  const enKeys = collectKeys(translations.en as Tree).sort();
+
+  it.each(NON_EN_LOCALES)(
+    "%s has the same key set as en",
+    (locale) => {
+      const keys = collectKeys(translations[locale] as Tree).sort();
+      // Surface the offending keys directly so a missing translation is
+      // obvious in the failure output.
+      const onlyLocale = keys.filter((k) => !enKeys.includes(k));
+      const onlyEn = enKeys.filter((k) => !keys.includes(k));
+      expect(onlyLocale).toEqual([]);
+      expect(onlyEn).toEqual([]);
+      expect(keys).toEqual(enKeys);
+    },
+  );
+
+  it("every leaf is a non-empty string in every locale", () => {
+    for (const locale of ALL_LOCALES) {
+      setLocale(locale);
       for (const key of collectKeys(translations[locale] as Tree)) {
         expect(typeof t(key)).toBe("string");
-        // Resolve against the locale being checked.
-        setLocale(locale);
         expect(t(key).length).toBeGreaterThan(0);
-        setLocale("en");
       }
+      setLocale("en");
     }
   });
 });
@@ -105,8 +113,14 @@ describe("setLocale / getLocale", () => {
     expect(getLocale()).toBe("es");
     setLocale("en");
     expect(getLocale()).toBe("en");
-    // @ts-expect-error — guarding the runtime narrowing
+    // A valid new locale round-trips.
     setLocale("fr");
+    expect(getLocale()).toBe("fr");
+    setLocale("ar");
+    expect(getLocale()).toBe("ar");
+    setLocale("en");
+    // @ts-expect-error — guarding the runtime narrowing
+    setLocale("xx");
     // Unchanged: invalid input is ignored.
     expect(getLocale()).toBe("en");
   });
