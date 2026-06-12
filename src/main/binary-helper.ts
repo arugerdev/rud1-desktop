@@ -11,10 +11,14 @@
  *      even when the user has done a clean install.
  *   3. The bare binary name, letting the OS resolve via PATH.
  *
- * Required binaries per platform:
- *   Windows: openvpn.exe (bundled portable), tapctl.exe (bundled), usbip.exe
- *   Linux:   openvpn, usbip, usbipd
- *   macOS:   openvpn
+ * Required binaries per platform (bundled = shipped in resources/<platform>/,
+ * system = resolved from PATH / package manager):
+ *   Windows: openvpn.exe + tapctl.exe (bundled portable), vhui64.exe +
+ *            USBip-installer.exe (bundled).
+ *   Linux:   vhclientx86_64 (bundled VirtualHere); openvpn + usbip (system,
+ *            via deb `recommends` / PATH).
+ *   macOS:   vhclient-darwin (bundled VirtualHere universal); openvpn (system,
+ *            Homebrew / PATH).
  */
 
 import path from "path";
@@ -155,20 +159,6 @@ export function usbipdPath(): string {
   return binaryPath("usbipd");
 }
 
-/**
- * Resolves `rud1-bridge`, the Go auxiliary binary that runs the
- * desktop-side TCP↔serial proxy for CDC-class devices. macOS ships
- * arch-suffixed binaries (rud1-bridge-x64 / rud1-bridge-arm64) because
- * cross-compiling lipo'd universal binaries from a Windows dev box
- * isn't possible; the launcher branches on `process.arch` to pick
- * the right one. Linux + Windows ship a single amd64 binary because
- * neither build target supports arm64 yet (rud1-desktop only renders
- * on the operator's machine, which is overwhelmingly x64).
- *
- * Falls through to bare `rud1-bridge` (PATH lookup) on platforms we
- * haven't shipped a binary for — useful during dev when running
- * against a hand-built copy on PATH.
- */
 /**
  * Returns true when `binaryPath(name)` resolved to a real file. Useful
  * for preflight checks that need to give the user an actionable error

@@ -1,6 +1,6 @@
 {
   "name": "rud1-desktop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
   "main": "dist/main/index.js",
   "author": "rud1",
@@ -15,6 +15,8 @@
     "fetch:openvpn-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-openvpn-win.ps1",
     "fetch:usbip-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-usbip-win.ps1",
     "fetch:virtualhere-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-virtualhere-win.ps1",
+    "fetch:virtualhere-linux": "bash scripts/fetch-virtualhere-linux.sh",
+    "fetch:virtualhere-mac": "bash scripts/fetch-virtualhere-mac.sh",
     "icons:generate": "python scripts/generate-app-icons.py",
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
@@ -103,6 +105,12 @@
             "**/*"
           ]
         }
+      ]
+    },
+    "deb": {
+      "recommends": [
+        "openvpn",
+        "usbip"
       ]
     },
     "mac": {
