@@ -1047,6 +1047,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
             ok: true;
             result: {
               theme: "system" | "light" | "dark";
+              language: string;
+              autoUpdate: boolean;
               notifications: { firstBoot: boolean; vpn: boolean; usb: boolean };
             };
           }
@@ -1060,6 +1062,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
      */
     setPreferences: (patch: {
       theme?: "system" | "light" | "dark";
+      language?: string;
+      autoUpdate?: boolean;
       notifications?: Partial<{ firstBoot: boolean; vpn: boolean; usb: boolean }>;
     }) =>
       ipcRenderer.invoke("app:setPreferences", patch) as Promise<
@@ -1067,6 +1071,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
             ok: true;
             result: {
               theme: "system" | "light" | "dark";
+              language: string;
+              autoUpdate: boolean;
               notifications: { firstBoot: boolean; vpn: boolean; usb: boolean };
             };
           }
@@ -1176,6 +1182,44 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ) => cb(state);
       ipcRenderer.on("versionCheck:update", listener);
       return () => ipcRenderer.removeListener("versionCheck:update", listener);
+    },
+  },
+
+  // Update dialog — the launch-time / manual "a new version is available"
+  // window. Surfaces the combined version-check + download state and the
+  // four lifecycle actions (start download, apply+restart, dismiss, recheck).
+  // The dialog renders its own progress bar / ETA from the pushed
+  // `updater:state` events.
+  updater: {
+    getState: () =>
+      ipcRenderer.invoke("updater:getState") as Promise<
+        | {
+            ok: true;
+            result: import("../main/update-dialog-html").UpdaterDialogState;
+          }
+        | { ok: false; error: string }
+      >,
+    /** Begin the in-app background download of the available update. */
+    start: () =>
+      ipcRenderer.invoke("updater:start") as Promise<{ ok: boolean; error?: string }>,
+    /** Verify + hand off to the OS installer and restart. */
+    apply: () =>
+      ipcRenderer.invoke("updater:apply") as Promise<{ ok: boolean; error?: string }>,
+    /** Dismiss: close the dialog and continue into the main window. */
+    later: () =>
+      ipcRenderer.invoke("updater:later") as Promise<{ ok: boolean; error?: string }>,
+    /** Re-run the manifest version check. */
+    recheck: () =>
+      ipcRenderer.invoke("updater:recheck") as Promise<{ ok: boolean; error?: string }>,
+    onState: (
+      cb: (state: import("../main/update-dialog-html").UpdaterDialogState) => void,
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: import("../main/update-dialog-html").UpdaterDialogState,
+      ) => cb(state);
+      ipcRenderer.on("updater:state", listener);
+      return () => ipcRenderer.removeListener("updater:state", listener);
     },
   },
 

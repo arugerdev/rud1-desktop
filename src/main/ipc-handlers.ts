@@ -4,6 +4,7 @@ import { getAutoStart, setAutoStart } from "./auto-start-manager";
 import {
   getPreferences,
   setPreferences,
+  isLanguagePreference,
   type PreferencesPatch,
 } from "./preferences-manager";
 import {
@@ -126,6 +127,28 @@ export interface FirstBootDedupeAccessor {
  */
 export interface VersionCheckAccessor {
   getState: () => VersionCheckState;
+  recheck: () => void;
+}
+
+/**
+ * Accessor for the launch-time / manual update dialog. The dialog window
+ * (a trusted data:-URL BrowserWindow opened by index.ts) reads the
+ * combined updater state and drives the four lifecycle actions. Each
+ * method is best-effort and never throws across the IPC boundary — the
+ * handlers wrap them in the standard `{ok}` envelope. Optional so the
+ * iter-22 ipc-handlers test harness can construct the registrar without
+ * stubbing it; the channels skip registration when absent.
+ */
+export interface UpdaterDialogAccessor {
+  /** Combined snapshot the dialog renders (phase + progress + versions). */
+  getState: () => unknown;
+  /** Begin the in-app background download of the available update. */
+  start: () => void;
+  /** Verify the staged artifact and hand off to the OS installer + restart. */
+  apply: () => void;
+  /** Dismiss the dialog and continue into the main window. */
+  later: () => void;
+  /** Re-run the manifest version check. */
   recheck: () => void;
 }
 
@@ -407,6 +430,7 @@ export const __test = {
 export function registerIpcHandlers(opts: {
   firstBootDedupe?: FirstBootDedupeAccessor;
   versionCheck?: VersionCheckAccessor;
+  updater?: UpdaterDialogAccessor;
   usbSessionState?: UsbSessionStateAccessor;
   /** Iter 71 — see VpnHealthAccessor doc for the rationale. Optional so
    *  unit tests that don't care about the broadcast surface can keep
@@ -1381,11 +1405,10 @@ export function registerIpcHandlers(opts: {
     ) {
       cleaned.theme = patch.theme;
     }
-    if (
-      patch.language === "system" ||
-      patch.language === "es" ||
-      patch.language === "en"
-    ) {
+    // Validate against the canonical LanguagePreference set (12 locales) — a
+    // hard-coded es/en/system list silently dropped the other 9 picker
+    // options, snapping the radio back on every selection.
+    if (isLanguagePreference(patch.language)) {
       cleaned.language = patch.language;
     }
     const rawN = patch.notifications;
@@ -1399,6 +1422,9 @@ export function registerIpcHandlers(opts: {
     }
     if (typeof patch.vpnAutoReconnect === "boolean") {
       cleaned.vpnAutoReconnect = patch.vpnAutoReconnect;
+    }
+    if (typeof patch.autoUpdate === "boolean") {
+      cleaned.autoUpdate = patch.autoUpdate;
     }
     try {
       const result = await setPreferences(cleaned);
@@ -1513,6 +1539,61 @@ export function registerIpcHandlers(opts: {
       if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
       try {
         versionCheck.recheck();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+  }
+
+  // ─── Update dialog — launch-time / manual "new version" window ──────────
+  // Same late-binding + trusted-webContents rationale as the version-check
+  // surface above: the dialog is a data:-URL BrowserWindow opened by
+  // index.ts (and registered via markWebContentsTrusted), and the accessor
+  // is wired inside app.whenReady() so the registrar can't capture it at
+  // module load. Channels skip registration when the accessor is absent.
+  const updater = opts.updater;
+  if (updater) {
+    ipcMain.handle("updater:getState", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const snapshot = JSON.parse(JSON.stringify(updater.getState()));
+        return { ok: true, result: snapshot };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+    ipcMain.handle("updater:start", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        updater.start();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+    ipcMain.handle("updater:apply", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        updater.apply();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+    ipcMain.handle("updater:later", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        updater.later();
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+    ipcMain.handle("updater:recheck", (event) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        updater.recheck();
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };

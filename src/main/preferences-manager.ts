@@ -86,6 +86,15 @@ export interface Preferences {
    * off from Settings for users who prefer manual control.
    */
   vpnAutoReconnect: boolean;
+  /**
+   * Auto-update opt-in. When true the launch-time update flow downloads
+   * and installs a newer build automatically (still showing the visual
+   * progress dialog). When false (default) the operator is prompted with
+   * a yes/no dialog on launch and updates only proceed on confirmation.
+   * Mirrored into `auto-update-config.json` so the tray's
+   * `isAutoUpdateEnabled()` gate stays consistent in packaged builds.
+   */
+  autoUpdate: boolean;
 }
 
 export const PREFERENCES_FILENAME = "preferences.json";
@@ -96,6 +105,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   language: "system",
   notifications: { firstBoot: true, vpn: true, usb: true, deviceReady: true },
   vpnAutoReconnect: true,
+  autoUpdate: false,
 };
 
 interface PersistedFile {
@@ -107,7 +117,7 @@ function isThemePreference(v: unknown): v is ThemePreference {
   return v === "system" || v === "light" || v === "dark";
 }
 
-function isLanguagePreference(v: unknown): v is LanguagePreference {
+export function isLanguagePreference(v: unknown): v is LanguagePreference {
   return typeof v === "string" && (LANGUAGE_PREFERENCES as readonly string[]).includes(v);
 }
 
@@ -117,6 +127,7 @@ function clonePreferences(p: Preferences): Preferences {
     language: p.language,
     notifications: { ...p.notifications },
     vpnAutoReconnect: p.vpnAutoReconnect,
+    autoUpdate: p.autoUpdate,
   };
 }
 
@@ -162,6 +173,10 @@ export function sanitizePreferences(parsed: unknown): Preferences {
       typeof raw.vpnAutoReconnect === "boolean"
         ? raw.vpnAutoReconnect
         : DEFAULT_PREFERENCES.vpnAutoReconnect,
+    autoUpdate:
+      typeof raw.autoUpdate === "boolean"
+        ? raw.autoUpdate
+        : DEFAULT_PREFERENCES.autoUpdate,
   };
 }
 
@@ -199,6 +214,7 @@ export interface PreferencesPatch {
   language?: LanguagePreference;
   notifications?: Partial<NotificationToggles>;
   vpnAutoReconnect?: boolean;
+  autoUpdate?: boolean;
 }
 
 /**
@@ -237,6 +253,10 @@ export async function setPreferences(patch: PreferencesPatch): Promise<Preferenc
       typeof patch.vpnAutoReconnect === "boolean"
         ? patch.vpnAutoReconnect
         : current.vpnAutoReconnect,
+    autoUpdate:
+      typeof patch.autoUpdate === "boolean"
+        ? patch.autoUpdate
+        : current.autoUpdate,
   };
   cached = next;
   if (activePath) {

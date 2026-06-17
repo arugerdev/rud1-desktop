@@ -45,6 +45,10 @@ import {
 import {
   buildSettingsWindowHtmlWithRuntimeVersion,
 } from "./settings-window-html";
+import {
+  buildUpdateDialogHtml,
+  type UpdaterDialogState,
+} from "./update-dialog-html";
 import { buildDriverInstallWindowHtml } from "./vpn-driver-install-html";
 import { detectOpenVpnRuntime, openvpnRuntimeDir } from "./openvpn-installer";
 import {
@@ -93,11 +97,18 @@ const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 const VERSION_MANIFEST_URL =
   process.env.RUD1_VERSION_MANIFEST_URL ?? "https://rud1.es/desktop/manifest.json";
 const FIRMWARE_PROBE_INTERVAL_MS = 60_000;
+// Hard cap on how long the launch-time update gate waits for the first
+// manifest check before giving up and opening the main window. Keeps a
+// slow / offline network from stalling startup; the regular hourly poll
+// still surfaces updates later via the tray.
+const LAUNCH_GATE_TIMEOUT_MS = 6_000;
+const AUTO_UPDATE_CONFIG_FILE = "auto-update-config.json";
 
 let mainWindow: BrowserWindow | null = null;
 let dedupeWindow: BrowserWindow | null = null;
 let notificationStream: NotificationStreamManager | null = null;
 let settingsWindow: BrowserWindow | null = null;
+let updateDialogWindow: BrowserWindow | null = null;
 let driverInstallWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let lastFirmwareProbe: FirmwareProbeResult | null = null;
@@ -112,6 +123,20 @@ let lastVersionCheckState: VersionCheckState = { kind: "idle" };
 let deviceListManager: DeviceListManager | null = null;
 let lastManifestSha256: string | null = null;
 let lastManifestVersion: number | null = null;
+
+// Armed by the launch gate (auto mode) so a "ready-to-apply" produced by
+// THAT download triggers the openPath+restart. In-session downloads (tray
+// "Update available", Settings "Download and install") never arm it, so they
+// surface the manual "Restart and install" affordance instead of force-
+// quitting a running session.
+let autoApplyArmed = false;
+// Resolves with the first terminal (non-checking) version-check verdict so
+// the launch gate can decide whether to prompt before opening the app.
+let firstVersionCheckSettled = false;
+let resolveFirstVersionCheck: ((s: VersionCheckState) => void) | null = null;
+const firstVersionCheckPromise = new Promise<VersionCheckState>((res) => {
+  resolveFirstVersionCheck = res;
+});
 
 // Win32 tray ContextMenu no se puede tematizar (lo renderiza el OS).
 function applyThemeFromPreference(pref: ThemePreference): void {
@@ -746,6 +771,206 @@ function broadcastVersionCheckUpdate(state: VersionCheckState): void {
   }
 }
 
+// ─── Update dialog (launch-time prompt + visual download progress) ──────────
+//
+// Combines the live VersionCheckState + AutoUpdateState + the `autoUpdate`
+// preference into the single shape the dialog renderer maps to a card. The
+// renderer computes elapsed/ETA/speed itself from the pushed byte counts, so
+// nothing wall-clock has to live in the state machine.
+function computeUpdaterDialogState(): UpdaterDialogState {
+  const auto = getAutoUpdateState();
+  const vc = lastVersionCheckState;
+  const autoUpdate = getPreferences().autoUpdate;
+  let current = app.getVersion();
+  let latest = current;
+  let downloadUrl: string | null = null;
+  if (vc.kind === "update-available") {
+    current = vc.current;
+    latest = vc.latest;
+    downloadUrl = vc.downloadUrl;
+  } else if (vc.kind === "up-to-date") {
+    current = vc.current;
+    latest = vc.latest;
+  }
+
+  // An in-flight / finished download takes priority over the verdict — the
+  // operator wants progress on the running download, not "v1.4 available".
+  if (auto.kind === "downloading") {
+    return {
+      phase: "downloading",
+      current,
+      latest,
+      downloadUrl,
+      bytesReceived: auto.bytesReceived,
+      totalBytes: auto.totalBytes,
+      message: "",
+      autoUpdate,
+    };
+  }
+  if (auto.kind === "ready-to-apply") {
+    return { phase: "ready", current, latest, downloadUrl, bytesReceived: 0, totalBytes: null, message: "", autoUpdate };
+  }
+  if (auto.kind === "error") {
+    return { phase: "error", current, latest, downloadUrl, bytesReceived: 0, totalBytes: null, message: auto.message, autoUpdate };
+  }
+  // Auto-updater idle → derive from the version-check verdict.
+  const base = { current, latest, downloadUrl, bytesReceived: 0, totalBytes: null as number | null, message: "", autoUpdate };
+  switch (vc.kind) {
+    case "update-available":
+      return { ...base, phase: "available" };
+    case "up-to-date":
+      return { ...base, phase: "up-to-date" };
+    case "error":
+      return { ...base, phase: "error", message: vc.message };
+    case "update-blocked-by-min-bootstrap":
+      return { ...base, phase: "error", message: t("updates.summaryBlockedBootstrap", { version: vc.requiredMinVersion }) };
+    case "update-blocked-by-signature-fetch":
+      return { ...base, phase: "error", message: t("updates.summaryBlockedSignature", { reason: vc.reason }) };
+    default:
+      return { ...base, phase: "checking" };
+  }
+}
+
+function broadcastUpdaterState(): void {
+  if (!updateDialogWindow || updateDialogWindow.isDestroyed()) return;
+  try {
+    const snapshot = JSON.parse(JSON.stringify(computeUpdaterDialogState())) as UpdaterDialogState;
+    updateDialogWindow.webContents.send("updater:state", snapshot);
+  } catch {
+    // best-effort
+  }
+}
+
+function showUpdateDialog(): void {
+  if (updateDialogWindow && !updateDialogWindow.isDestroyed()) {
+    updateDialogWindow.focus();
+    return;
+  }
+  updateDialogWindow = new BrowserWindow({
+    width: 460,
+    height: 440,
+    title: t("updateDialog.windowTitle"),
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#0a0e17" : "#f4f6fa",
+    minimizable: false,
+    maximizable: false,
+    resizable: false,
+    parent: mainWindow ?? undefined,
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/index.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  updateDialogWindow.setMenu(null);
+  const trustedId = updateDialogWindow.webContents.id;
+  markWebContentsTrusted(trustedId);
+  updateDialogWindow.loadURL(buildUpdateDialogHtml(getPreferences().theme, getLocale()));
+  updateDialogWindow.on("closed", () => {
+    unmarkWebContentsTrusted(trustedId);
+    updateDialogWindow = null;
+    // Never strand the app with zero windows: if the dialog was the only
+    // surface (launch gate) and we're not mid-quit, fall through to the
+    // main window so closing the dialog "X" still opens rud1.
+    if (!isQuitting && (!mainWindow || mainWindow.isDestroyed())) {
+      showOrCreateMainWindow();
+    }
+  });
+}
+
+function closeUpdateDialogAndShowMain(): void {
+  const w = updateDialogWindow;
+  updateDialogWindow = null;
+  if (w && !w.isDestroyed()) {
+    try { w.close(); } catch { /* already gone */ }
+  }
+  showOrCreateMainWindow();
+}
+
+// Begin the in-app background download of the available update. Opens the
+// progress dialog first (so a Settings-initiated "Download and install" has
+// somewhere to render). When the manifest carries no in-app artifact URL we
+// fall back to opening the public download page in the browser.
+function startUpdateDownload(): void {
+  const vc = lastVersionCheckState;
+  if (vc.kind !== "update-available") return;
+  if (!updateDialogWindow || updateDialogWindow.isDestroyed()) {
+    showUpdateDialog();
+  }
+  const url = vc.downloadUrl;
+  if (!url) {
+    const ext =
+      vc.releaseNotesUrl ??
+      `https://rud1.es/desktop/download?version=${encodeURIComponent(vc.latest)}`;
+    void shell.openExternal(ext);
+    return;
+  }
+  // Sig-strict (opt-in, off by default) keeps its dedicated gate on the tray
+  // path; the dialog download is the plain artifact fetch.
+  void startBackgroundDownload(url, { sha256: lastManifestSha256 });
+  broadcastUpdaterState();
+}
+
+// Mirror the `autoUpdate` preference into auto-update-config.json so the
+// tray's isAutoUpdateEnabled() gate (which reads that file in packaged
+// builds) stays consistent with the Settings toggle. Read-merge-write so
+// sibling keys (strict, sigStrict, …) are preserved.
+function mirrorAutoUpdateConfig(enabled: boolean): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require("fs") as typeof import("fs");
+    const dir = app.getPath("userData");
+    const p = path.join(dir, AUTO_UPDATE_CONFIG_FILE);
+    let cfg: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+      if (parsed && typeof parsed === "object") cfg = parsed as Record<string, unknown>;
+    } catch {
+      /* missing / malformed — start fresh */
+    }
+    cfg.autoUpdate = enabled;
+    fs.mkdirSync(dir, { recursive: true });
+    // Atomic tmp+rename (matches preferences-manager.persist) so a crash
+    // mid-write can't corrupt the shared config that also holds the
+    // strict / sigStrict / rolloutForce / sigVerify gates.
+    const tmp = `${p}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), "utf8");
+    fs.renameSync(tmp, p);
+  } catch (err) {
+    console.warn(
+      "[auto-update] mirror config failed:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+// Launch gate: show "Checking for updates…", await the first verdict (with a
+// timeout so a slow network can't stall startup), then either prompt / auto-
+// download or fall through to the main window.
+async function runLaunchUpdateGate(): Promise<void> {
+  const prefs = getPreferences();
+  showUpdateDialog();
+  versionCheckManager?.start();
+  const winner = await Promise.race<VersionCheckState | null>([
+    firstVersionCheckPromise,
+    new Promise<null>((r) => setTimeout(() => r(null), LAUNCH_GATE_TIMEOUT_MS)),
+  ]);
+  if (winner && winner.kind === "update-available") {
+    if (prefs.autoUpdate) {
+      // Auto mode: arm auto-apply for THIS launch-gate download only, then
+      // download. `autoApplyArmed` scopes the openPath+restart to the gate
+      // so an in-session tray download never force-quits a running session.
+      autoApplyArmed = true;
+      startUpdateDownload();
+    }
+    broadcastUpdaterState();
+    // Leave the main window closed: the dialog drives the decision (and the
+    // app restarts on apply, or opens the main window on "Not now").
+  } else {
+    closeUpdateDialogAndShowMain();
+  }
+}
+
 function showSettingsWindow(): void {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.focus();
@@ -870,7 +1095,7 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
   );
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
 
   void import("./virtualhere-manager").then(async (vh) => {
@@ -894,6 +1119,9 @@ app.whenReady().then(() => {
       // baked at open time; they pick up the change on next open.
       setLocale(detectLocale());
       rebuildTrayMenu();
+      // Keep the tray's isAutoUpdateEnabled() gate consistent with the
+      // Settings toggle.
+      mirrorAutoUpdateConfig(prefs.autoUpdate);
     },
     versionCheck: {
       getState: () =>
@@ -901,6 +1129,13 @@ app.whenReady().then(() => {
       recheck: () => {
         void versionCheckManager?.checkOnce();
       },
+    },
+    updater: {
+      getState: () => computeUpdaterDialogState(),
+      start: () => { startUpdateDownload(); },
+      apply: () => { void applyAndRestart(); },
+      later: () => { closeUpdateDialogAndShowMain(); },
+      recheck: () => { void versionCheckManager?.checkOnce(); },
     },
     vpnHealth: {
       onTransition: (event) => {
@@ -956,7 +1191,9 @@ app.whenReady().then(() => {
       },
     },
   });
-  mainWindow = createWindow();
+  // The main window is opened by the launch update gate at the end of
+  // whenReady (after the first version check), so an available update can
+  // prompt "before opening" per the operator-facing contract.
   createTray();
 
   try {
@@ -980,15 +1217,19 @@ app.whenReady().then(() => {
   dedupeFilepath = path.join(app.getPath("userData"), DEDUPE_FILENAME);
   usbSessionFilepath = path.join(app.getPath("userData"), USB_SESSION_FILENAME);
   const preferencesPath = path.join(app.getPath("userData"), PREFERENCES_FILENAME);
-  void loadPreferences(preferencesPath).then((prefs) => {
-    applyThemeFromPreference(prefs.theme);
-    // Now that the persisted `language` preference is in the cache,
-    // resolve + apply the UI locale and rebuild any chrome that was
-    // built with the boot-time default ("en"). detectLocale() reads the
-    // preference (es/en pin) or falls back to app.getLocale() (es-first).
-    setLocale(detectLocale());
-    rebuildTrayMenu();
-  });
+  // Await preferences before the launch gate so the dialog renders in the
+  // pinned theme + locale and the gate can read the `autoUpdate` flag.
+  // detectLocale() reads the preference (es/en pin) or falls back to
+  // app.getLocale() (es-first).
+  const bootPrefs = await loadPreferences(preferencesPath);
+  applyThemeFromPreference(bootPrefs.theme);
+  setLocale(detectLocale());
+  rebuildTrayMenu();
+  // Reconcile auto-update-config.json with the just-loaded preference so the
+  // tray's isAutoUpdateEnabled() gate and the launch gate start from the same
+  // value even if the config file drifted (hand-edit, deletion, prior failed
+  // mirror write).
+  mirrorAutoUpdateConfig(bootPrefs.autoUpdate);
   void loadUsbSessions(usbSessionFilepath, new Date()).then((loaded) => {
     usbSessions = loaded;
   });
@@ -1011,16 +1252,40 @@ app.whenReady().then(() => {
       lastVersionCheckState = state;
       rebuildTrayMenu();
       broadcastVersionCheckUpdate(state);
+      broadcastUpdaterState();
+      // Settle the launch gate on the first terminal (non-checking) verdict.
+      if (
+        !firstVersionCheckSettled &&
+        state.kind !== "checking" &&
+        state.kind !== "idle"
+      ) {
+        firstVersionCheckSettled = true;
+        resolveFirstVersionCheck?.(state);
+      }
     },
     onManifestParsed: (manifest) => {
       lastManifestSha256 = manifest.sha256;
       lastManifestVersion = manifest.manifestVersion;
     },
   });
-  versionCheckManager.start();
+  // NB: start() is deferred to runLaunchUpdateGate() so the dialog paints
+  // "Checking…" before the first fetch resolves.
 
   configureAutoUpdaterRuntime({});
-  subscribeAutoUpdate(() => { rebuildTrayMenu(); });
+  subscribeAutoUpdate((auto) => {
+    rebuildTrayMenu();
+    broadcastUpdaterState();
+    // Auto mode (opt-in): once the launch-gate artifact is staged, verify +
+    // install without waiting for a click. Scoped to `autoApplyArmed` so an
+    // in-session tray / Settings download shows the manual "Restart and
+    // install" button instead of force-quitting the running session. Gated
+    // on app.isPackaged so a dev build can preview the download flow without
+    // openPath+quit on a non-installer .bin.
+    if (auto.kind === "ready-to-apply" && autoApplyArmed) {
+      autoApplyArmed = false;
+      if (app.isPackaged) void applyAndRestart();
+    }
+  });
 
   try {
     const cloudOrigin = new URL(APP_URL).origin;
@@ -1041,6 +1306,10 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
   });
+
+  // Show "Checking for updates…", await the first verdict (with a timeout),
+  // then prompt / auto-download or fall through to the main window.
+  await runLaunchUpdateGate();
 });
 
 app.on("window-all-closed", () => {

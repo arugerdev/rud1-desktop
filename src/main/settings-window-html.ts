@@ -80,6 +80,11 @@ export function buildSettingsWindowHtml(
     saveFailedPrefix: t("settings.saveFailed", { error: "" }),
     openFromTray: t("settings.openFromTray"),
     unknownError: t("settings.unknownError"),
+    autoUpdateLabel: t("settings.autoUpdateLabel"),
+    autoUpdateHint: t("settings.autoUpdateHint"),
+    autoUpdateOn: t("settings.autoUpdateOn"),
+    autoUpdateOff: t("settings.autoUpdateOff"),
+    updateNow: t("settings.updateNow"),
   });
   const html = `<!doctype html>
 <html lang="${locale}"${themeAttr}>
@@ -463,6 +468,16 @@ export function buildSettingsWindowHtml(
 
   <h2>${t("settings.updatesHeading")}</h2>
   <div id="updates"><p class="muted">${t("settings.loading")}</p></div>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">${t("settings.autoUpdateLabel")}</div>
+      <div class="hint">${t("settings.autoUpdateHint")}</div>
+    </div>
+    <label class="toggle" aria-label="${t("settings.autoUpdateLabel")}">
+      <input type="checkbox" id="auto-update-toggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
 
   <h2>${t("settings.appearanceHeading")}</h2>
   <div class="pref-row">
@@ -548,8 +563,20 @@ export function buildSettingsWindowHtml(
   </div>
 
   <div id="toast" class="toast" aria-live="polite"></div>
+  <div id="diag" class="muted" style="margin-top:18px;font-size:11px;color:var(--danger-fg);"></div>
 
 <script>
+  // Safety net: any uncaught error in this inline script (which tsc does NOT
+  // type-check — it's a string template) would otherwise silently strand the
+  // panel. Surface it in the diag line instead of leaving controls dead.
+  window.addEventListener('error', function(ev) {
+    var d = document.getElementById('diag');
+    if (d) d.textContent = 'Error en el panel: ' + ((ev && ev.message) ? ev.message : 'desconocido');
+  });
+  function setDiag(msg) {
+    var d = document.getElementById('diag');
+    if (d) d.textContent = msg || '';
+  }
   // Settings/About panel renderer. Talks to main exclusively through
   // window.electronAPI.{versionCheck,clipboard,shell} which are wired up
   // in preload/index.ts (iter 37).
@@ -950,11 +977,24 @@ export function buildSettingsWindowHtml(
                    state.kind === 'error')
       ? '<button id="copy-diagnostics">' + escape(L.copyDiagnostics) + '</button>'
       : '';
+    // When an update is available, surface a primary "Download and install"
+    // CTA that opens the visual progress dialog and begins the download.
+    var updateBtn = state.kind === 'update-available'
+      ? '<button id="update-now" class="primary">' + escape(L.updateNow) + '</button>'
+      : '';
     updatesEl.innerHTML = banner +
       '<div class="actions">' +
+        updateBtn +
         diagBtn +
         '<button id="recheck">' + escape(L.checkNow) + '</button>' +
       '</div>';
+    if (updateBtn) {
+      document.getElementById('update-now').addEventListener('click', function() {
+        if (window.electronAPI && window.electronAPI.updater) {
+          window.electronAPI.updater.start();
+        }
+      });
+    }
     if (diagBtn) {
       document.getElementById('copy-diagnostics').addEventListener('click', function() {
         // Mirrors the buildVersionDiagnosticsBlob contract in
@@ -1072,13 +1112,20 @@ export function buildSettingsWindowHtml(
     });
   }
 
-  // Initial fetch + subscribe to push updates from main.
-  window.electronAPI.versionCheck.state().then(function(res) {
-    if (res && res.ok) renderState(res.result);
-    else renderState(null);
-  });
-  if (typeof window.electronAPI.versionCheck.onUpdate === 'function') {
-    window.electronAPI.versionCheck.onUpdate(function(state) { renderState(state); });
+  // Initial fetch + subscribe to push updates from main. Guarded so a
+  // missing namespace (older preload, sandbox hiccup) degrades to an
+  // honest "unavailable" message instead of throwing and stranding the
+  // rest of the panel's wiring at "Loading…".
+  if (window.electronAPI && window.electronAPI.versionCheck) {
+    window.electronAPI.versionCheck.state().then(function(res) {
+      if (res && res.ok) renderState(res.result);
+      else renderState(null);
+    }).catch(function() { renderState(null); });
+    if (typeof window.electronAPI.versionCheck.onUpdate === 'function') {
+      window.electronAPI.versionCheck.onUpdate(function(state) { renderState(state); });
+    }
+  } else {
+    renderState(null);
   }
 
   // Dedupe inspector launcher — this just opens the existing iter-28
@@ -1099,7 +1146,9 @@ export function buildSettingsWindowHtml(
   var autoStartHint = document.getElementById('auto-start-hint');
   function autoStartHintFor(state) {
     if (state.unsupported) {
-      return state.reason || L.autoStartUnsupported;
+      // Use the localized copy rather than the main-process reason string
+      // (which is English) so the row stays in the panel's language.
+      return L.autoStartUnsupported;
     }
     if (state.platform === 'win32') {
       return L.autoStartWin;
@@ -1118,9 +1167,25 @@ export function buildSettingsWindowHtml(
     autoStartHint.textContent = autoStartHintFor(state);
   }
   if (window.electronAPI && window.electronAPI.app && typeof window.electronAPI.app.getAutoStart === 'function') {
+    // Guarantee the hint never stays at "Loading…": a rejected invoke
+    // (handler not registered in an older build) without a .catch, or a
+    // never-settling promise, would otherwise strand it. The fallback timer
+    // flips it to "unavailable" if nothing resolved; both settle paths clear it.
+    var autoStartSettled = false;
+    var autoStartFallback = setTimeout(function() {
+      if (!autoStartSettled) autoStartHint.textContent = L.autoStartStateUnavailable;
+    }, 4000);
+    function settleAutoStart() {
+      autoStartSettled = true;
+      clearTimeout(autoStartFallback);
+    }
     window.electronAPI.app.getAutoStart().then(function(res) {
+      settleAutoStart();
       if (res && res.ok) applyAutoStart(res.result);
       else autoStartHint.textContent = L.autoStartStateUnavailable;
+    }).catch(function() {
+      settleAutoStart();
+      autoStartHint.textContent = L.autoStartStateUnavailable;
     });
     autoStartToggle.addEventListener('change', function() {
       var desired = !!autoStartToggle.checked;
@@ -1176,11 +1241,22 @@ export function buildSettingsWindowHtml(
 
   if (window.electronAPI && window.electronAPI.app && typeof window.electronAPI.app.getPreferences === 'function') {
     window.electronAPI.app.getPreferences().then(function(res) {
-      if (!res || !res.ok) return;
+      if (!res || !res.ok) {
+        // IPC reachable but the main process rejected it (e.g. the sender
+        // wasn't recognised as trusted). Surface the real reason rather
+        // than silently keeping the baked-in defaults.
+        setDiag('No se pudieron cargar los ajustes: ' + ((res && res.error) ? res.error : 'respuesta inválida'));
+        return;
+      }
+      setDiag('');
       applyThemeToDom(res.result.theme);
       syncThemePicker(res.result.theme);
       syncLangPicker(res.result.language);
       syncNotifToggles(res.result.notifications);
+      var autoUpd = document.getElementById('auto-update-toggle');
+      if (autoUpd) autoUpd.checked = !!res.result.autoUpdate;
+    }).catch(function(e) {
+      setDiag('Ajustes sin respuesta del proceso principal: ' + ((e && e.message) ? e.message : 'IPC rechazado'));
     });
 
     var themeRadios = document.querySelectorAll('input[name="theme-pick"]');
@@ -1245,6 +1321,28 @@ export function buildSettingsWindowHtml(
     bindNotifToggle('notif-firstBoot', 'firstBoot');
     bindNotifToggle('notif-vpn', 'vpn');
     bindNotifToggle('notif-usb', 'usb');
+
+    // Auto-update opt-in. Reflects the OS-confirmed post-merge value so a
+    // rejected save snaps the switch back instead of leaving it lying.
+    var autoUpdateToggle = document.getElementById('auto-update-toggle');
+    if (autoUpdateToggle) {
+      autoUpdateToggle.addEventListener('change', function() {
+        var desired = !!autoUpdateToggle.checked;
+        autoUpdateToggle.disabled = true;
+        window.electronAPI.app.setPreferences({ autoUpdate: desired }).then(function(res) {
+          autoUpdateToggle.disabled = false;
+          if (res && res.ok) {
+            autoUpdateToggle.checked = !!res.result.autoUpdate;
+            toast(res.result.autoUpdate ? L.autoUpdateOn : L.autoUpdateOff);
+          } else {
+            autoUpdateToggle.checked = !desired;
+            toast(L.saveFailedPrefix + (res && res.error ? res.error : L.unknownError));
+          }
+        });
+      });
+    }
+  } else {
+    setDiag('El puente electronAPI.app no está disponible (preload no cargado). Reinstala/relanza la app desde un build actual.');
   }
 </script>
 </body>
