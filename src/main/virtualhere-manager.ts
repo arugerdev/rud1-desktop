@@ -55,6 +55,45 @@ export interface VirtualHereStatus {
 let daemon: ChildProcess | null = null;
 let windowHider: ChildProcess | null = null;
 
+const WIN_CLIENT_SERVICE = "vhclient";
+const WIN_CLIENT_SERVICE_DISPLAY = "VirtualHere Client USB Sharing";
+
+async function isWindowsClientServiceInstalled(): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  try {
+    await execFileAsync("sc.exe", ["query", WIN_CLIENT_SERVICE], { windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeWindowsClientService(): Promise<void> {
+  if (process.platform !== "win32") return;
+  if (!(await isWindowsClientServiceInstalled())) return;
+  const binary = virtualHereClientPath();
+  if (binary) {
+    try {
+      await execFileAsync(binary, ["-u"], { windowsHide: true, timeout: 15_000 });
+    } catch {
+      /* best-effort */
+    }
+  }
+  if (await isWindowsClientServiceInstalled()) {
+    for (const verb of ["stop", "delete"]) {
+      try {
+        await execFileAsync("sc.exe", [verb, WIN_CLIENT_SERVICE], { windowsHide: true });
+      } catch {
+      }
+    }
+  }
+  if (await isWindowsClientServiceInstalled()) {
+    console.warn(
+      `[virtualhere] no se pudo eliminar el servicio cliente residual "${WIN_CLIENT_SERVICE_DISPLAY}" — el free tier puede seguir bloqueado.`,
+    );
+  }
+}
+
 // vhui64.exe abre ventanas en distintos momentos: MainWindow al boot, popup
 // "Trial Edition" cada vez que conecta al server, popups de versión, etc.
 // MainWindowHandle solo da la principal y un single-shot ShowWindow no cubre
@@ -126,6 +165,9 @@ export async function startVirtualHereDaemon(): Promise<{ ok: boolean; error?: s
     };
   }
   try {
+    if (process.platform === "win32") {
+      await removeWindowsClientService();
+    }
     const args = process.platform === "win32" ? [] : ["-n"];
     daemon = spawn(binary, args, {
       windowsHide: true,
@@ -195,6 +237,7 @@ export async function debugSnapshot(): Promise<VirtualHereDebug> {
     parsedDevices: 0,
   };
   out.serviceRunning = await isVirtualHereDaemonRunning();
+  out.serviceInstalled = await isWindowsClientServiceInstalled();
   // Intentar leer el pipe aunque el servicio diga STOPPED — a veces
   // hay drift entre sc.exe y la realidad.
   try {
@@ -306,32 +349,54 @@ export async function listVirtualHere(): Promise<VirtualHereHub[]> {
 
 // ─── USE / STOP USING ────────────────────────────────────────────────
 
+type UseClassification =
+  | { ok: true }
+  | { ok: false; error: string; retryable: boolean };
+
+function classifyUseResult(trimmed: string): UseClassification {
+  if (trimmed.length === 0 || /^OK\b/i.test(trimmed)) return { ok: true };
+  if (/^FAILED\b/i.test(trimmed) || /^ERROR/i.test(trimmed)) {
+    if (/licen|max/i.test(trimmed)) {
+      return {
+        ok: false,
+        retryable: false,
+        error: "VirtualHere free license allows 1 device at a time. Disconnect the other one first.",
+      };
+    }
+    if (/in.?use/i.test(trimmed)) {
+      return { ok: false, retryable: false, error: "Device in use by another client." };
+    }
+    return {
+      ok: false,
+      retryable: true,
+      error:
+        "The server could not claim the device — it may be busy (another process is probing the serial port). Retry; if it persists, update the rud1 firmware.",
+    };
+  }
+  return { ok: true };
+}
+
 export async function useDevice(
   address: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  try {
-    const out = await sendPipeCommand(`USE,${address}`);
-    const trimmed = out.trim();
-    if (/^OK\b/i.test(trimmed)) return { ok: true };
-    if (/^FAILED\b/i.test(trimmed)) {
-      if (/license/i.test(trimmed) || /max/i.test(trimmed)) {
-        return {
-          ok: false,
-          error: "VirtualHere free license allows 1 device at a time. Disconnect the other one first.",
-        };
-      }
-      if (/in.?use/i.test(trimmed)) {
-        return { ok: false, error: "Device in use by another client" };
-      }
-      return { ok: false, error: trimmed };
+  const attempt = async (): Promise<UseClassification> => {
+    try {
+      return classifyUseResult((await sendPipeCommand(`USE,${address}`)).trim());
+    } catch (err) {
+      return {
+        ok: false,
+        retryable: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
-    if (/^ERROR/i.test(trimmed)) {
-      return { ok: false, error: trimmed.replace(/^ERROR:\s*/i, "") };
-    }
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  };
+  let result = await attempt();
+
+  if (!result.ok && result.retryable) {
+    await new Promise((r) => setTimeout(r, 1_500));
+    result = await attempt();
   }
+  return result.ok ? { ok: true } : { ok: false, error: result.error };
 }
 
 export async function stopUsingDevice(
@@ -384,4 +449,6 @@ export async function statusSnapshot(): Promise<VirtualHereStatus> {
     maxSimultaneousDevices: 1,
   };
 }
+
+export const __test = { classifyUseResult, WIN_CLIENT_SERVICE, WIN_CLIENT_SERVICE_DISPLAY };
 

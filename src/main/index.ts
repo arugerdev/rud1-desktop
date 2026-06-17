@@ -873,10 +873,6 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
 
-  // Arranca el daemon de VirtualHere — en Windows lo instala como
-  // servicio (UAC una sola vez al primer arranque), en POSIX usa modo
-  // -n daemon. La interfaz luego se controla por named pipe sin GUI
-  // ni tray icon ni popups de free trial.
   void import("./virtualhere-manager").then(async (vh) => {
     const res = await vh.startVirtualHereDaemon();
     if (!res.ok) {
