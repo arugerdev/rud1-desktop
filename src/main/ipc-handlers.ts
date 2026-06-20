@@ -45,6 +45,7 @@ import {
   useDevice as virtualHereUse,
   stopUsingDevice as virtualHereStopUsing,
   debugSnapshot as virtualHereDebug,
+  setServer as virtualHereSetServer,
 } from "./virtualhere-manager";
 import {
   notifyVpnConnected,
@@ -979,6 +980,27 @@ export function registerIpcHandlers(opts: {
     }
     return virtualHereStopUsing(address);
   });
+
+  // Apunta el cliente VirtualHere directo a la IP del Pi (br-rud1) en vez
+  // de depender del descubrimiento por broadcast/mDNS, que no cruza fiable
+  // el bridge L2 de OpenVPN. El manager re-valida host/puerto (main process
+  // = frontera de confianza; no confiamos en el renderer).
+  ipcMain.handle(
+    "virtualhere:setServer",
+    async (
+      event,
+      payload: { host?: unknown; port?: unknown; force?: unknown },
+    ) => {
+      if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
+      const host = payload?.host;
+      if (typeof host !== "string" || host.length === 0) {
+        return { ok: false as const, error: "host required" };
+      }
+      const port = typeof payload?.port === "number" ? payload.port : undefined;
+      const force = payload?.force === true;
+      return virtualHereSetServer(host, { port, force });
+    },
+  );
 
   ipcMain.handle("virtualhere:debug", async (event) => {
     if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };

@@ -222,6 +222,10 @@ export interface VirtualHereDebug {
   parsedHubs: number;
   parsedDevices: number;
   serviceQueryRaw?: string;
+  // IP a la que apuntamos al cliente vía MANUAL HUB ADD (null = aún no fijado).
+  manualTargetSet?: string | null;
+  // Salida cruda de MANUAL HUB LIST — confirma si el hub se registró.
+  manualHubsRaw?: string;
 }
 
 export async function debugSnapshot(): Promise<VirtualHereDebug> {
@@ -249,6 +253,12 @@ export async function debugSnapshot(): Promise<VirtualHereDebug> {
     out.parsedDevices = hubs.reduce((n, h) => n + h.devices.length, 0);
   } catch (err) {
     out.pipeError = err instanceof Error ? err.message : String(err);
+  }
+  out.manualTargetSet = currentManualHub;
+  try {
+    out.manualHubsRaw = await listManualHubs();
+  } catch {
+    /* best-effort */
   }
   return out;
 }
@@ -345,6 +355,98 @@ function sendOnceUnixSocket(cmd: string): Promise<string> {
 export async function listVirtualHere(): Promise<VirtualHereHub[]> {
   const out = await sendPipeCommand("LIST");
   return parseListOutput(out);
+}
+
+// ─── Manual hub / server targeting ───────────────────────────────────
+// Apunta el cliente directo a la IP del Pi (br-rud1) con MANUAL HUB ADD.
+// Aditivo a auto-find (mDNS), que no cruza fiable el bridge L2 de la VPN.
+
+const DEFAULT_SERVER_PORT = 7575;
+// Sin ':' (evita doble puerto al construir host:port; IPv6 fuera de alcance).
+const SERVER_HOST_REGEX = /^[a-zA-Z0-9.\-]{1,253}$/;
+
+function isValidServerHost(h: unknown): h is string {
+  return (
+    typeof h === "string" &&
+    h.length > 0 &&
+    !h.startsWith("-") &&
+    SERVER_HOST_REGEX.test(h)
+  );
+}
+
+function isValidServerPort(p: unknown): p is number {
+  return typeof p === "number" && Number.isInteger(p) && p >= 1 && p <= 65535;
+}
+
+// El comando es UNA línea del pipe; \r \n , inyectarían un verbo/arg extra.
+function hasPipeMetachars(s: string): boolean {
+  return /[\r\n,]/.test(s);
+}
+
+// Hub manual actualmente registrado ("host:port"), para no acumular hubs
+// muertos si la IP del Pi cambia (otro device / DHCP nuevo).
+let currentManualHub: string | null = null;
+
+// Seam de test: por defecto pega al pipe real; los tests lo sustituyen
+// para capturar los comandos sin spawnear powershell.
+type PipeSender = (cmd: string) => Promise<string>;
+let pipeSend: PipeSender = (cmd) => sendPipeCommand(cmd);
+
+async function sendManualHubCommand(verb: "ADD" | "REMOVE", target: string): Promise<string> {
+  if (hasPipeMetachars(target)) throw new Error("invalid hub target");
+  return pipeSend(`MANUAL HUB ${verb},${target}`);
+}
+
+export async function addManualHub(
+  host: string,
+  port: number = DEFAULT_SERVER_PORT,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!isValidServerHost(host) || !isValidServerPort(port)) {
+    return { ok: false, error: "invalid server host or port" };
+  }
+  try {
+    // Banner no parseado = ok (como classifyUseResult); un fallo de pipe lanza.
+    await sendManualHubCommand("ADD", `${host}:${port}`);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// target = "host:port" ya recompuesto de partes validadas por setServer.
+export async function removeManualHub(
+  target: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await sendManualHubCommand("REMOVE", target);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function listManualHubs(): Promise<string> {
+  return pipeSend("MANUAL HUB LIST");
+}
+
+// Apunta el cliente al server del Pi por IP. Idempotente (mismo target sin
+// `force` = no-op); `force` re-dispara REMOVE+ADD aunque la IP no cambie.
+export async function setServer(
+  host: string,
+  opts: { port?: number; force?: boolean } = {},
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const port = opts.port ?? DEFAULT_SERVER_PORT;
+  if (!isValidServerHost(host) || !isValidServerPort(port)) {
+    return { ok: false, error: "invalid server host or port" };
+  }
+  const target = `${host}:${port}`;
+  if (!opts.force && currentManualHub === target) return { ok: true };
+  if (currentManualHub && (currentManualHub !== target || opts.force)) {
+    await removeManualHub(currentManualHub);
+  }
+  const res = await addManualHub(host, port);
+  if (res.ok) currentManualHub = target;
+  return res;
 }
 
 // ─── USE / STOP USING ────────────────────────────────────────────────
@@ -450,5 +552,21 @@ export async function statusSnapshot(): Promise<VirtualHereStatus> {
   };
 }
 
-export const __test = { classifyUseResult, WIN_CLIENT_SERVICE, WIN_CLIENT_SERVICE_DISPLAY };
+export const __test = {
+  classifyUseResult,
+  WIN_CLIENT_SERVICE,
+  WIN_CLIENT_SERVICE_DISPLAY,
+  isValidServerHost,
+  isValidServerPort,
+  // Inyecta un pipe sender falso para capturar comandos en tests.
+  setPipeSender: (fn: PipeSender) => {
+    pipeSend = fn;
+  },
+  // Restaura el estado de módulo entre casos (la suite registra handlers
+  // dos veces en el mismo proceso).
+  resetHubState: () => {
+    currentManualHub = null;
+    pipeSend = (cmd) => sendPipeCommand(cmd);
+  },
+};
 

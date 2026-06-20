@@ -310,10 +310,23 @@ contextBridge.exposeInMainWorld("electronAPI", {
               parsedHubs: number;
               parsedDevices: number;
               serviceQueryRaw?: string;
+              manualTargetSet?: string | null;
+              manualHubsRaw?: string;
             };
           }
         | { ok: false; error: string }
       >,
+
+    /** Apunta el cliente directo a la IP del Pi (br-rud1) vía MANUAL HUB
+     *  ADD, en vez de esperar al descubrimiento por broadcast/mDNS que no
+     *  cruza fiable el bridge L2 de la VPN. Idempotente; `force` re-dispara
+     *  la conexión (útil al subir el túnel). Puerto por defecto 7575. */
+    setServer: (host: string, opts?: { port?: number; force?: boolean }) =>
+      ipcRenderer.invoke("virtualhere:setServer", {
+        host,
+        port: opts?.port,
+        force: opts?.force,
+      }) as Promise<{ ok: true } | { ok: false; error: string }>,
   },
 
   net: {
