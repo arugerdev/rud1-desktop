@@ -675,7 +675,7 @@ export function buildSettingsWindowHtml(
       // unsafe scheme to clipboard via the panel.
       function isAllowed(u) {
         if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
-        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+        if (/[\\x00-\\x1f\\x7f\\s"<>\\\\^\`{|}]/.test(u)) return false;
         try {
           var parsed = new URL(u);
           return parsed.protocol === 'https:' && parsed.username === '' && parsed.password === '';
@@ -731,7 +731,7 @@ export function buildSettingsWindowHtml(
     document.getElementById('copy-diagnostics').addEventListener('click', function() {
       function isAllowed2(u) {
         if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
-        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+        if (/[\\x00-\\x1f\\x7f\\s"<>\\\\^\`{|}]/.test(u)) return false;
         try {
           var p = new URL(u);
           return p.protocol === 'https:' && p.username === '' && p.password === '';
@@ -772,14 +772,14 @@ export function buildSettingsWindowHtml(
       // operators (no new key appears in the JSON).
       function isSigUrlAllowed(u) {
         if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
-        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+        if (/[\\x00-\\x1f\\x7f\\s"<>\\\\^\`{|}]/.test(u)) return false;
         try {
           var p = new URL(u);
           var pr = (p.protocol || '').toLowerCase();
           if (pr === 'javascript:' || pr === 'data:') return false;
           if (pr !== 'http:' && pr !== 'https:') return false;
           if (p.username !== '' || p.password !== '') return false;
-          return /\.(sig|minisig|asc)$/i.test(p.pathname);
+          return /\\.(sig|minisig|asc)$/i.test(p.pathname);
         } catch (e) { return false; }
       }
       var sigUrl2 = isSigUrlAllowed(state.signatureUrl) ? state.signatureUrl : null;
@@ -883,14 +883,14 @@ export function buildSettingsWindowHtml(
       // helper test pins the byte shape.
       function isSigUrlAllowed(u) {
         if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
-        if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+        if (/[\\x00-\\x1f\\x7f\\s"<>\\\\^\`{|}]/.test(u)) return false;
         try {
           var p = new URL(u);
           var pr = (p.protocol || '').toLowerCase();
           if (pr === 'javascript:' || pr === 'data:') return false;
           if (pr !== 'http:' && pr !== 'https:') return false;
           if (p.username !== '' || p.password !== '') return false;
-          return /\.(sig|minisig|asc)$/i.test(p.pathname);
+          return /\\.(sig|minisig|asc)$/i.test(p.pathname);
         } catch (e) { return false; }
       }
       var validatedSig = (state.signatureUrl != null && isSigUrlAllowed(state.signatureUrl))
@@ -1020,7 +1020,7 @@ export function buildSettingsWindowHtml(
           // wired through for future-proofing.
           function isAllowed3(u) {
             if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
-            if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+            if (/[\\x00-\\x1f\\x7f\\s"<>\\\\^\`{|}]/.test(u)) return false;
             try {
               var p = new URL(u);
               return p.protocol === 'https:' && p.username === '' && p.password === '';
@@ -1058,14 +1058,14 @@ export function buildSettingsWindowHtml(
           // holds byte-for-byte when no signatureUrl is in play.
           function isSigUrlAllowed3(u) {
             if (typeof u !== 'string' || u.length === 0 || u.length > 2048) return false;
-            if (/[\x00-\x1f\x7f\s"<>\\^\`{|}]/.test(u)) return false;
+            if (/[\\x00-\\x1f\\x7f\\s"<>\\\\^\`{|}]/.test(u)) return false;
             try {
               var p = new URL(u);
               var pr = (p.protocol || '').toLowerCase();
               if (pr === 'javascript:' || pr === 'data:') return false;
               if (pr !== 'http:' && pr !== 'https:') return false;
               if (p.username !== '' || p.password !== '') return false;
-              return /\.(sig|minisig|asc)$/i.test(p.pathname);
+              return /\\.(sig|minisig|asc)$/i.test(p.pathname);
             } catch (e) { return false; }
           }
           var sigUrl3 = isSigUrlAllowed3(state.signatureUrl) ? state.signatureUrl : null;
