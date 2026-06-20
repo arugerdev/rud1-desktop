@@ -268,7 +268,37 @@ const SIG_PUBKEY_ENV = "RUD1_DESKTOP_SIG_PUBKEY";
 // known-slow link can extend it without rebuilding the binary.
 const SIG_FETCH_TIMEOUT_ENV = "RUD1_DESKTOP_SIG_FETCH_TIMEOUT_MS";
 const AUTO_UPDATE_CONFIG_FILE = "auto-update-config.json";
-const DOWNLOAD_FILE_DEFAULT = "rud1-update.bin";
+// Platform fallback name when the artifact URL carries no recognizable
+// installer extension. NEVER ".bin": Windows has no handler for it, so
+// shell.openPath() of a .bin silently fails to launch the installer ("Windows
+// doesn't know what to do with this file"). The real extension is preserved
+// from the URL by downloadFileNameForUrl() below.
+const DOWNLOAD_FILE_DEFAULT =
+  process.platform === "win32"
+    ? "rud1-update.exe"
+    : process.platform === "darwin"
+      ? "rud1-update.dmg"
+      : "rud1-update.AppImage";
+
+const INSTALLER_EXTENSIONS = [".exe", ".msi", ".dmg", ".pkg", ".AppImage", ".deb", ".zip"];
+
+// Name the downloaded installer after the artifact's real extension so the OS
+// can execute it on apply. GitHub release URLs (…/releases/latest/download/
+// rud1-Setup.exe) 302-redirect to an extension-less object URL, but the URL we
+// are handed still names the asset, so derive from it; fall back to the
+// platform default otherwise.
+function downloadFileNameForUrl(url: string): string {
+  try {
+    const base = path.basename(new URL(url).pathname);
+    const match = INSTALLER_EXTENSIONS.find((e) =>
+      base.toLowerCase().endsWith(e.toLowerCase()),
+    );
+    if (match) return `rud1-update${match}`;
+  } catch {
+    /* fall through to platform default */
+  }
+  return DOWNLOAD_FILE_DEFAULT;
+}
 // Hard cap on the downloaded artifact. A real DMG / NSIS / AppImage is
 // a few hundred MB; 512 MB is a generous ceiling that still refuses
 // runaway responses.
@@ -663,7 +693,7 @@ export function startBackgroundDownload(
   const userDataDir = options.userDataDir ?? deps.app?.getPath("userData") ?? electronApp.getPath("userData");
   const net = options.net ?? deps.net ?? electronNet;
   const fileSystem = options.fileSystem ?? deps.fileSystem ?? fs;
-  const filepath = path.join(userDataDir, DOWNLOAD_FILE_DEFAULT);
+  const filepath = path.join(userDataDir, downloadFileNameForUrl(url));
   const tmp = `${filepath}.partial`;
 
   setState({ kind: "downloading", url, bytesReceived: 0, totalBytes: null });
