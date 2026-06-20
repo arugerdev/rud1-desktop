@@ -38,6 +38,13 @@ if (-not (Test-Path $tapctl)) {
 
 # ---- Step 1: ensure TAP-Windows V9 driver is in the Windows driver store ----
 
+# Tracks whether we actually ran the bundled installer in this pass. When the
+# store probe is a false positive (a coexisting OpenVPN client — Ewon eCatcher
+# — signs its TAP driver as "OpenVPN Technologies, Inc." but ships tap0801 / a
+# Talk2m INF, so root\tap0901 isn't really registered) we skip the installer
+# here; Step 2 forces it on a create failure only when this stayed $false.
+$installerRan = $false
+
 Write-Step "Probing Windows driver store for TAP-Windows V9..."
 $pnpOutput = & pnputil.exe /enum-drivers 2>&1
 $driverInStore = ($pnpOutput | Out-String) -match 'tap0901\.inf|OpenVPN\s+Technologies,?\s*Inc'
@@ -50,6 +57,7 @@ if ($driverInStore) {
         exit 2
     }
     Write-Step "Running tap-windows-installer.exe /S (silent)..."
+    $installerRan = $true
     $proc = Start-Process -FilePath $tapInstaller -ArgumentList '/S' -Wait -PassThru -WindowStyle Hidden
     if ($proc.ExitCode -ne 0) {
         # The NSIS installer occasionally returns non-zero even when the
@@ -90,6 +98,21 @@ if ($rud1Tap) {
 } else {
     Write-Step "Creating rud1-tap adapter via tapctl..."
     $createOutput = & $tapctl create --hwid 'root\tap0901' --name 'rud1-tap' 2>&1
+    if ($LASTEXITCODE -ne 0 -and -not $installerRan -and (Test-Path $tapInstaller)) {
+        # Step 1's store probe was a false positive (eCatcher signed its TAP
+        # driver as "OpenVPN Technologies, Inc." but root\tap0901 isn't really
+        # registered). Force our bundled tap0901 driver in, clear the stray it
+        # creates, and retry the create once before giving up.
+        Write-Step "tapctl create failed (exit $LASTEXITCODE) - forcing bundled installer and retrying..."
+        $proc = Start-Process -FilePath $tapInstaller -ArgumentList '/S' -Wait -PassThru -WindowStyle Hidden
+        Write-Step "Forced installer exited $($proc.ExitCode); cleaning strays and retrying create..."
+        try {
+            $strays = Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+                Where-Object { $_.InterfaceDescription -match '^TAP-Windows Adapter V9' -and $_.Name -ne 'rud1-tap' }
+            foreach ($a in $strays) { & $tapctl delete $a.Name 2>&1 | Out-Null }
+        } catch { }
+        $createOutput = & $tapctl create --hwid 'root\tap0901' --name 'rud1-tap' 2>&1
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Step "ERROR: tapctl create failed (exit $LASTEXITCODE): $createOutput"
         exit 3

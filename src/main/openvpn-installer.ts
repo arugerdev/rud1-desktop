@@ -328,6 +328,49 @@ async function writeTapMarker(): Promise<void> {
  * the OS surfaces the elevation dialog. tapctl returns non-zero on
  * failure; we read the elevated process's exit code via `-Wait`.
  */
+/**
+ * Injected operations for {@link createTapAdapterWithFallback} — keeps the
+ * decision logic unit-testable without an Electron/Windows host (mirrors
+ * the `tapAdapterNeedsEnable` split: pure logic here, shell-out in callers).
+ */
+export interface TapCreateFallbackOps {
+  /** True when we SKIPPED our bundled installer because the driver-store
+   *  probe reported the driver present — so a create failure may be a
+   *  false positive worth forcing the installer for. False once the
+   *  installer has already run this pass (a create failure is then real). */
+  allowInstallerFallback: boolean;
+  /** Force-run the bundled tap-windows-installer.exe /S (elevated) and
+   *  clear the stray adapter it creates. */
+  forceInstallDriver: () => Promise<void>;
+  /** `tapctl create --hwid root\tap0901 --name rud1-tap` (no-op if the
+   *  adapter already exists). Throws on failure. */
+  createAdapter: () => Promise<void>;
+}
+
+/**
+ * Create the rud1-tap adapter, recovering from a false-positive driver
+ * probe. A coexisting OpenVPN client — notably Ewon eCatcher — signs its
+ * own TAP driver as "OpenVPN Technologies, Inc.", which satisfies
+ * probeTapDriverInDriverStore() even though the root\tap0901 ComponentId
+ * `tapctl create` needs isn't registered (eCatcher may ship tap0801 / a
+ * Talk2m NDIS5 INF). When that makes us skip our installer and the create
+ * then fails, force the bundled installer in and retry the create once.
+ */
+export async function createTapAdapterWithFallback(
+  ops: TapCreateFallbackOps,
+): Promise<{ forcedInstaller: boolean }> {
+  try {
+    await ops.createAdapter();
+    return { forcedInstaller: false };
+  } catch (createErr) {
+    // Installer already ran this pass → the failure is real, surface it.
+    if (!ops.allowInstallerFallback) throw createErr;
+    await ops.forceInstallDriver();
+    await ops.createAdapter(); // single retry; let this error be the final one
+    return { forcedInstaller: true };
+  }
+}
+
 export async function ensureTapDriverInstalled(): Promise<void> {
   if (process.platform !== "win32") return;
   const tapctl = tapctlPath();
@@ -352,8 +395,10 @@ export async function ensureTapDriverInstalled(): Promise<void> {
   // the standalone tap-windows-9.21.2.exe NSIS installer (signed by
   // OpenVPN Technologies, Inc.). When we DO need it, we run it silently
   // with `/S` and elevation.
-  const driverProbe = await probeTapDriverInDriverStore();
-  if (!driverProbe.installed) {
+  //
+  // forceInstallDriver runs that installer, forgiving its spurious non-zero
+  // exit when the driver actually landed in the store.
+  const forceInstallDriver = async (): Promise<void> => {
     const tapInstaller = tapWindowsInstallerPath();
     if (!tapInstaller) {
       throw new Error(
@@ -377,44 +422,60 @@ export async function ensureTapDriverInstalled(): Promise<void> {
         err instanceof Error ? err.message : err,
       );
     }
+  };
+
+  const driverProbe = await probeTapDriverInDriverStore();
+  if (!driverProbe.installed) {
+    await forceInstallDriver();
   }
   // The NSIS installer auto-creates one default TAP adapter named
   // something like "Ethernet N" (description "TAP-Windows Adapter V9").
   // We don't want that — we want exactly one named "rud1-tap". Clean up
   // any TAP adapters that aren't ours BEFORE creating the rud1-tap one.
   // Safe to call even when we skipped the installer (no-op if there are
-  // no strays).
+  // no strays). Matches `^TAP-Windows Adapter V9`, so a coexisting eCatcher
+  // tap0801 ("TAP-Win32 Adapter V9") is left untouched.
   await cleanupStrayTapAdapters();
 
-  // PowerShell's Start-Process with -Verb RunAs is the only way to
-  // trigger UAC for a non-admin parent. We're already
-  // `requireAdministrator` per the NSIS manifest, so this is belt-and-
-  // braces: even if a future build relaxes that flag, the driver
-  // install still elevates correctly.
-  //
-  // Two `tapctl` invocations:
-  //   1. `tapctl create --hwid root\tap0901 --name rud1-tap`
-  //      — installs the driver from the bundled package (if missing) AND
-  //        creates the adapter in one call. Idempotent at the driver
-  //        level (returns success if the driver is already present), but
-  //        will create a duplicate adapter if "rud1-tap" already exists.
-  //   2. Pre-check: if "rud1-tap" exists, skip the create.
-  //
-  // We collapse the two by trying `list` first; if a row named
-  // "rud1-tap" exists we're done.
-  //
-  // Spawning PowerShell via execFile keeps argv safely structured — the
-  // tapctl path is interpolated into a PS single-quoted literal which
-  // doesn't allow command injection from the string contents.
-  const argList = [
-    "create",
-    "--hwid", "root\\tap0901",
-    "--name", "rud1-tap",
-  ];
-  // Build the embedded PS command. We single-quote the executable path
-  // for safety (it lives under Program Files\rud1\resources\bin\openvpn\)
-  // and use `-ArgumentList @('a','b','c')` which PowerShell passes
-  // verbatim to the child without re-quoting on the cmd.exe layer.
+  // Step 2: create rud1-tap. When the driver-store probe was a false
+  // positive (eCatcher's "OpenVPN Technologies, Inc." signature satisfied
+  // it but root\tap0901 isn't really registered), the create fails — force
+  // our bundled installer in and retry once. allowInstallerFallback is
+  // true only when we SKIPPED the installer above, so we never loop.
+  await createTapAdapterWithFallback({
+    allowInstallerFallback: driverProbe.installed,
+    forceInstallDriver: async () => {
+      await forceInstallDriver();
+      await cleanupStrayTapAdapters();
+    },
+    createAdapter: () => runTapctlCreateRud1(tapctl),
+  });
+
+  // Rename the adapter's description so TIA Portal, Codesys, and other
+  // engineering tools list it as "rud1" in their PG/PC interface
+  // dropdowns instead of the generic "TAP-Windows Adapter V9". The
+  // adapter alias (Get-NetAdapter -Name) is already "rud1-tap" — this
+  // tweak only touches the InterfaceDescription / DriverDesc that
+  // Siemens & friends enumerate against.
+  await renameRud1TapAdapterDescription("rud1");
+
+  await writeTapMarker();
+}
+
+/**
+ * Run `tapctl create --hwid root\tap0901 --name rud1-tap` elevated (UAC),
+ * skipping the create when the adapter already exists so re-runs are
+ * idempotent. Throws a user-facing Error mapping the failure modes
+ * (timeout / dismissed UAC / generic tapctl error).
+ *
+ * PowerShell's Start-Process with -Verb RunAs is the only way to trigger
+ * UAC for a non-admin parent. We're already `requireAdministrator` per the
+ * NSIS manifest, so this is belt-and-braces. Spawning PowerShell via
+ * execFile keeps argv structured — the tapctl path is interpolated into a
+ * single-quoted PS literal which can't inject from the string contents.
+ */
+async function runTapctlCreateRud1(tapctl: string): Promise<void> {
+  const argList = ["create", "--hwid", "root\\tap0901", "--name", "rud1-tap"];
   const psArgList = argList
     .map((arg) => `'${arg.replace(/'/g, "''")}'`)
     .join(",");
@@ -461,16 +522,6 @@ export async function ensureTapDriverInstalled(): Promise<void> {
         "TAP-Windows V9 driver is listed; if not, re-run the rud1 installer.",
     );
   }
-
-  // Rename the adapter's description so TIA Portal, Codesys, and other
-  // engineering tools list it as "rud1" in their PG/PC interface
-  // dropdowns instead of the generic "TAP-Windows Adapter V9". The
-  // adapter alias (Get-NetAdapter -Name) is already "rud1-tap" — this
-  // tweak only touches the InterfaceDescription / DriverDesc that
-  // Siemens & friends enumerate against.
-  await renameRud1TapAdapterDescription("rud1");
-
-  await writeTapMarker();
 }
 
 /**

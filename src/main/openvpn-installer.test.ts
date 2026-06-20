@@ -22,7 +22,10 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { tapAdapterNeedsEnable } from "./openvpn-installer";
+import {
+  createTapAdapterWithFallback,
+  tapAdapterNeedsEnable,
+} from "./openvpn-installer";
 
 describe("tapAdapterNeedsEnable", () => {
   it("returns false for usable statuses (openvpn can open these)", () => {
@@ -56,5 +59,83 @@ describe("tapAdapterNeedsEnable", () => {
     expect(tapAdapterNeedsEnable(42)).toBe(false);
     // @ts-expect-error
     expect(tapAdapterNeedsEnable({})).toBe(false);
+  });
+});
+
+describe("createTapAdapterWithFallback", () => {
+  it("creates on the first try and never touches the installer", async () => {
+    const createAdapter = vi.fn().mockResolvedValue(undefined);
+    const forceInstallDriver = vi.fn().mockResolvedValue(undefined);
+
+    const res = await createTapAdapterWithFallback({
+      allowInstallerFallback: true,
+      forceInstallDriver,
+      createAdapter,
+    });
+
+    expect(res).toEqual({ forcedInstaller: false });
+    expect(createAdapter).toHaveBeenCalledTimes(1);
+    expect(forceInstallDriver).not.toHaveBeenCalled();
+  });
+
+  it("forces the installer and retries once when a false-positive probe let the create fail (eCatcher case)", async () => {
+    // The bug: eCatcher's "OpenVPN Technologies, Inc."-signed driver
+    // satisfied the store probe, so the bundled installer was skipped — but
+    // root\tap0901 isn't actually registered, so the first create fails.
+    // The fallback must force the installer in and retry, then succeed.
+    const createAdapter = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error("tapctl: failed to create adapter (root\\tap0901 not found)"),
+      )
+      .mockResolvedValueOnce(undefined);
+    const forceInstallDriver = vi.fn().mockResolvedValue(undefined);
+
+    const res = await createTapAdapterWithFallback({
+      allowInstallerFallback: true,
+      forceInstallDriver,
+      createAdapter,
+    });
+
+    expect(res).toEqual({ forcedInstaller: true });
+    expect(forceInstallDriver).toHaveBeenCalledTimes(1);
+    expect(createAdapter).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry when the installer already ran this pass (real failure surfaces)", async () => {
+    // allowInstallerFallback=false means Step 1 already ran the installer,
+    // so a create failure is genuine — don't loop, surface it verbatim.
+    const err = new Error("tapctl: device busy");
+    const createAdapter = vi.fn().mockRejectedValue(err);
+    const forceInstallDriver = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      createTapAdapterWithFallback({
+        allowInstallerFallback: false,
+        forceInstallDriver,
+        createAdapter,
+      }),
+    ).rejects.toThrow("device busy");
+    expect(forceInstallDriver).not.toHaveBeenCalled();
+    expect(createAdapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the retry's error when the create still fails after forcing the installer", async () => {
+    const finalErr = new Error("tapctl: create failed again");
+    const createAdapter = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("first create fail"))
+      .mockRejectedValueOnce(finalErr);
+    const forceInstallDriver = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      createTapAdapterWithFallback({
+        allowInstallerFallback: true,
+        forceInstallDriver,
+        createAdapter,
+      }),
+    ).rejects.toThrow("create failed again");
+    expect(forceInstallDriver).toHaveBeenCalledTimes(1);
+    expect(createAdapter).toHaveBeenCalledTimes(2);
   });
 });
