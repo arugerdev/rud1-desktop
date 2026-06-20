@@ -195,3 +195,61 @@ jobs:
           files: release-files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Keep the rud1-es desktop manifest (https://rud1.es/desktop/manifest.json)
+  # in sync with this release so existing clients actually detect the update.
+  # The manifest route reads DESKTOP_LATEST_VERSION / DESKTOP_DOWNLOAD_URL from
+  # Vercel env; we upsert them here and redeploy. The Windows installer asset
+  # name is stable (rud1-Setup.exe), so the download URL is a constant.
+  # Non-fatal: if the Vercel secrets aren't configured yet, this step prints
+  # setup instructions and skips instead of failing the release.
+  update-manifest:
+    name: Sync rud1-es desktop manifest
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upsert Vercel env + redeploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }}
+          VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERCEL_TOKEN}" ] || [ -z "${VERCEL_PROJECT_ID}" ]; then
+            echo "::warning::VERCEL_TOKEN / VERCEL_PROJECT_ID not set — skipping manifest sync."
+            echo "Add these repo secrets to enable desktop auto-update detection:"
+            echo "  VERCEL_TOKEN, VERCEL_PROJECT_ID, (optional) VERCEL_TEAM_ID, VERCEL_DEPLOY_HOOK_URL"
+            exit 0
+          fi
+
+          VERSION="$(node -p "require('./package.json').version")"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/rud1-Setup.exe"
+          TEAM_QS=""
+          if [ -n "${VERCEL_TEAM_ID}" ]; then TEAM_QS="&teamId=${VERCEL_TEAM_ID}"; fi
+
+          upsert() {
+            local key="$1" value="$2"
+            echo "Upserting ${key}=${value}"
+            local code
+            code="$(curl -s -o /tmp/vercel-resp.json -w '%{http_code}' \
+              -X POST "https://api.vercel.com/v10/projects/${VERCEL_PROJECT_ID}/env?upsert=true${TEAM_QS}" \
+              -H "Authorization: Bearer ${VERCEL_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"key\":\"${key}\",\"value\":\"${value}\",\"type\":\"plain\",\"target\":[\"production\"]}")"
+            if [ "${code}" -ge 300 ]; then
+              echo "::error::Vercel env upsert for ${key} failed (HTTP ${code})"; cat /tmp/vercel-resp.json; exit 1
+            fi
+          }
+
+          upsert "DESKTOP_LATEST_VERSION" "${VERSION}"
+          upsert "DESKTOP_DOWNLOAD_URL" "${DOWNLOAD_URL}"
+
+          if [ -n "${VERCEL_DEPLOY_HOOK_URL}" ]; then
+            echo "Triggering rud1-es redeploy so the new env takes effect…"
+            curl -s -X POST "${VERCEL_DEPLOY_HOOK_URL}" >/dev/null
+          else
+            echo "::warning::VERCEL_DEPLOY_HOOK_URL not set — env updated but rud1-es not redeployed; the manifest will reflect the new version on its next deploy."
+          fi
