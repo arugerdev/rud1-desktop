@@ -329,6 +329,140 @@ contextBridge.exposeInMainWorld("electronAPI", {
       }) as Promise<{ ok: true } | { ok: false; error: string }>,
   },
 
+  serial: {
+    /** Spin up a TCP↔serial bridge for `busId`. Returns the local
+     *  path (Windows COM port the user opens, or Unix pty symlink)
+     *  once rud1-bridge has bound the endpoint. */
+    open: (opts: {
+      busId: string;
+      piHost: string;
+      baud?: number;
+      dataBits?: number;
+      parity?: string;
+      stopBits?: string;
+      label?: string;
+    }) =>
+      ipcRenderer.invoke("serial:open", opts) as Promise<
+        | {
+            ok: true;
+            result: {
+              busId: string;
+              endpointPath: string;
+              userVisiblePath: string;
+              pid: number;
+            };
+          }
+        | {
+            ok: false;
+            error: string;
+            /** Set when com0com is missing or has no pairs configured. */
+            com0comMissing?: boolean;
+            setupcPath?: string | null;
+            hasPairs?: boolean;
+            /** Set when a com0com pair exists but lacks COMxx aliases. */
+            com0comPairNotAliased?: boolean;
+            /** Set when a com0com pair has COM aliases but is missing
+             *  EmuBR=yes — Arduino IDE 2.x won't enumerate it. */
+            com0comPairNoEmuBR?: boolean;
+            pair?: {
+              pairId: string;
+              userPort: string;
+              bridgePort: string;
+              hasComAlias: boolean;
+              emuBR?: boolean;
+            };
+          }
+      >,
+
+    /** Tear down the bridge for `busId`. Idempotent. */
+    close: (busId: string) =>
+      ipcRenderer.invoke("serial:close", busId) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+
+    /**
+     * Manual DTR pulse for an open bridge session. The firmware drives
+     * DTR low on the live `/dev/ttyACMx` for `pulseMs` (default 50)
+     * then re-asserts it. The session must already be open.
+     */
+    reset: (opts: { busId: string; piHost: string; pulseMs?: number }) =>
+      ipcRenderer.invoke("serial:reset", opts) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+
+    /** Snapshot of the bridge subsystem: bundled binary present,
+     *  com0com state on Windows, currently-active sessions. */
+    status: () =>
+      ipcRenderer.invoke("serial:status") as Promise<
+        | {
+            ok: true;
+            result: {
+              binaryAvailable: boolean;
+              com0com: {
+                installed: boolean;
+                setupcPath: string | null;
+                pairs: { pairId: string; userPort: string; bridgePort: string }[];
+                error?: string;
+              } | null;
+              sessions: {
+                busId: string;
+                pid: number;
+                endpointPath: string;
+                startedAt: string;
+                lastEvent?: string;
+              }[];
+            };
+          }
+        | { ok: false; error: string }
+      >,
+
+    /** Drill-down: live session for one bus id, or null. */
+    sessionFor: (busId: string) =>
+      ipcRenderer.invoke("serial:sessionFor", busId) as Promise<
+        | {
+            ok: true;
+            result: {
+              busId: string;
+              pid: number;
+              endpointPath: string;
+              startedAt: string;
+              lastEvent?: string;
+            } | null;
+          }
+        | { ok: false; error: string }
+      >,
+
+    /**
+     * Fallback manual: lanza el instalador com0com empaquetado (Windows).
+     * El flujo normal auto-instala en silencio desde serial.open; esto es
+     * el CTA de último recurso. El panel debe reintentar serial.status()
+     * tras cerrar el instalador.
+     */
+    launchInstaller: () =>
+      ipcRenderer.invoke("serial:launchInstaller") as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+
+    /**
+     * Assign COMxx aliases (+ EmuBR) a un par com0com CNCAxxx/CNCBxxx.
+     * Idempotente: devuelve el par ya aliasado si existe. La app es admin,
+     * sin UAC extra.
+     */
+    configurePair: (opts?: { userPortAlias?: string; bridgePortAlias?: string }) =>
+      ipcRenderer.invoke("serial:configurePair", opts) as Promise<
+        | {
+            ok: true;
+            result: {
+              pairId: string;
+              userPort: string;
+              bridgePort: string;
+              hasComAlias: boolean;
+            };
+          }
+        | { ok: false; error: string; com0comMissing?: boolean }
+      >,
+  },
+
   net: {
     ping: (host: string) =>
       ipcRenderer.invoke("net:ping", host) as Promise<{

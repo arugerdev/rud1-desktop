@@ -1358,6 +1358,14 @@ app.on("before-quit", (event) => {
     } catch (err) {
       console.warn("[lifecycle] usbDetachAll on quit failed:", err);
     }
+    // Kill any rud1-bridge subprocesses + release their Pi-side slots
+    // while the tunnel still routes, so we don't strand a serial session.
+    try {
+      const { serialBridgeCloseAll } = await import("./serial-bridge-manager");
+      await serialBridgeCloseAll();
+    } catch (err) {
+      console.warn("[lifecycle] serialBridgeCloseAll on quit failed:", err);
+    }
     try {
       const { vpnDisconnect } = await import("./vpn-manager");
       await vpnDisconnect();

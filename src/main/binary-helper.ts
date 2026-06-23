@@ -160,6 +160,35 @@ export function usbipdPath(): string {
 }
 
 /**
+ * Path to the bundled rud1-bridge binary (TCP↔serial RFC 2217 proxy).
+ * Cross-compiled from native/rud1-bridge by scripts/build-rud1-bridge.ps1.
+ * Falls back to a PATH copy during dev.
+ */
+export function rud1BridgePath(): string {
+  const base = resourcesDir();
+  let candidate: string;
+  if (process.platform === "darwin") {
+    const arch = process.arch === "arm64" ? "arm64" : "x64";
+    candidate = path.join(base, `rud1-bridge-${arch}`);
+  } else if (process.platform === "win32") {
+    candidate = path.join(base, "rud1-bridge.exe");
+  } else {
+    candidate = path.join(base, "rud1-bridge");
+  }
+  if (fs.existsSync(candidate)) return candidate;
+  return process.platform === "win32" ? "rud1-bridge.exe" : "rud1-bridge";
+}
+
+/**
+ * True when the bundled rud1-bridge binary is present (i.e. the
+ * `npm run build:rud1-bridge` step has been run). The serial-bridge
+ * panel uses this to decide whether to offer bridge mode for CDC devices.
+ */
+export function isRud1BridgeAvailable(): boolean {
+  return path.isAbsolute(rud1BridgePath());
+}
+
+/**
  * Returns true when `binaryPath(name)` resolved to a real file. Useful
  * for preflight checks that need to give the user an actionable error
  * ("install OpenVPN from <url>") instead of waiting for spawn ENOENT
@@ -177,6 +206,24 @@ export function isBinaryAvailable(name: string): boolean {
 export function usbipInstallerPath(): string | null {
   if (process.platform !== "win32") return null;
   const candidate = path.join(resourcesDir(), "USBip-installer.exe");
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Path to the bundled signed com0com installer
+ * (`com0com/com0com-2.2.2.0-x64-fre-signed.exe`). Driver firmado por
+ * catálogo (pre-2015 → carga con Secure Boot). El serial bridge lo
+ * instala en silencio con `/S` (la app es requireAdministrator, sin UAC
+ * extra). Devuelve null en no-Windows o si no se empaquetó.
+ * Ver docs/serial-com0com-migration.md §4.
+ */
+export function com0comInstallerPath(): string | null {
+  if (process.platform !== "win32") return null;
+  const candidate = path.join(
+    resourcesDir(),
+    "com0com",
+    "com0com-2.2.2.0-x64-fre-signed.exe",
+  );
   return fs.existsSync(candidate) ? candidate : null;
 }
 
