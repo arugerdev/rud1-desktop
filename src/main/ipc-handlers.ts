@@ -1,6 +1,7 @@
 // Canales IPC para el native bridge; deben coincidir con preload/index.ts.
 import { ipcMain, app, BrowserWindow, clipboard, shell } from "electron";
 import { getAutoStart, setAutoStart } from "./auto-start-manager";
+import { isTestMode, testBaseUrl } from "./test-mode";
 import {
   getPreferences,
   setPreferences,
@@ -229,8 +230,16 @@ export interface VpnHealthAccessor {
 // + port). Adding `www.` to the allowlist does NOT loosen the
 // subdomain-smuggling defenses for arbitrary subdomains like
 // `https://evil.rud1.es/` — those still fail.
-const ALLOWED_ORIGINS: readonly string[] = (() => {
-  const raw = process.env.RUD1_APP_ORIGIN;
+// Pure so it can be unit-tested without an Electron stub. Precedence:
+// explicit RUD1_APP_ORIGIN > test-mode origins > production origins. In test
+// mode the loaded dashboard is served over http from the local rud1-es, so its
+// origin (and localhost variants) must be allowlisted or the IPC bridge would
+// reject every message from the renderer. With RUD1_TEST_MODE unset this
+// returns the exact production pair — no behavior change.
+export function resolveAllowedOrigins(
+  env: NodeJS.ProcessEnv = process.env,
+): readonly string[] {
+  const raw = env.RUD1_APP_ORIGIN;
   if (raw && raw.trim().length > 0) {
     const parts = raw
       .split(",")
@@ -238,8 +247,13 @@ const ALLOWED_ORIGINS: readonly string[] = (() => {
       .filter((s) => s.length > 0);
     if (parts.length > 0) return parts;
   }
+  if (isTestMode(env)) {
+    return [testBaseUrl(env), "http://localhost:3000", "http://127.0.0.1:3000"];
+  }
   return ["https://rud1.es", "https://www.rud1.es"];
-})();
+}
+
+const ALLOWED_ORIGINS: readonly string[] = resolveAllowedOrigins();
 
 // Control-character + whitespace + quote rejection list, applied against the
 // RAW sender URL BEFORE any URL parsing. WHATWG URL happily canonicalises
@@ -421,6 +435,7 @@ export const __test = {
   UNSAFE_URL_CHARS,
   MAX_SENDER_URL_LENGTH,
   ALLOWED_ORIGINS,
+  resolveAllowedOrigins,
   trustedWebContentsIds,
   // Iter 37 — clipboard / shell allowlists.
   isOpenExternalUrlAllowed,

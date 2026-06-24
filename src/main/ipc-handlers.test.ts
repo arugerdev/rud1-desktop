@@ -193,11 +193,65 @@ vi.mock("./system-manager", () => ({
 
 import { __test } from "./ipc-handlers";
 
-const { isOriginAllowed, checkSender, UNSAFE_URL_CHARS, MAX_SENDER_URL_LENGTH } =
-  __test;
+const {
+  isOriginAllowed,
+  checkSender,
+  UNSAFE_URL_CHARS,
+  MAX_SENDER_URL_LENGTH,
+  resolveAllowedOrigins,
+} = __test;
 
 const PACKAGED = { isPackaged: true } as const;
 const DEV = { isPackaged: false } as const;
+
+// ─── resolveAllowedOrigins — test-mode allowlist ────────────────────────────
+
+describe("resolveAllowedOrigins", () => {
+  it("returns the exact production pair when nothing is set", () => {
+    expect(resolveAllowedOrigins({})).toEqual([
+      "https://rud1.es",
+      "https://www.rud1.es",
+    ]);
+  });
+
+  it("allowlists the local rud1-es origin in test mode", () => {
+    expect(
+      resolveAllowedOrigins({ RUD1_TEST_MODE: "1", RUD1_TEST_HOST: "192.168.1.50" }),
+    ).toEqual([
+      "http://192.168.1.50:3000",
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+    ]);
+  });
+
+  it("defaults the test host to localhost", () => {
+    expect(resolveAllowedOrigins({ RUD1_TEST_MODE: "true" })).toContain(
+      "http://localhost:3000",
+    );
+  });
+
+  it("lets an explicit RUD1_APP_ORIGIN win over test mode", () => {
+    expect(
+      resolveAllowedOrigins({
+        RUD1_TEST_MODE: "1",
+        RUD1_APP_ORIGIN: "http://10.0.0.9:3000",
+      }),
+    ).toEqual(["http://10.0.0.9:3000"]);
+  });
+
+  it("accepts the test origin through isOriginAllowed", () => {
+    const origins = resolveAllowedOrigins({
+      RUD1_TEST_MODE: "1",
+      RUD1_TEST_HOST: "192.168.1.50",
+    });
+    expect(
+      isOriginAllowed("http://192.168.1.50:3000/dashboard", {
+        isPackaged: true,
+        allowedOrigins: origins,
+      }),
+    ).toBe(true);
+  });
+});
 
 // ─── 1. isOriginAllowed — accepted shapes ───────────────────────────────────
 

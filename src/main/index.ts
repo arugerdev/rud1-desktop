@@ -91,11 +91,22 @@ import {
   statusGlyph,
   type DeviceSummary,
 } from "./device-list-manager";
+import { isTestMode, testBaseUrl } from "./test-mode";
 
-const APP_URL = process.env.RUD1_APP_URL ?? "https://www.rud1.es/dashboard";
+// In test mode the app loads a local rud1-es (http://<RUD1_TEST_HOST>:3000)
+// instead of production. An explicit RUD1_APP_URL / RUD1_VERSION_MANIFEST_URL
+// still wins. With RUD1_TEST_MODE unset these are the production defaults.
+const APP_URL =
+  process.env.RUD1_APP_URL ??
+  (isTestMode()
+    ? `${testBaseUrl()}/dashboard`
+    : "https://www.rud1.es/dashboard");
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 const VERSION_MANIFEST_URL =
-  process.env.RUD1_VERSION_MANIFEST_URL ?? "https://rud1.es/desktop/manifest.json";
+  process.env.RUD1_VERSION_MANIFEST_URL ??
+  (isTestMode()
+    ? `${testBaseUrl()}/desktop/manifest.json`
+    : "https://rud1.es/desktop/manifest.json");
 const FIRMWARE_PROBE_INTERVAL_MS = 60_000;
 // Hard cap on how long the launch-time update gate waits for the first
 // manifest check before giving up and opening the main window. Keeps a
