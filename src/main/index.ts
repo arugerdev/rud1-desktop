@@ -92,6 +92,12 @@ import {
   type DeviceSummary,
 } from "./device-list-manager";
 import { isTestMode, testBaseUrl } from "./test-mode";
+import { loadDevEnvFile } from "./dev-env";
+
+// Dev-only: load <root>/.env so RUD1_TEST_MODE etc. can live in a file instead
+// of the shell. Must run BEFORE the env-derived consts below. Packaged builds
+// skip it entirely, so production never reads a .env.
+if (!app.isPackaged) loadDevEnvFile(app.getAppPath());
 
 // In test mode the app loads a local rud1-es (http://<RUD1_TEST_HOST>:3000)
 // instead of production. An explicit RUD1_APP_URL / RUD1_VERSION_MANIFEST_URL
