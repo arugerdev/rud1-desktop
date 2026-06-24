@@ -202,9 +202,19 @@ fuente (paquete `com0com-2.2.2.0`) queda disponible para cumplir la oferta.
     garantizar "a la primera"; hacerlo a ciegas arriesga la UI de producción.
     Hacer con la Pi/Arduino del lab: + strings i18n en los 11 idiomas.
 
-## 6. Coexistencia con VirtualHere
+## 6. VirtualHere — ELIMINADO (decisión 2026-06-24)
 
-VirtualHere se queda como **fallback** durante la transición (patrón actual
-VirtualHere-primario/usbip-fallback pasa a serial-bridge-primario/VirtualHere-
-fallback para dispositivos CDC/serie). No borrar VirtualHere hasta validar
-Fase F en producción.
+Se descarta la coexistencia/fallback que planteaba este apartado. En esta rama
+VirtualHere se **borra por completo** de rud1-desktop:
+
+- runtime: fuera el arranque del daemon en `app.whenReady` y el teardown en quit.
+- IPC/preload: eliminado el namespace `virtualhere:*`.
+- código: borrados `virtualhere-manager.ts`, `virtualhere-parser.ts` y sus tests;
+  `binary-helper.virtualHereClientPath` retirado.
+- packaging: borrados los `fetch-virtualhere-{win,linux,mac}`, los scripts
+  `fetch:virtualhere-*` de package.json, el paso en `build-win.ps1`, y los
+  binarios `vhui64.exe` / `vhclientx86_64` / `vhclient-darwin` + `.version`.
+
+Transporte resultante: **serie/CDC → com0com + rud1-bridge** (primario y único);
+**USB no-CDC → usbip-win2** (`USBip-installer.exe`). La rama NO se mergea hasta
+completar Fase E (UI en rud1-es) y validar Fase F con hardware.

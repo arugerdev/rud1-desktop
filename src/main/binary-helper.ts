@@ -13,11 +13,11 @@
  *
  * Required binaries per platform (bundled = shipped in resources/<platform>/,
  * system = resolved from PATH / package manager):
- *   Windows: openvpn.exe + tapctl.exe (bundled portable), vhui64.exe +
- *            USBip-installer.exe (bundled).
- *   Linux:   vhclientx86_64 (bundled VirtualHere); openvpn + usbip (system,
+ *   Windows: openvpn.exe + tapctl.exe (bundled portable), rud1-bridge.exe +
+ *            USBip-installer.exe + com0com installer (bundled).
+ *   Linux:   rud1-bridge (bundled); openvpn + usbip (system,
  *            via deb `recommends` / PATH).
- *   macOS:   vhclient-darwin (bundled VirtualHere universal); openvpn (system,
+ *   macOS:   rud1-bridge-{arm64,x64} (bundled); openvpn (system,
  *            Homebrew / PATH).
  */
 
@@ -200,8 +200,8 @@ export function isBinaryAvailable(name: string): boolean {
 
 /**
  * Path to the bundled USB/IP for Windows installer (`USBip-X.Y.Z-x64.exe`).
- * Mantenido como fallback (no-CDC) cuando VirtualHere free queda agotada
- * a 1 device.
+ * Transporte para dispositivos USB no-CDC (los CDC/serie van por el
+ * serial bridge com0com + rud1-bridge).
  */
 export function usbipInstallerPath(): string | null {
   if (process.platform !== "win32") return null;
@@ -227,26 +227,3 @@ export function com0comInstallerPath(): string | null {
   return fs.existsSync(candidate) ? candidate : null;
 }
 
-/**
- * Path al binario headless de VirtualHere bundled. Reemplaza al combo
- * com0com + rud1-bridge: el client usa WinUSB / usbser.sys in-box de
- * Microsoft, sin driver kernel custom y compatible con HVCI activo.
- * Devuelve null si el desktop build no lo incluye (fetch script no
- * ejecutado).
- */
-export function virtualHereClientPath(): string | null {
-  const base = resourcesDir();
-  let candidate: string;
-  if (process.platform === "win32") {
-    // Upstream sólo distribuye el binario GUI vhui64.exe en Windows
-    // pero acepta el flag -t "<command>" idéntico al cliente Linux
-    // console-only, con lo que podemos usarlo headless lanzándolo con
-    // windowsHide: true desde spawn(). El tray icon queda suprimido.
-    candidate = path.join(base, "vhui64.exe");
-  } else if (process.platform === "darwin") {
-    candidate = path.join(base, "vhclient-darwin");
-  } else {
-    candidate = path.join(base, "vhclientx86_64");
-  }
-  return fs.existsSync(candidate) ? candidate : null;
-}

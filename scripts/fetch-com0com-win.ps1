@@ -5,12 +5,11 @@
   so electron-builder bundles a known-good binary via extraResources.
 
 .DESCRIPTION
-  Replaces the VirtualHere transport for serial/CDC devices. com0com
-  provides the virtual COM port pair (kernel driver); rud1-bridge speaks
-  RFC 2217 to the Pi and drives the B-side. See
-  docs/serial-com0com-migration.md §4 for the signing decision.
+  Transport for serial/CDC devices. com0com provides the virtual COM port
+  pair (kernel driver); rud1-bridge speaks RFC 2217 to the Pi and drives the
+  B-side. See docs/serial-com0com-migration.md §4 for the signing decision.
 
-  The installer is COMMITTED to the repo (like vhui64.exe / USBip-installer.exe,
+  The installer is COMMITTED to the repo (like USBip-installer.exe,
   cf. commit 9058b63), not downloaded at build time — SourceForge serves an
   HTML interstitial that breaks scripted download. This script VERIFIES the
   vendored file against the pinned SHA256 and fails CLOSED on mismatch.
@@ -24,7 +23,7 @@
   (com0com.cat = Valid).
 #>
 param(
-  [switch]$Force  # acepto el flag por simetría con fetch-virtualhere-win.ps1; no-op aquí
+  [switch]$Force  # acepto el flag por simetría con los demás fetch:*; no-op aquí
 )
 
 $ErrorActionPreference = "Stop"

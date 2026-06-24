@@ -45,12 +45,10 @@ on a version bump.
 
 ### Linux (`resources/linux/`)
 
-Run `npm run fetch:virtualhere-linux` to (re)fetch.
+Build with `npm run build:rud1-bridge`.
 
 | File | Source |
 |------|--------|
-| `vhclientx86_64` | [VirtualHere](https://www.virtualhere.com/usb_client_software) console client — single statically-linked ELF, the PRIMARY USB transport. Bundled by `scripts/fetch-virtualhere-linux.sh`. |
-| `virtualhere.version` | Pinned version stamp the fetch script reads to skip re-downloads. |
 | `rud1-bridge` | TCP↔serial proxy (cliente RFC 2217). Cross-compilado desde `native/rud1-bridge` por `scripts/build-rud1-bridge.ps1`. |
 | `rud1-bridge.version` | Sello de versión del bridge. |
 
@@ -61,12 +59,10 @@ need a system `openvpn` on PATH. `binary-helper.ts` resolves both via PATH.
 
 ### macOS (`resources/darwin/`)
 
-Run `npm run fetch:virtualhere-mac` (must run on macOS — uses `hdiutil`).
+Build with `npm run build:rud1-bridge`.
 
 | File | Source |
 |------|--------|
-| `vhclient-darwin` | [VirtualHere](https://www.virtualhere.com/usb_client_software) client — universal Mach-O (x86_64 + arm64) extracted from the signed/notarised `VirtualHereUniversal.dmg`. Upstream ships no standalone console binary, so `scripts/fetch-virtualhere-mac.sh` mounts the dmg and copies the `.app` binary out. PRIMARY USB transport. |
-| `virtualhere.version` | Pinned version stamp. |
 | `rud1-bridge-x64` / `rud1-bridge-arm64` | TCP↔serial proxy (cliente RFC 2217), un binario por arch. Cross-compilado desde `native/rud1-bridge` por `scripts/build-rud1-bridge.ps1`. |
 | `rud1-bridge.version` | Sello de versión del bridge. |
 
