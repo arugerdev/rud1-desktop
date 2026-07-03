@@ -316,13 +316,13 @@ async function bindOnPi(host: string, busId: string): Promise<void> {
   try { detail = (await res.text()).slice(0, 500).trim(); } catch { /* ignore */ }
   if (res.status === 403 && /authorized_nets/i.test(detail)) {
     throw new Error(
-      `Pi refused USB bind: this client is not in the device's authorized_nets. ` +
-      `Edit /etc/rud1-agent/config.yaml on the Pi so usb.authorized_nets includes the active VPN subnet, ` +
+      `Rud1 refused USB bind: this client is not in the device's authorized_nets. ` +
+      `Edit /etc/rud1-agent/config.yaml on the device so usb.authorized_nets includes the active VPN subnet, ` +
       `or PUT /api/usbip/policy with the correct CIDR list.`,
     );
   }
   throw new Error(
-    `Pi rejected USB bind for ${busId} (HTTP ${res.status})${detail ? ": " + detail : ""}`,
+    `Rud1 rejected USB bind for ${busId} (HTTP ${res.status})${detail ? ": " + detail : ""}`,
   );
 }
 
