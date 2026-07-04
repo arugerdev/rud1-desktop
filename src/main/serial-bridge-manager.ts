@@ -92,6 +92,9 @@ export interface BridgeSessionInfo {
   busId: string;
   pid: number;
   endpointPath: string;
+  /** COM/path the user opens (A-side). Distinct from endpointPath, which is
+   *  the B-side the bridge holds. The renderer must display THIS. */
+  userVisiblePath: string;
   startedAt: string;
   /** Last line of stderr (truncated to 200 chars). Useful for the
    *  panel's diagnostics chip when the session is misbehaving. */
@@ -101,7 +104,14 @@ export interface BridgeSessionInfo {
 interface ActiveSession {
   busId: string;
   proc: ChildProcess;
+  /** Endpoint rud1-bridge itself opened: the B-side COM (Windows) or the
+   *  pty master. NEVER surfaced to the user — it's held by the bridge. */
   endpointPath: string;
+  /** The path the USER opens: A-side COM (Windows) or the pty symlink.
+   *  This is the single source of truth every status/idempotent path must
+   *  return — returning endpointPath instead hands the user the port the
+   *  bridge already holds (→ "access denied"). */
+  userVisiblePath: string;
   startedAt: number;
   lastEvent?: string;
   /** com0com pair we claimed for this session (Windows only). The
@@ -496,7 +506,7 @@ export async function serialBridgeOpen(opts: OpenOptions): Promise<OpenResult> {
     return {
       busId: s.busId,
       endpointPath: s.endpointPath,
-      userVisiblePath: s.endpointPath,
+      userVisiblePath: s.userVisiblePath,
       pid: s.proc.pid ?? -1,
     };
   }
@@ -570,6 +580,7 @@ export async function serialBridgeOpen(opts: OpenOptions): Promise<OpenResult> {
     busId: opts.busId,
     proc,
     endpointPath: "", // populated by the ready line below
+    userVisiblePath: "", // populated once we know the A-side (below)
     startedAt: Date.now(),
     pair,
   };
@@ -618,9 +629,11 @@ export async function serialBridgeOpen(opts: OpenOptions): Promise<OpenResult> {
 
   // On Windows, the user opens the A-side of the pair, not the
   // B-side rud1-bridge took. We swap the path so the renderer
-  // surfaces the right COMx number.
+  // surfaces the right COMx number. Persist it on the session so the
+  // idempotent-open and status paths return it too (not endpointPath).
   const userVisible =
     process.platform === "win32" && pair ? pair.userPort : ready.path;
+  session.userVisiblePath = userVisible;
 
   return {
     busId: opts.busId,
@@ -803,6 +816,7 @@ export async function serialBridgeStatus(): Promise<BridgeStatus> {
       busId: s.busId,
       pid: s.proc.pid ?? -1,
       endpointPath: s.endpointPath,
+      userVisiblePath: s.userVisiblePath,
       startedAt: new Date(s.startedAt).toISOString(),
       lastEvent: s.lastEvent,
     })),
@@ -817,6 +831,7 @@ export function serialBridgeSessionFor(busId: string): BridgeSessionInfo | null 
     busId: s.busId,
     pid: s.proc.pid ?? -1,
     endpointPath: s.endpointPath,
+    userVisiblePath: s.userVisiblePath,
     startedAt: new Date(s.startedAt).toISOString(),
     lastEvent: s.lastEvent,
   };
