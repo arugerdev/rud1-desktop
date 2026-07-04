@@ -392,19 +392,13 @@ async function installCom0comSilently(): Promise<void> {
       "y reconstruye el desktop.",
     );
   }
-  // /S = NSIS silent. Start-Process -Wait para bloquear hasta que el
-  // driver quede registrado. Ya somos admin, así que -Verb RunAs no
-  // dispara UAC; lo omitimos para no arriesgar un prompt innecesario.
-  await execFileAsync(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `Start-Process -FilePath '${installer}' -ArgumentList '/S' -Wait`,
-    ],
-    { windowsHide: true, timeout: 120_000 },
-  );
+  // /S = NSIS silent. La app es requireAdministrator → el instalador ya
+  // hereda admin; lo invocamos directo (sin PowerShell/Start-Process) para
+  // no abrir ninguna consola visible.
+  await execFileAsync(installer, ["/S"], {
+    windowsHide: true,
+    timeout: 120_000,
+  });
 }
 
 /**
@@ -415,16 +409,15 @@ async function installCom0comSilently(): Promise<void> {
 async function installCom0comPair(setupcPath: string, status: Com0comStatus): Promise<void> {
   const { user, bridge } = await pickFreePair(status);
   const optStr = "EmuBR=yes,EmuOverrun=yes";
+  // Ya somos admin (requireAdministrator) → llamamos a setupc directamente.
+  // cwd = su propia carpeta: com0com's setupc lee com0com.inf del cwd, y
+  // Start-Process -Verb RunAs pierde el working dir al elevar (dejaba el cwd
+  // de la app …\rud1\ → SetupGetInfInformation(...\rud1\com0com.inf)
+  // 0x00000002) y además abría una consola. Directo evita ambas cosas.
   await execFileAsync(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `Start-Process -FilePath '${setupcPath}' -ArgumentList 'install',` +
-      `'PortName=${user},${optStr}','PortName=${bridge},${optStr}' -Verb RunAs -Wait`,
-    ],
-    { windowsHide: true, timeout: 60_000 },
+    setupcPath,
+    ["install", `PortName=${user},${optStr}`, `PortName=${bridge},${optStr}`],
+    { cwd: path.dirname(setupcPath), windowsHide: true, timeout: 60_000 },
   );
 }
 
@@ -741,12 +734,10 @@ export async function serialBridgeConfigurePair(opts?: {
     throw new Error("user and bridge aliases must differ");
   }
 
-  // setupc requires admin. We run it via PowerShell's Start-Process
-  // -Verb RunAs so the OS handles the UAC prompt — invoking setupc
-  // directly from a non-elevated process would silently fail with
-  // "ACCESS_DENIED" inside its own log instead of triggering a
-  // user-visible elevation dialog. Two `change` invocations because
-  // setupc takes one comma-list of options per run.
+  // setupc requires admin; the app is requireAdministrator so it already
+  // runs elevated — we invoke setupc directly (see below) rather than via
+  // Start-Process -Verb RunAs. Two `change` invocations because setupc takes
+  // one comma-list of options per run.
   //
   // EmuBR=yes + EmuOverrun=yes: makes Windows enumerate the port as
   // "real hardware" rather than a generic virtual COM. Arduino IDE
@@ -757,16 +748,19 @@ export async function serialBridgeConfigurePair(opts?: {
   // it at alias time means the first Conectar Just Works.
   const opts2 = "EmuBR=yes,EmuOverrun=yes";
   const setupc = status.setupcPath;
-  const psCmd = [
-    `Start-Process -FilePath '${setupc}' -ArgumentList 'change',` +
-    `'${target.userPort}','PortName=${userAlias},${opts2}' -Verb RunAs -Wait;`,
-    `Start-Process -FilePath '${setupc}' -ArgumentList 'change',` +
-    `'${target.bridgePort}','PortName=${bridgeAlias},${opts2}' -Verb RunAs -Wait`,
-  ].join(" ");
+  // Ya somos admin → setupc directo con cwd = su carpeta (encuentra
+  // com0com.inf). Start-Process -Verb RunAs perdía el working dir al elevar
+  // y abría una consola. Un `change` por puerto.
+  const setupcDir = path.dirname(setupc);
   await execFileAsync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", psCmd],
-    { windowsHide: true, timeout: 60_000 },
+    setupc,
+    ["change", target.userPort, `PortName=${userAlias},${opts2}`],
+    { cwd: setupcDir, windowsHide: true, timeout: 60_000 },
+  );
+  await execFileAsync(
+    setupc,
+    ["change", target.bridgePort, `PortName=${bridgeAlias},${opts2}`],
+    { cwd: setupcDir, windowsHide: true, timeout: 60_000 },
   );
 
   // Re-detect to confirm both the alias AND EmuBR=yes landed. The

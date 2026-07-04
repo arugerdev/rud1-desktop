@@ -1,5 +1,6 @@
 
 import { execFile } from "child_process";
+import path from "path";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
@@ -34,7 +35,11 @@ export async function detectCom0com(): Promise<Com0comStatus> {
     return { installed: false, setupcPath: null, pairs: [] };
   }
   try {
+    // cwd = setupc's dir: setupc reads com0com.inf from the cwd on startup
+    // (even for `list`), so without this it pops SetupGetInfInformation(
+    // <app dir>\com0com.inf) 0x00000002 every time the Connect tab polls.
     const { stdout } = await execFileAsync(setupc, ["list"], {
+      cwd: path.dirname(setupc),
       windowsHide: true,
       timeout: 5000,
     });

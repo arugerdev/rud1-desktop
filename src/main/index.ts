@@ -1,4 +1,7 @@
 // Env: RUD1_APP_URL, RUD1_APP_ORIGIN (comma-separated), RUD1_DEV_TOOLS=1.
+// app-target MUST be imported first: it pins RUD1_APP_ORIGIN and the
+// secure-origin switch before ipc-handlers / app-ready consume them.
+import { APP_URL } from "./app-target";
 import {
   app,
   BrowserWindow,
@@ -92,7 +95,6 @@ import {
   type DeviceSummary,
 } from "./device-list-manager";
 
-const APP_URL = process.env.RUD1_APP_URL ?? "https://www.rud1.es/dashboard";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 const VERSION_MANIFEST_URL =
   process.env.RUD1_VERSION_MANIFEST_URL ?? "https://rud1.es/desktop/manifest.json";
