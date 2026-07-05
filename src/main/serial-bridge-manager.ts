@@ -10,6 +10,7 @@ import {
   rud1BridgePath,
   isRud1BridgeAvailable,
   com0comInstallerPath,
+  com0comPatchInfPath,
 } from "./binary-helper";
 import {
   detectCom0com,
@@ -409,6 +410,26 @@ async function installCom0comSilently(): Promise<void> {
     windowsHide: true,
     timeout: 120_000,
   });
+
+  // El .sys del 3.0.0.0 original va firmado con un cert SHA-1 que Win11
+  // (HVCI/Secure Boot) ya no acepta → Code 52. Aplicamos el parche de firma
+  // (cncport.inf/.sys/.cat re-firmados) al driver store con pnputil
+  // /add-driver ... /install: instala el paquete Y actualiza los devices
+  // com0com a esa firma, así cargan sin Code 52. Best-effort: si el parche
+  // no está empaquetado seguimos (en máquinas viejas el original ya carga).
+  const patchInf = com0comPatchInfPath();
+  if (patchInf) {
+    try {
+      await execFileAsync(
+        "pnputil",
+        ["/add-driver", patchInf, "/install"],
+        { windowsHide: true, timeout: 60_000 },
+      );
+    } catch {
+      /* el device puede quedar en Code 52 hasta re-enumerar; se reintenta
+         en la siguiente apertura vía detectCom0com/ensureCom0comReady */
+    }
+  }
 }
 
 /**

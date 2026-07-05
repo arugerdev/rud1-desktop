@@ -210,11 +210,11 @@ export function usbipInstallerPath(): string | null {
 }
 
 /**
- * Path to the bundled signed com0com installer
- * (`com0com/com0com-2.2.2.0-x64-fre-signed.exe`). Driver firmado por
- * catálogo (pre-2015 → carga con Secure Boot). El serial bridge lo
- * instala en silencio con `/S` (la app es requireAdministrator, sin UAC
- * extra). Devuelve null en no-Windows o si no se empaquetó.
+ * Path to the bundled com0com 3.0.0.0 base installer
+ * (`com0com/Setup_com0com_v3.0.0.0_W7_x64_signed.exe`). Se instala en
+ * silencio con `/S` y acto seguido se aplica el parche de firma Win11
+ * (ver com0comPatchInfPath) para evitar el Code 52. La app es
+ * requireAdministrator (sin UAC extra). Null en no-Windows / no empaquetado.
  * Ver docs/serial-com0com-migration.md §4.
  */
 export function com0comInstallerPath(): string | null {
@@ -222,7 +222,25 @@ export function com0comInstallerPath(): string | null {
   const candidate = path.join(
     resourcesDir(),
     "com0com",
-    "com0com-2.2.2.0-x64-fre-signed.exe",
+    "Setup_com0com_v3.0.0.0_W7_x64_signed.exe",
+  );
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Path to the Win11 signature-patch INF (`com0com/win11-patch/cncport.inf`,
+ * .sys + .cat firmados por FuJian Newland). Se aplica con
+ * `pnputil /add-driver cncport.inf /install` tras el instalador base para
+ * que el driver cargue en Win11/Secure Boot (resuelve el Code 52 del .sys
+ * SHA-1 del 3.0.0.0 original). Null en no-Windows / no empaquetado.
+ */
+export function com0comPatchInfPath(): string | null {
+  if (process.platform !== "win32") return null;
+  const candidate = path.join(
+    resourcesDir(),
+    "com0com",
+    "win11-patch",
+    "cncport.inf",
   );
   return fs.existsSync(candidate) ? candidate : null;
 }
