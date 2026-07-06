@@ -160,6 +160,21 @@ export function usbipdPath(): string {
 }
 
 /**
+ * Path to the bundled `rud1shim` — the generic flasher interceptor that
+ * reroutes uploads to a rud1 device's local job-runner (latency-immune
+ * programming). Built from native/rud1shim. On non-Windows it returns the
+ * bare name (the shim-lifecycle manager only wraps flashers where a bundled
+ * binary is present). See docs / native/rud1shim/README.md.
+ */
+export function rud1shimPath(): string {
+  return binaryPath("rud1shim");
+}
+
+export function isRud1shimAvailable(): boolean {
+  return path.isAbsolute(rud1shimPath());
+}
+
+/**
  * Path to the bundled rud1-bridge binary (TCP↔serial RFC 2217 proxy).
  * Cross-compiled from native/rud1-bridge by scripts/build-rud1-bridge.ps1.
  * Falls back to a PATH copy during dev.
