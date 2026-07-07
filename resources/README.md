@@ -38,16 +38,19 @@ on a version bump.
 | `openvpn/NOTICE.OpenVPN.txt` | Source/version pointer for GPLv2 compliance |
 | `openvpn/openvpn.version` | Pinned version stamp the script reads to skip re-downloads |
 | `USBip-installer.exe` | [usbip-win2](https://github.com/vadimgrn/usbip-win2/releases) — bundled by `scripts/fetch-usbip-win.ps1` |
-| `com0com-installer.exe` | [com0com](https://sourceforge.net/projects/com0com/) — bundled by `scripts/fetch-com0com-win.ps1` |
+| `com0com/com0com-2.2.2.0-x64-fre-signed.exe` | [com0com](https://sourceforge.net/projects/com0com/) 2.2.2.0 x64 signed (driver cat firmado, pre-2015 → carga con Secure Boot). Vendorizado; verificado por `scripts/fetch-com0com-win.ps1` (SHA256 + com0com.cat). Ver `docs/serial-com0com-migration.md` §4 |
+| `com0com.version` | Sello de versión que lee el verify script |
+| `rud1-bridge.exe` | TCP↔serial proxy (cliente RFC 2217). Cross-compilado desde `native/rud1-bridge` por `scripts/build-rud1-bridge.ps1` |
+| `rud1-bridge.version` | Sello de versión del bridge |
 
 ### Linux (`resources/linux/`)
 
-Run `npm run fetch:virtualhere-linux` to (re)fetch.
+Build with `npm run build:rud1-bridge`.
 
 | File | Source |
 |------|--------|
-| `vhclientx86_64` | [VirtualHere](https://www.virtualhere.com/usb_client_software) console client — single statically-linked ELF, the PRIMARY USB transport. Bundled by `scripts/fetch-virtualhere-linux.sh`. |
-| `virtualhere.version` | Pinned version stamp the fetch script reads to skip re-downloads. |
+| `rud1-bridge` | TCP↔serial proxy (cliente RFC 2217). Cross-compilado desde `native/rud1-bridge` por `scripts/build-rud1-bridge.ps1`. |
+| `rud1-bridge.version` | Sello de versión del bridge. |
 
 `openvpn` (VPN) and `usbip`/`usbipd` (USB fallback) are NOT bundled on Linux —
 they come from the distro package manager. The `.deb` declares them via
@@ -56,12 +59,12 @@ need a system `openvpn` on PATH. `binary-helper.ts` resolves both via PATH.
 
 ### macOS (`resources/darwin/`)
 
-Run `npm run fetch:virtualhere-mac` (must run on macOS — uses `hdiutil`).
+Build with `npm run build:rud1-bridge`.
 
 | File | Source |
 |------|--------|
-| `vhclient-darwin` | [VirtualHere](https://www.virtualhere.com/usb_client_software) client — universal Mach-O (x86_64 + arm64) extracted from the signed/notarised `VirtualHereUniversal.dmg`. Upstream ships no standalone console binary, so `scripts/fetch-virtualhere-mac.sh` mounts the dmg and copies the `.app` binary out. PRIMARY USB transport. |
-| `virtualhere.version` | Pinned version stamp. |
+| `rud1-bridge-x64` / `rud1-bridge-arm64` | TCP↔serial proxy (cliente RFC 2217), un binario por arch. Cross-compilado desde `native/rud1-bridge` por `scripts/build-rud1-bridge.ps1`. |
+| `rud1-bridge.version` | Sello de versión del bridge. |
 
 `openvpn` is NOT bundled on macOS — install via `brew install openvpn`;
 `binary-helper.ts` resolves it via PATH. `usbip` is a Homebrew/source fallback.

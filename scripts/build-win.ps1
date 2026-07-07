@@ -73,13 +73,22 @@ if ($SkipFetch) {
     throw "fetch-usbip-win.ps1 failed: $_"
   }
 
-  # ── 1c. Fetch VirtualHere headless client ──────────────────────────────
-  Step "Fetching VirtualHere client (idempotent)"
+  # ── 1b2. Verify vendored com0com signed installer (fail-closed) ─────────
+  Step "Verifying com0com signed installer (SHA256 + driver cat)"
   try {
-    & (Join-Path $ScriptDir "fetch-virtualhere-win.ps1")
+    & (Join-Path $ScriptDir "fetch-com0com-win.ps1")
   } catch {
-    throw "fetch-virtualhere-win.ps1 failed: $_"
+    throw "fetch-com0com-win.ps1 failed: $_"
   }
+
+  # ── 1b3. Cross-compile rud1-bridge (win/linux/mac) from native/ ─────────
+  Step "Building rud1-bridge (idempotent)"
+  try {
+    & (Join-Path $ScriptDir "build-rud1-bridge.ps1")
+  } catch {
+    throw "build-rud1-bridge.ps1 failed: $_"
+  }
+
 }
 
 # ── 1c. Generate app icons from rud1-es favicon ─────────────────────────────

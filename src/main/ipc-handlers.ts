@@ -39,14 +39,18 @@ import {
   UsbipMissingError,
 } from "./usb-manager";
 import {
-  startVirtualHereDaemon,
-  stopVirtualHereDaemon,
-  statusSnapshot as virtualHereStatus,
-  useDevice as virtualHereUse,
-  stopUsingDevice as virtualHereStopUsing,
-  debugSnapshot as virtualHereDebug,
-  setServer as virtualHereSetServer,
-} from "./virtualhere-manager";
+  serialBridgeOpen,
+  serialBridgeClose,
+  serialBridgeCloseAll,
+  serialBridgeStatus,
+  serialBridgeSessionFor,
+  serialBridgeConfigurePair,
+  serialBridgeReset,
+  Com0comMissingError,
+  Com0comPairNotAliasedError,
+  Com0comPairNoEmuBRError,
+} from "./serial-bridge-manager";
+import { com0comInstallerPath } from "./binary-helper";
 import {
   notifyVpnConnected,
   notifyVpnCgnatWarning,
@@ -654,9 +658,14 @@ export function registerIpcHandlers(opts: {
       // Swallow — the disconnect itself is the user-visible action and
       // a missing usbip binary or transient list failure shouldn't gate it.
     }
-    // Las sesiones de VirtualHere se mantienen vivas via su daemon —
-    // cuando el tunnel cae, vhclient detecta socket closed y avisa al
-    // user automáticamente, sin housekeeping nuestro aquí.
+    // Serial bridge sessions ride the same WG tunnel — close them in the
+    // same sweep so the rud1-bridge subprocesses don't sit on dead TCP
+    // sockets waiting for a keepalive timeout. Best-effort like USB.
+    try {
+      await serialBridgeCloseAll();
+    } catch {
+      // Same rationale as usbDetachAll: don't block VPN disconnect.
+    }
     try {
       // Iter 59: capture uptime via the result envelope so the
       // notification toast can render "Tunnel dropped after 2h 14m".
@@ -939,23 +948,103 @@ export function registerIpcHandlers(opts: {
     return { ok: true as const };
   });
 
-  // ── VirtualHere — único transporte para USB remoto ────────────────────
+  // ── Serial bridge — transporte primario para dispositivos CDC ─────────
   //
-  // El cliente headless de VirtualHere se ejecuta en background al
-  // arrancar la app. Los handlers de aquí abajo le mandan comandos
-  // (USE / STOP USING / LIST) y devuelven el estado parseado. Cuando
-  // un device queda attached, Windows lo monta vía WinUSB / usbser.sys
-  // in-box — sin drivers custom ni elevación, compatible con HVCI.
-  //
-  // Tier free de VirtualHere = 1 device simultáneo. La UI bloquea el
-  // resto cuando hay uno attached.
+  // La Connect tab enruta Arduino-style por aquí en vez de USB/IP porque
+  // el módulo `usbip_host` es inestable cuando un CDC re-enumera (reset
+  // por DTR-toggle de avrdude). El renderer llama `serial:open` con el
+  // busId + piHost; abrimos sesión en el Pi (POST /api/serial-bridge/open),
+  // auto-instalamos com0com si falta y spawneamos rud1-bridge, devolviendo
+  // el COM local que el operador abre en su Arduino IDE.
+  ipcMain.handle(
+    "serial:open",
+    async (event, opts: {
+      busId: string;
+      piHost: string;
+      baud?: number;
+      dataBits?: number;
+      parity?: string;
+      stopBits?: string;
+      label?: string;
+    }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const result = await serialBridgeOpen(opts);
+        return { ok: true as const, result };
+      } catch (err) {
+        if (err instanceof Com0comMissingError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comMissing: true,
+            setupcPath: err.setupcPath,
+            hasPairs: err.hasPairs,
+          };
+        }
+        if (err instanceof Com0comPairNotAliasedError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comPairNotAliased: true,
+            pair: err.pair,
+            setupcPath: err.setupcPath,
+          };
+        }
+        if (err instanceof Com0comPairNoEmuBRError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comPairNoEmuBR: true,
+            pair: err.pair,
+            setupcPath: err.setupcPath,
+          };
+        }
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
 
-  ipcMain.handle("virtualhere:status", async (event) => {
+  ipcMain.handle("serial:close", async (event, busId: string) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    try {
+      await serialBridgeClose(busId);
+      return { ok: true as const };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  // Pulso DTR manual para una sesión abierta. Envuelve el POST
+  // /api/serial-bridge/reset del firmware; el renderer lo expone como
+  // botón "Reset" junto a un dispositivo bridgeado.
+  ipcMain.handle(
+    "serial:reset",
+    async (event, opts: { busId: string; piHost: string; pulseMs?: number }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        await serialBridgeReset(opts);
+        return { ok: true as const };
+      } catch (err) {
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle("serial:status", async (event) => {
     if (!checkSender(event)) {
       return { ok: false as const, error: "Unauthorized origin" };
     }
     try {
-      const result = await virtualHereStatus();
+      const result = await serialBridgeStatus();
       return { ok: true as const, result };
     } catch (err) {
       return {
@@ -965,54 +1054,71 @@ export function registerIpcHandlers(opts: {
     }
   });
 
-  ipcMain.handle("virtualhere:use", async (event, address: string) => {
-    if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-    if (typeof address !== "string" || address.length === 0) {
-      return { ok: false as const, error: "address required" };
+  ipcMain.handle("serial:sessionFor", async (event, busId: string) => {
+    if (!checkSender(event)) {
+      return { ok: false as const, error: "Unauthorized origin" };
     }
-    return virtualHereUse(address);
+    try {
+      const result = serialBridgeSessionFor(busId);
+      return { ok: true as const, result };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   });
 
-  ipcMain.handle("virtualhere:stopUsing", async (event, address: string) => {
-    if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-    if (typeof address !== "string" || address.length === 0) {
-      return { ok: false as const, error: "address required" };
-    }
-    return virtualHereStopUsing(address);
-  });
-
-  // Apunta el cliente VirtualHere directo a la IP del Pi (br-rud1) en vez
-  // de depender del descubrimiento por broadcast/mDNS, que no cruza fiable
-  // el bridge L2 de OpenVPN. El manager re-valida host/puerto (main process
-  // = frontera de confianza; no confiamos en el renderer).
+  // Configura un par com0com asignando alias COMxx (+ EmuBR). La app es
+  // admin → setupc corre sin UAC extra. Idempotente. Fallback manual al
+  // auto-provisioning de serial:open.
   ipcMain.handle(
-    "virtualhere:setServer",
-    async (
-      event,
-      payload: { host?: unknown; port?: unknown; force?: unknown },
-    ) => {
-      if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-      const host = payload?.host;
-      if (typeof host !== "string" || host.length === 0) {
-        return { ok: false as const, error: "host required" };
+    "serial:configurePair",
+    async (event, opts?: { userPortAlias?: string; bridgePortAlias?: string }) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      try {
+        const pair = await serialBridgeConfigurePair(opts);
+        return { ok: true as const, result: pair };
+      } catch (err) {
+        if (err instanceof Com0comMissingError) {
+          return {
+            ok: false as const,
+            error: err.message,
+            com0comMissing: true,
+          };
+        }
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        };
       }
-      const port = typeof payload?.port === "number" ? payload.port : undefined;
-      const force = payload?.force === true;
-      return virtualHereSetServer(host, { port, force });
     },
   );
 
-  ipcMain.handle("virtualhere:debug", async (event) => {
-    if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-    try {
-      const result = await virtualHereDebug();
-      return { ok: true as const, result };
-    } catch (err) {
-      return {
-        ok: false as const,
-        error: err instanceof Error ? err.message : String(err),
-      };
+  // Lanza el instalador com0com empaquetado como fallback manual (CTA)
+  // cuando la auto-instalación silenciosa de serial:open no fuese posible.
+  ipcMain.handle("serial:launchInstaller", async (event) => {
+    if (!checkSender(event)) {
+      return { ok: false, error: "Unauthorized origin" } as const;
     }
+    if (process.platform !== "win32") {
+      return {
+        ok: false,
+        error: "com0com is bundled only for Windows builds.",
+      } as const;
+    }
+    const installerPath = com0comInstallerPath();
+    if (!installerPath) {
+      return {
+        ok: false,
+        error: "Bundled com0com installer missing — re-run npm run fetch:com0com-win.",
+      } as const;
+    }
+    const result = await shell.openPath(installerPath);
+    if (result !== "") {
+      return { ok: false, error: result } as const;
+    }
+    return { ok: true as const };
   });
 
   ipcMain.handle("net:ping", async (event, host: string) => {

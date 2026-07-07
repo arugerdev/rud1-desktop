@@ -1,4 +1,7 @@
 // Env: RUD1_APP_URL, RUD1_APP_ORIGIN (comma-separated), RUD1_DEV_TOOLS=1.
+// app-target MUST be imported first: it pins RUD1_APP_ORIGIN and the
+// secure-origin switch before ipc-handlers / app-ready consume them.
+import { APP_URL } from "./app-target";
 import {
   app,
   BrowserWindow,
@@ -92,7 +95,6 @@ import {
   type DeviceSummary,
 } from "./device-list-manager";
 
-const APP_URL = process.env.RUD1_APP_URL ?? "https://www.rud1.es/dashboard";
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 const VERSION_MANIFEST_URL =
   process.env.RUD1_VERSION_MANIFEST_URL ?? "https://rud1.es/desktop/manifest.json";
@@ -1098,13 +1100,6 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
 
-  void import("./virtualhere-manager").then(async (vh) => {
-    const res = await vh.startVirtualHereDaemon();
-    if (!res.ok) {
-      console.warn("[virtualhere] daemon failed to start:", res.error);
-    }
-  });
-
   registerIpcHandlers({
     firstBootDedupe: {
       list: () => notifiedHosts,
@@ -1340,15 +1335,6 @@ app.on("before-quit", (event) => {
   // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
   // timeouts so this can't hang indefinitely.
   void (async () => {
-    // En Windows el servicio queda corriendo aunque cerremos la app —
-    // así el user no pierde el attach del USB. En POSIX paramos el
-    // daemon -n que arrancamos.
-    try {
-      const { stopVirtualHereDaemon } = await import("./virtualhere-manager");
-      await stopVirtualHereDaemon();
-    } catch {
-      /* best-effort */
-    }
     // Detach USB sessions FIRST while the tunnel still routes — the vpn:disconnect
     // IPC handler does this too, but before-quit calls vpnDisconnect() directly
     // and would otherwise leave an orphan VHCI port + bound device on the Pi.
@@ -1357,6 +1343,14 @@ app.on("before-quit", (event) => {
       await usbDetachAll();
     } catch (err) {
       console.warn("[lifecycle] usbDetachAll on quit failed:", err);
+    }
+    // Kill any rud1-bridge subprocesses + release their Pi-side slots
+    // while the tunnel still routes, so we don't strand a serial session.
+    try {
+      const { serialBridgeCloseAll } = await import("./serial-bridge-manager");
+      await serialBridgeCloseAll();
+    } catch (err) {
+      console.warn("[lifecycle] serialBridgeCloseAll on quit failed:", err);
     }
     try {
       const { vpnDisconnect } = await import("./vpn-manager");
