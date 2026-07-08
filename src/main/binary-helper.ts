@@ -13,12 +13,10 @@
  *
  * Required binaries per platform (bundled = shipped in resources/<platform>/,
  * system = resolved from PATH / package manager):
- *   Windows: openvpn.exe + tapctl.exe (bundled portable), vhui64.exe +
+ *   Windows: openvpn.exe + tapctl.exe (bundled portable),
  *            USBip-installer.exe (bundled).
- *   Linux:   vhclientx86_64 (bundled VirtualHere); openvpn + usbip (system,
- *            via deb `recommends` / PATH).
- *   macOS:   vhclient-darwin (bundled VirtualHere universal); openvpn (system,
- *            Homebrew / PATH).
+ *   Linux:   openvpn + usbip (system, via deb `recommends` / PATH).
+ *   macOS:   openvpn (system, Homebrew / PATH).
  */
 
 import path from "path";
@@ -160,6 +158,21 @@ export function usbipdPath(): string {
 }
 
 /**
+ * Path to the bundled `rud1shim` — the generic flasher interceptor that
+ * reroutes uploads to a rud1 device's local job-runner (latency-immune
+ * programming). Built from native/rud1shim. On non-Windows it returns the
+ * bare name (the shim-lifecycle manager only wraps flashers where a bundled
+ * binary is present). See docs / native/rud1shim/README.md.
+ */
+export function rud1shimPath(): string {
+  return binaryPath("rud1shim");
+}
+
+export function isRud1shimAvailable(): boolean {
+  return path.isAbsolute(rud1shimPath());
+}
+
+/**
  * Returns true when `binaryPath(name)` resolved to a real file. Useful
  * for preflight checks that need to give the user an actionable error
  * ("install OpenVPN from <url>") instead of waiting for spawn ENOENT
@@ -171,8 +184,8 @@ export function isBinaryAvailable(name: string): boolean {
 
 /**
  * Path to the bundled USB/IP for Windows installer (`USBip-X.Y.Z-x64.exe`).
- * Mantenido como fallback (no-CDC) cuando VirtualHere free queda agotada
- * a 1 device.
+ * Transporte primario para todo dispositivo USB/serie: el device aparece
+ * como COM nativo en Windows vía usbser.sys.
  */
 export function usbipInstallerPath(): string | null {
   if (process.platform !== "win32") return null;
@@ -180,26 +193,3 @@ export function usbipInstallerPath(): string | null {
   return fs.existsSync(candidate) ? candidate : null;
 }
 
-/**
- * Path al binario headless de VirtualHere bundled. Reemplaza al combo
- * com0com + rud1-bridge: el client usa WinUSB / usbser.sys in-box de
- * Microsoft, sin driver kernel custom y compatible con HVCI activo.
- * Devuelve null si el desktop build no lo incluye (fetch script no
- * ejecutado).
- */
-export function virtualHereClientPath(): string | null {
-  const base = resourcesDir();
-  let candidate: string;
-  if (process.platform === "win32") {
-    // Upstream sólo distribuye el binario GUI vhui64.exe en Windows
-    // pero acepta el flag -t "<command>" idéntico al cliente Linux
-    // console-only, con lo que podemos usarlo headless lanzándolo con
-    // windowsHide: true desde spawn(). El tray icon queda suprimido.
-    candidate = path.join(base, "vhui64.exe");
-  } else if (process.platform === "darwin") {
-    candidate = path.join(base, "vhclient-darwin");
-  } else {
-    candidate = path.join(base, "vhclientx86_64");
-  }
-  return fs.existsSync(candidate) ? candidate : null;
-}

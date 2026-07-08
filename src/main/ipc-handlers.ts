@@ -39,15 +39,6 @@ import {
   UsbipMissingError,
 } from "./usb-manager";
 import {
-  startVirtualHereDaemon,
-  stopVirtualHereDaemon,
-  statusSnapshot as virtualHereStatus,
-  useDevice as virtualHereUse,
-  stopUsingDevice as virtualHereStopUsing,
-  debugSnapshot as virtualHereDebug,
-  setServer as virtualHereSetServer,
-} from "./virtualhere-manager";
-import {
   notifyVpnConnected,
   notifyVpnCgnatWarning,
   notifyVpnDisconnected,
@@ -654,9 +645,6 @@ export function registerIpcHandlers(opts: {
       // Swallow — the disconnect itself is the user-visible action and
       // a missing usbip binary or transient list failure shouldn't gate it.
     }
-    // Las sesiones de VirtualHere se mantienen vivas via su daemon —
-    // cuando el tunnel cae, vhclient detecta socket closed y avisa al
-    // user automáticamente, sin housekeeping nuestro aquí.
     try {
       // Iter 59: capture uptime via the result envelope so the
       // notification toast can render "Tunnel dropped after 2h 14m".
@@ -937,82 +925,6 @@ export function registerIpcHandlers(opts: {
       return { ok: false, error: result } as const;
     }
     return { ok: true as const };
-  });
-
-  // ── VirtualHere — único transporte para USB remoto ────────────────────
-  //
-  // El cliente headless de VirtualHere se ejecuta en background al
-  // arrancar la app. Los handlers de aquí abajo le mandan comandos
-  // (USE / STOP USING / LIST) y devuelven el estado parseado. Cuando
-  // un device queda attached, Windows lo monta vía WinUSB / usbser.sys
-  // in-box — sin drivers custom ni elevación, compatible con HVCI.
-  //
-  // Tier free de VirtualHere = 1 device simultáneo. La UI bloquea el
-  // resto cuando hay uno attached.
-
-  ipcMain.handle("virtualhere:status", async (event) => {
-    if (!checkSender(event)) {
-      return { ok: false as const, error: "Unauthorized origin" };
-    }
-    try {
-      const result = await virtualHereStatus();
-      return { ok: true as const, result };
-    } catch (err) {
-      return {
-        ok: false as const,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
-  });
-
-  ipcMain.handle("virtualhere:use", async (event, address: string) => {
-    if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-    if (typeof address !== "string" || address.length === 0) {
-      return { ok: false as const, error: "address required" };
-    }
-    return virtualHereUse(address);
-  });
-
-  ipcMain.handle("virtualhere:stopUsing", async (event, address: string) => {
-    if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-    if (typeof address !== "string" || address.length === 0) {
-      return { ok: false as const, error: "address required" };
-    }
-    return virtualHereStopUsing(address);
-  });
-
-  // Apunta el cliente VirtualHere directo a la IP del Pi (br-rud1) en vez
-  // de depender del descubrimiento por broadcast/mDNS, que no cruza fiable
-  // el bridge L2 de OpenVPN. El manager re-valida host/puerto (main process
-  // = frontera de confianza; no confiamos en el renderer).
-  ipcMain.handle(
-    "virtualhere:setServer",
-    async (
-      event,
-      payload: { host?: unknown; port?: unknown; force?: unknown },
-    ) => {
-      if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-      const host = payload?.host;
-      if (typeof host !== "string" || host.length === 0) {
-        return { ok: false as const, error: "host required" };
-      }
-      const port = typeof payload?.port === "number" ? payload.port : undefined;
-      const force = payload?.force === true;
-      return virtualHereSetServer(host, { port, force });
-    },
-  );
-
-  ipcMain.handle("virtualhere:debug", async (event) => {
-    if (!checkSender(event)) return { ok: false as const, error: "Unauthorized origin" };
-    try {
-      const result = await virtualHereDebug();
-      return { ok: true as const, result };
-    } catch (err) {
-      return {
-        ok: false as const,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
   });
 
   ipcMain.handle("net:ping", async (event, host: string) => {

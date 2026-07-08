@@ -73,15 +73,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Git on the Windows dev box can't preserve the +x mode bit, so the
-      # committed VirtualHere console client lands as 0644. Restore +x before
-      # electron-builder stages it into the AppImage/deb (openvpn + usbip are
-      # system-provided on Linux, declared via deb `recommends`).
-      - name: Ensure committed Linux binaries are executable
-        run: |
-          set -eux
-          chmod +x resources/linux/vhclientx86_64
-
       - name: Build Linux artifacts
         run: npm run dist:linux
 
@@ -114,14 +105,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      # Restore +x on the committed VirtualHere universal client (x86_64 +
-      # arm64), dropped to 0644 by the Windows dev box. openvpn is provided by
-      # the system (Homebrew) on macOS and resolved via PATH at runtime.
-      - name: Ensure committed macOS binaries are executable
-        run: |
-          set -eux
-          chmod +x resources/darwin/vhclient-darwin
 
       - name: Build macOS DMGs
         env:

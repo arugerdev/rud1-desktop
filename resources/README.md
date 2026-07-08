@@ -38,30 +38,15 @@ on a version bump.
 | `openvpn/NOTICE.OpenVPN.txt` | Source/version pointer for GPLv2 compliance |
 | `openvpn/openvpn.version` | Pinned version stamp the script reads to skip re-downloads |
 | `USBip-installer.exe` | [usbip-win2](https://github.com/vadimgrn/usbip-win2/releases) — bundled by `scripts/fetch-usbip-win.ps1` |
-| `com0com-installer.exe` | [com0com](https://sourceforge.net/projects/com0com/) — bundled by `scripts/fetch-com0com-win.ps1` |
 
 ### Linux (`resources/linux/`)
 
-Run `npm run fetch:virtualhere-linux` to (re)fetch.
-
-| File | Source |
-|------|--------|
-| `vhclientx86_64` | [VirtualHere](https://www.virtualhere.com/usb_client_software) console client — single statically-linked ELF, the PRIMARY USB transport. Bundled by `scripts/fetch-virtualhere-linux.sh`. |
-| `virtualhere.version` | Pinned version stamp the fetch script reads to skip re-downloads. |
-
-`openvpn` (VPN) and `usbip`/`usbipd` (USB fallback) are NOT bundled on Linux —
+`openvpn` (VPN) and `usbip`/`usbipd` (USB transport) are NOT bundled on Linux —
 they come from the distro package manager. The `.deb` declares them via
 `deb.recommends` so `apt install ./rud1.deb` pulls them in; AppImage users
 need a system `openvpn` on PATH. `binary-helper.ts` resolves both via PATH.
 
 ### macOS (`resources/darwin/`)
-
-Run `npm run fetch:virtualhere-mac` (must run on macOS — uses `hdiutil`).
-
-| File | Source |
-|------|--------|
-| `vhclient-darwin` | [VirtualHere](https://www.virtualhere.com/usb_client_software) client — universal Mach-O (x86_64 + arm64) extracted from the signed/notarised `VirtualHereUniversal.dmg`. Upstream ships no standalone console binary, so `scripts/fetch-virtualhere-mac.sh` mounts the dmg and copies the `.app` binary out. PRIMARY USB transport. |
-| `virtualhere.version` | Pinned version stamp. |
 
 `openvpn` is NOT bundled on macOS — install via `brew install openvpn`;
 `binary-helper.ts` resolves it via PATH. `usbip` is a Homebrew/source fallback.

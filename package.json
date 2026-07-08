@@ -1,6 +1,6 @@
 {
   "name": "rud1-desktop",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
   "main": "dist/main/index.js",
   "author": "rud1",
@@ -14,9 +14,6 @@
     "dist": "npm run build && electron-builder",
     "fetch:openvpn-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-openvpn-win.ps1",
     "fetch:usbip-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-usbip-win.ps1",
-    "fetch:virtualhere-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-virtualhere-win.ps1",
-    "fetch:virtualhere-linux": "bash scripts/fetch-virtualhere-linux.sh",
-    "fetch:virtualhere-mac": "bash scripts/fetch-virtualhere-mac.sh",
     "icons:generate": "python scripts/generate-app-icons.py",
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
@@ -24,7 +21,8 @@
     "dist:linux": "npm run build && electron-builder --linux --publish never",
     "dist:mac": "npm run build && electron-builder --mac --publish never",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "builddev":"npx electron-builder --win nsis --config.extraMetadata.rud1AppUrl=http://192.168.1.43:3000/dashboard --config.extraMetadata.rud1AppOrigin=http://192.168.1.43:3000"
   },
   "dependencies": {
     "electron-updater": "^6.6.2"

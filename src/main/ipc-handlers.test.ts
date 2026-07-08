@@ -114,52 +114,6 @@ vi.mock("./usb-manager", () => ({
     }
   },
 }));
-vi.mock("./serial-bridge-manager", () => ({
-  serialBridgeOpen: vi.fn(async () => ({
-    busId: "1-1.3",
-    endpointPath: "COM7",
-    userVisiblePath: "COM7",
-    pid: 12345,
-  })),
-  serialBridgeClose: vi.fn(async () => undefined),
-  serialBridgeCloseAll: vi.fn(async () => undefined),
-  serialBridgeStatus: vi.fn(async () => ({
-    binaryAvailable: true,
-    com0com: null,
-    sessions: [],
-  })),
-  serialBridgeSessionFor: vi.fn(() => null),
-  serialBridgeConfigurePair: vi.fn(async () => ({
-    pairId: "0",
-    userPort: "COM200",
-    bridgePort: "COM201",
-    hasComAlias: true,
-  })),
-  Com0comMissingError: class Com0comMissingError extends Error {
-    setupcPath: string | null = null;
-    hasPairs: boolean = false;
-    constructor() {
-      super("com0com missing (test stub)");
-      this.name = "Com0comMissingError";
-    }
-  },
-  Com0comPairNotAliasedError: class Com0comPairNotAliasedError extends Error {
-    pair = { pairId: "0", userPort: "CNCA0", bridgePort: "CNCB0", hasComAlias: false };
-    setupcPath: string | null = null;
-    constructor() {
-      super("com0com pair not aliased (test stub)");
-      this.name = "Com0comPairNotAliasedError";
-    }
-  },
-  Com0comPairNoEmuBRError: class Com0comPairNoEmuBRError extends Error {
-    pair = { pairId: "0", userPort: "COM200", bridgePort: "COM201", hasComAlias: true, emuBR: false };
-    setupcPath: string | null = null;
-    constructor() {
-      super("com0com pair missing EmuBR=yes (test stub)");
-      this.name = "Com0comPairNoEmuBRError";
-    }
-  },
-}));
 vi.mock("./net-diag-manager", () => ({
   ping: vi.fn(async () => ({ ok: true })),
   interfaces: vi.fn(() => []),
@@ -605,9 +559,6 @@ import { registerIpcHandlers } from "./ipc-handlers";
 import { mtuProbe as mtuProbeMock } from "./tunnel-diag-manager";
 import { compareReports as compareReportsMock } from "./tunnel-diag-manager";
 import { configureAutoSnapshot as configureAutoSnapshotMock } from "./auto-snapshot-manager";
-// virtualhere-manager NO está mockeado aquí; inyectamos un pipe-sender
-// falso vía __test para capturar los comandos sin spawnear powershell.
-import { __test as vhTest } from "./virtualhere-manager";
 
 type Handler = (event: unknown, ...args: unknown[]) => unknown;
 const handlers: Record<string, Handler> = {};
@@ -688,63 +639,6 @@ describe("diag:mtuProbe — inline validator", () => {
     });
     expect(result).toEqual({ ok: false, error: "Unauthorized origin" });
     expect(mtuProbeMock).not.toHaveBeenCalled();
-  });
-});
-
-describe("virtualhere:setServer — inline validator", () => {
-  let sent: string[];
-  beforeEach(() => {
-    sent = [];
-    vhTest.resetHubState();
-    vhTest.setPipeSender(async (cmd: string) => {
-      sent.push(cmd);
-      return "OK";
-    });
-  });
-
-  it("accepts {host} and delegates to the manager (MANUAL HUB ADD :7575)", async () => {
-    const result = await handlers["virtualhere:setServer"](allowedEvent, {
-      host: "192.168.0.200",
-    });
-    expect(result).toEqual({ ok: true });
-    expect(sent).toEqual(["MANUAL HUB ADD,192.168.0.200:7575"]);
-  });
-
-  it("forwards an explicit port", async () => {
-    const result = await handlers["virtualhere:setServer"](allowedEvent, {
-      host: "192.168.0.200",
-      port: 7576,
-    });
-    expect(result).toEqual({ ok: true });
-    expect(sent).toEqual(["MANUAL HUB ADD,192.168.0.200:7576"]);
-  });
-
-  it("rejects a non-string / empty / missing host without touching the pipe", async () => {
-    for (const bad of [{ host: 123 }, { host: "" }, {}, null, undefined, "x", 42]) {
-      const result = await handlers["virtualhere:setServer"](allowedEvent, bad);
-      expect(result).toEqual({ ok: false, error: "host required" });
-    }
-    expect(sent).toEqual([]);
-  });
-
-  it("re-validates host shape server-side (host:port rejected by the manager)", async () => {
-    const result = await handlers["virtualhere:setServer"](allowedEvent, {
-      host: "1.2.3.4:7575",
-    });
-    expect(result).toEqual({ ok: false, error: "invalid server host or port" });
-    expect(sent).toEqual([]);
-  });
-
-  it("returns Unauthorized envelope when checkSender fails", async () => {
-    const evilEvent = {
-      senderFrame: { url: "https://rud1.es.evil.com/" },
-      sender: {},
-    } as unknown as Electron.IpcMainInvokeEvent;
-    const result = await handlers["virtualhere:setServer"](evilEvent, {
-      host: "192.168.0.200",
-    });
-    expect(result).toEqual({ ok: false, error: "Unauthorized origin" });
-    expect(sent).toEqual([]);
   });
 });
 
