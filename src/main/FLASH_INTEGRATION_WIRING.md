@@ -66,8 +66,7 @@ On `onVpnConnected` reattach of stored sessions, re-register each session's
 
 `resources/win32/rud1shim.exe` (+ linux/darwin) are built by
 `scripts/build-rud1shim.ps1` and bundled via the existing `extraResources`
-(`resources/<platform>` → `bin/`). Add a build step to CI next to
-`build-rud1-bridge`.
+(`resources/<platform>` → `bin/`). Add a build step to CI for it.
 
 ## How it behaves once wired
 

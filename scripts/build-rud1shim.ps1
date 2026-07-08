@@ -1,5 +1,5 @@
 # Cross-compiles native/rud1shim into resources/<platform>/ so electron-builder
-# bundles it (extraResources -> resources/bin/). Mirrors build-rud1-bridge.ps1.
+# bundles it (extraResources -> resources/bin/).
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $src  = Join-Path $root "native\rud1shim\rud1shim.go"

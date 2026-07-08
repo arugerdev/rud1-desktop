@@ -13,12 +13,10 @@
  *
  * Required binaries per platform (bundled = shipped in resources/<platform>/,
  * system = resolved from PATH / package manager):
- *   Windows: openvpn.exe + tapctl.exe (bundled portable), rud1-bridge.exe +
- *            USBip-installer.exe + com0com installer (bundled).
- *   Linux:   rud1-bridge (bundled); openvpn + usbip (system,
- *            via deb `recommends` / PATH).
- *   macOS:   rud1-bridge-{arm64,x64} (bundled); openvpn (system,
- *            Homebrew / PATH).
+ *   Windows: openvpn.exe + tapctl.exe (bundled portable),
+ *            USBip-installer.exe (bundled).
+ *   Linux:   openvpn + usbip (system, via deb `recommends` / PATH).
+ *   macOS:   openvpn (system, Homebrew / PATH).
  */
 
 import path from "path";
@@ -175,35 +173,6 @@ export function isRud1shimAvailable(): boolean {
 }
 
 /**
- * Path to the bundled rud1-bridge binary (TCP↔serial RFC 2217 proxy).
- * Cross-compiled from native/rud1-bridge by scripts/build-rud1-bridge.ps1.
- * Falls back to a PATH copy during dev.
- */
-export function rud1BridgePath(): string {
-  const base = resourcesDir();
-  let candidate: string;
-  if (process.platform === "darwin") {
-    const arch = process.arch === "arm64" ? "arm64" : "x64";
-    candidate = path.join(base, `rud1-bridge-${arch}`);
-  } else if (process.platform === "win32") {
-    candidate = path.join(base, "rud1-bridge.exe");
-  } else {
-    candidate = path.join(base, "rud1-bridge");
-  }
-  if (fs.existsSync(candidate)) return candidate;
-  return process.platform === "win32" ? "rud1-bridge.exe" : "rud1-bridge";
-}
-
-/**
- * True when the bundled rud1-bridge binary is present (i.e. the
- * `npm run build:rud1-bridge` step has been run). The serial-bridge
- * panel uses this to decide whether to offer bridge mode for CDC devices.
- */
-export function isRud1BridgeAvailable(): boolean {
-  return path.isAbsolute(rud1BridgePath());
-}
-
-/**
  * Returns true when `binaryPath(name)` resolved to a real file. Useful
  * for preflight checks that need to give the user an actionable error
  * ("install OpenVPN from <url>") instead of waiting for spawn ENOENT
@@ -215,48 +184,12 @@ export function isBinaryAvailable(name: string): boolean {
 
 /**
  * Path to the bundled USB/IP for Windows installer (`USBip-X.Y.Z-x64.exe`).
- * Transporte para dispositivos USB no-CDC (los CDC/serie van por el
- * serial bridge com0com + rud1-bridge).
+ * Transporte primario para todo dispositivo USB/serie: el device aparece
+ * como COM nativo en Windows vía usbser.sys.
  */
 export function usbipInstallerPath(): string | null {
   if (process.platform !== "win32") return null;
   const candidate = path.join(resourcesDir(), "USBip-installer.exe");
-  return fs.existsSync(candidate) ? candidate : null;
-}
-
-/**
- * Path to the bundled com0com 3.0.0.0 base installer
- * (`com0com/Setup_com0com_v3.0.0.0_W7_x64_signed.exe`). Se instala en
- * silencio con `/S` y acto seguido se aplica el parche de firma Win11
- * (ver com0comPatchInfPath) para evitar el Code 52. La app es
- * requireAdministrator (sin UAC extra). Null en no-Windows / no empaquetado.
- * Ver docs/serial-com0com-migration.md §4.
- */
-export function com0comInstallerPath(): string | null {
-  if (process.platform !== "win32") return null;
-  const candidate = path.join(
-    resourcesDir(),
-    "com0com",
-    "Setup_com0com_v3.0.0.0_W7_x64_signed.exe",
-  );
-  return fs.existsSync(candidate) ? candidate : null;
-}
-
-/**
- * Path to the Win11 signature-patch INF (`com0com/win11-patch/cncport.inf`,
- * .sys + .cat firmados por FuJian Newland). Se aplica con
- * `pnputil /add-driver cncport.inf /install` tras el instalador base para
- * que el driver cargue en Win11/Secure Boot (resuelve el Code 52 del .sys
- * SHA-1 del 3.0.0.0 original). Null en no-Windows / no empaquetado.
- */
-export function com0comPatchInfPath(): string | null {
-  if (process.platform !== "win32") return null;
-  const candidate = path.join(
-    resourcesDir(),
-    "com0com",
-    "win11-patch",
-    "cncport.inf",
-  );
   return fs.existsSync(candidate) ? candidate : null;
 }
 

@@ -73,16 +73,6 @@ if ($SkipFetch) {
     throw "fetch-usbip-win.ps1 failed: $_"
   }
 
-  # ── 1b2. Cross-compile rud1-bridge (win/linux/mac) from native/ ─────────
-  # com0com 3.0.0.0 + win11-patch van vendorizados en resources/win32/com0com/
-  # (committed); electron-builder los empaqueta vía extraResources sin fetch.
-  Step "Building rud1-bridge (idempotent)"
-  try {
-    & (Join-Path $ScriptDir "build-rud1-bridge.ps1")
-  } catch {
-    throw "build-rud1-bridge.ps1 failed: $_"
-  }
-
 }
 
 # ── 1c. Generate app icons from rud1-es favicon ─────────────────────────────
