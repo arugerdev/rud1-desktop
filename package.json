@@ -1,6 +1,6 @@
 {
   "name": "rud1-desktop",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
   "main": "dist/main/index.js",
   "author": "rud1",
@@ -22,7 +22,7 @@
     "dist:mac": "npm run build && electron-builder --mac --publish never",
     "test": "vitest run",
     "test:watch": "vitest",
-    "builddev":"npx electron-builder --win nsis --config.extraMetadata.rud1AppUrl=http://192.168.1.43:3000/dashboard --config.extraMetadata.rud1AppOrigin=http://192.168.1.43:3000"
+    "builddev":"npx electron-builder --win nsis --config.extraMetadata.rud1AppUrl=http://192.168.1.201:3000/dashboard --config.extraMetadata.rud1AppOrigin=http://192.168.1.201:3000"
   },
   "dependencies": {
     "electron-updater": "^6.6.2"
