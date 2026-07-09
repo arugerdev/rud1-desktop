@@ -2,18 +2,18 @@
  * Glue that ties the flasher shim + orchestrator + lifecycle manager to the
  * app's USB session state. index.ts wires this in with a few calls:
  *
- *   const flash = initFlashIntegration({ statePath });
- *   // when a rud1 serial device is attached (comPort captured via
- *   // captureComPort() bracketing the usbip attach):
- *   flash.registerDevice(comPort, { host, busId, vhciPort });
- *   // when detached:
- *   flash.unregisterByBusId(busId);
+ *   const flash = initFlashIntegration({ detach, attach });
+ *   // on every change to the persisted USB session set (attach, detach,
+ *   // COM capture, post-VPN reattach):
+ *   flash.syncSessions(usbSessions);
  *   // on quit:
  *   flash.shutdown();
  *
- * registerDevice/unregister keep the live COM→device map that both the
- * orchestrator (resolvePort) and the shim config (portsMap) read from, so the
- * shim only ever reroutes ports backed by a currently-attached rud1 device.
+ * The persisted USB session list is the single source of truth. syncSessions()
+ * projects it into the live COM→device map that both the orchestrator
+ * (resolvePort) and the shim config (portsMap) read from — so the shim only
+ * reroutes COM ports backed by a currently-attached rud1 device, and the
+ * port/address can never drift from what is actually attached.
  */
 
 import { execFile } from "child_process";
@@ -29,8 +29,32 @@ import { ShimManager } from "./shim-lifecycle-manager";
 
 export interface FlashIntegrationDeps {
   statePath?: string;
-  detach: (vhciPort: number) => Promise<void>;
+  detach: (busId: string) => Promise<void>;
   attach: (host: string, busId: string) => Promise<void>;
+}
+
+/** Minimal shape syncSessions needs from a persisted USB session entry. */
+export interface FlashSession {
+  com?: string;
+  host: string;
+  busId: string;
+}
+
+/**
+ * Pure projection: the live COM→device map is derived from the USB session set
+ * (single source of truth). Sessions without a captured COM are skipped — they
+ * aren't routable yet. A full rebuild each call means a detached device simply
+ * disappears, so the map can never drift from what is attached. Exported for
+ * unit testing without standing up the orchestrator/shim.
+ */
+export function projectSessions(
+  sessions: ReadonlyArray<FlashSession>,
+): Map<string, ResolvedDevice> {
+  const m = new Map<string, ResolvedDevice>();
+  for (const s of sessions) {
+    if (s.com) m.set(s.com, { host: s.host, busId: s.busId });
+  }
+  return m;
 }
 
 export class FlashIntegration {
@@ -53,27 +77,15 @@ export class FlashIntegration {
     this.refreshShims();
   }
 
-  /** Register (or update) a live rud1 serial device by its Windows COM port. */
-  registerDevice(comPort: string, dev: ResolvedDevice): void {
-    if (!comPort) return;
-    this.registry.set(comPort, dev);
-    this.refreshShims();
-  }
-
-  unregisterByBusId(busId: string): void {
-    for (const [com, dev] of this.registry) {
-      if (dev.busId === busId) this.registry.delete(com);
-    }
-    this.refreshShims();
-  }
-
-  unregisterByComPort(comPort: string): void {
-    this.registry.delete(comPort);
-    this.refreshShims();
-  }
-
-  clear(): void {
-    this.registry.clear();
+  /**
+   * Rebuild the live COM→device map from the authoritative USB session list.
+   * The persisted sessions are the single source of truth; the shim config is
+   * a pure projection of them, so ports/addresses can never drift from what is
+   * actually attached. Sessions without a captured COM are skipped (nothing to
+   * reroute yet). Safe to call on every session change.
+   */
+  syncSessions(sessions: ReadonlyArray<FlashSession>): void {
+    this.registry = projectSessions(sessions);
     this.refreshShims();
   }
 

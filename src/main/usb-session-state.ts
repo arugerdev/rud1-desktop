@@ -28,6 +28,10 @@ export interface AttachedUsbSession {
    *  ports are reassigned freely by `usbip attach`, so reattach uses
    *  bus id, not port. */
   port?: number;
+  /** Windows COM port this attach exposed (captured by diffing the port
+   *  list around the attach). The flasher shim's COM→busId map is a pure
+   *  projection of this field, so it can never drift from the live set. */
+  com?: string;
   /** ISO 8601 of the last successful attach. */
   attachedAt: string;
 }
@@ -130,6 +134,7 @@ function sanitize(parsed: unknown): AttachedUsbSession[] {
     if (typeof e.port === "number" && Number.isFinite(e.port)) {
       entry.port = e.port;
     }
+    if (typeof e.com === "string" && e.com.length > 0) entry.com = e.com;
     out.push(entry);
   }
   return out;

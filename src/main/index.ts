@@ -74,7 +74,8 @@ import {
   saveSessions as saveUsbSessions,
   type AttachedUsbSession,
 } from "./usb-session-state";
-import { usbAttach } from "./usb-manager";
+import { usbAttach, usbDetachByBusId } from "./usb-manager";
+import { initFlashIntegration, type FlashIntegration } from "./flash-integration";
 import {
   isAutoUpdateEnabled,
   isRolloutForceEnabled,
@@ -119,6 +120,7 @@ let notifiedHosts: NotifiedHost[] = [];
 let dedupeFilepath: string | null = null;
 let usbSessions: AttachedUsbSession[] = [];
 let usbSessionFilepath: string | null = null;
+let flashIntegration: FlashIntegration | null = null;
 let trayAttentionCount = 0;
 let versionCheckManager: VersionCheckManager | null = null;
 let lastVersionCheckState: VersionCheckState = { kind: "idle" };
@@ -510,6 +512,9 @@ async function reattachStoredUsbSessions(): Promise<void> {
         busId: session.busId,
         label: session.label,
         port,
+        // Preserve the previously-captured COM so the flasher shim map
+        // survives a reconnect without re-diffing the port list.
+        com: session.com,
         attachedAt: new Date().toISOString(),
       });
     } catch (err) {
@@ -520,6 +525,7 @@ async function reattachStoredUsbSessions(): Promise<void> {
       );
     }
   }
+  flashIntegration?.syncSessions(usbSessions);
   if (usbSessionFilepath) {
     void saveUsbSessions(usbSessionFilepath, usbSessions);
   }
@@ -1163,6 +1169,16 @@ app.whenReady().then(async () => {
           port: entry.port,
           attachedAt: new Date().toISOString(),
         });
+        flashIntegration?.syncSessions(usbSessions);
+        if (usbSessionFilepath) {
+          await saveUsbSessions(usbSessionFilepath, usbSessions);
+        }
+      },
+      recordComPort: async ({ host, busId, com }) => {
+        const existing = usbSessions.find((s) => s.host === host && s.busId === busId);
+        if (!existing) return; // detached before COM settled → nothing to map
+        usbSessions = addUsbSessionEntry(usbSessions, { ...existing, com });
+        flashIntegration?.syncSessions(usbSessions);
         if (usbSessionFilepath) {
           await saveUsbSessions(usbSessionFilepath, usbSessions);
         }
@@ -1170,15 +1186,21 @@ app.whenReady().then(async () => {
       recordDetachByPort: async (port) => {
         const before = usbSessions.length;
         usbSessions = removeUsbSessionByPort(usbSessions, port);
-        if (usbSessions.length !== before && usbSessionFilepath) {
-          await saveUsbSessions(usbSessionFilepath, usbSessions);
+        if (usbSessions.length !== before) {
+          flashIntegration?.syncSessions(usbSessions);
+          if (usbSessionFilepath) {
+            await saveUsbSessions(usbSessionFilepath, usbSessions);
+          }
         }
       },
       recordDetachByBusId: async (busId) => {
         const before = usbSessions.length;
         usbSessions = removeUsbSessionByBusId(usbSessions, busId);
-        if (usbSessions.length !== before && usbSessionFilepath) {
-          await saveUsbSessions(usbSessionFilepath, usbSessions);
+        if (usbSessions.length !== before) {
+          flashIntegration?.syncSessions(usbSessions);
+          if (usbSessionFilepath) {
+            await saveUsbSessions(usbSessionFilepath, usbSessions);
+          }
         }
       },
       onVpnConnected: async () => {
@@ -1211,6 +1233,13 @@ app.whenReady().then(async () => {
 
   dedupeFilepath = path.join(app.getPath("userData"), DEDUPE_FILENAME);
   usbSessionFilepath = path.join(app.getPath("userData"), USB_SESSION_FILENAME);
+  // Flasher shim: latency-immune uploads to attached rud1 serial devices. The
+  // orchestrator releases the COM by detaching the live usbip attachment for
+  // the bus id (no cached vhci port), then re-attaches it after the flash.
+  flashIntegration = initFlashIntegration({
+    detach: (busId) => usbDetachByBusId(busId),
+    attach: (host, busId) => usbAttach(host, busId).then(() => undefined),
+  });
   const preferencesPath = path.join(app.getPath("userData"), PREFERENCES_FILENAME);
   // Await preferences before the launch gate so the dialog renders in the
   // pinned theme + locale and the gate can read the `autoUpdate` flag.
@@ -1331,6 +1360,9 @@ app.on("before-quit", (event) => {
   notificationStream?.stop();
   tray?.destroy();
   destroyToastOverlay();
+  // Restore any wrapped IDE flashers to their original binaries and stop the
+  // shim orchestrator, so avrdude/esptool behave normally when the app is off.
+  flashIntegration?.shutdown();
 
   // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
   // timeouts so this can't hang indefinitely.
