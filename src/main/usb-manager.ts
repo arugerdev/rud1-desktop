@@ -2,8 +2,12 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helper";
+import { ensureTapReachableForHost } from "./tap-reachability";
 
 const execFileAsync = promisify(execFile);
+
+// Adapter the OpenVPN client binds; kept in sync with vpn-manager's TUNNEL_NAME.
+const TAP_ADAPTER_NAME = "rud1-tap";
 
 const USBIP_WIN_INSTALL_URL = "https://github.com/vadimgrn/usbip-win2/releases";
 
@@ -369,6 +373,27 @@ export async function usbAttach(host: string, busId: string): Promise<number> {
   assertHost(host);
   assertBusId(busId);
   ensureUsbipAvailable();
+  // Self-sufficient reachability guard: if rud1-tap has no usable IP in the
+  // device's subnet (no DHCP, no STATIC push, no cloud APIPA hint), derive a
+  // free same-/24 address from `host` and assign it before we dial the device.
+  // Best-effort — never throws; a no-op when the adapter is already reachable.
+  try {
+    const r = await ensureTapReachableForHost(host, TAP_ADAPTER_NAME);
+    if (r.applied) {
+      console.info(`[usb] rud1-tap self-assigned ${r.finalIp} to reach ${host}`);
+    } else if (
+      r.reason !== "already-reachable" &&
+      r.reason !== "non-windows" &&
+      r.reason !== "host-not-ipv4"
+    ) {
+      console.warn(`[usb] rud1-tap reachability guard skipped: ${r.reason}`);
+    }
+  } catch (err) {
+    console.warn(
+      "[usb] rud1-tap reachability guard errored (non-fatal):",
+      err instanceof Error ? err.message : err,
+    );
+  }
   await bindOnPi(host, busId);
   try {
     if (process.platform === "win32") return await attachWindows(host, busId);
