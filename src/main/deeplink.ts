@@ -4,7 +4,7 @@
 // que el panel cloud dispare el flujo VPN + bind automático.
 //
 // Formatos soportados:
-//   rud1://connect?device=<id>        → /dashboard/devices/<id>?autoconnect=1
+//   rud1://connect?device=<id>        → /dashboard/devices/<id>/connect?autoconnect=1
 //   rud1://connect/<id>               → idem
 // Cualquier otro deep link cae al comportamiento antiguo: cargar la app con el
 // deeplink crudo como query para que el cliente lo interprete.
@@ -46,5 +46,5 @@ export function resolveDeepLinkTarget(deeplink: string, appUrl: string): string 
   const origin = originOf(appUrl);
   if (!origin) return fallback(appUrl, deeplink);
 
-  return `${origin}/dashboard/devices/${encodeURIComponent(deviceId)}?autoconnect=1`;
+  return `${origin}/dashboard/devices/${encodeURIComponent(deviceId)}/connect?autoconnect=1`;
 }

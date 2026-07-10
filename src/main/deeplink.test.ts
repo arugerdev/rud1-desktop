@@ -6,20 +6,20 @@ const APP = "https://www.rud1.es/dashboard";
 describe("resolveDeepLinkTarget", () => {
   it("connect con device por query → página del dispositivo con autoconnect", () => {
     expect(resolveDeepLinkTarget("rud1://connect?device=abc123", APP)).toBe(
-      "https://www.rud1.es/dashboard/devices/abc123?autoconnect=1",
+      "https://www.rud1.es/dashboard/devices/abc123/connect?autoconnect=1",
     );
   });
 
   it("connect con device por path → misma resolución", () => {
     expect(resolveDeepLinkTarget("rud1://connect/abc123", APP)).toBe(
-      "https://www.rud1.es/dashboard/devices/abc123?autoconnect=1",
+      "https://www.rud1.es/dashboard/devices/abc123/connect?autoconnect=1",
     );
   });
 
   it("usa el origin del appUrl, no el path completo", () => {
     expect(
       resolveDeepLinkTarget("rud1://connect?device=x", "http://192.168.1.5:3000/dashboard"),
-    ).toBe("http://192.168.1.5:3000/dashboard/devices/x?autoconnect=1");
+    ).toBe("http://192.168.1.5:3000/dashboard/devices/x/connect?autoconnect=1");
   });
 
   it("connect sin device → fallback deeplink crudo", () => {
