@@ -2,6 +2,7 @@
 // app-target MUST be imported first: it pins RUD1_APP_ORIGIN and the
 // secure-origin switch before ipc-handlers / app-ready consume them.
 import { APP_URL } from "./app-target";
+import { resolveDeepLinkTarget } from "./deeplink";
 import {
   app,
   BrowserWindow,
@@ -1371,7 +1372,7 @@ app.on("quit", () => {
 // Handle deep links: rud1://
 app.setAsDefaultProtocolClient("rud1");
 app.on("open-url", (_event, url) => {
-  mainWindow?.loadURL(`${APP_URL}?deeplink=${encodeURIComponent(url)}`);
+  mainWindow?.loadURL(resolveDeepLinkTarget(url, APP_URL));
 });
 
 // Windows deep-link via second-instance
@@ -1380,7 +1381,7 @@ app.on("second-instance", (_event, argv) => {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
     const deeplink = argv.find((a) => a.startsWith("rud1://"));
-    if (deeplink) mainWindow.loadURL(`${APP_URL}?deeplink=${encodeURIComponent(deeplink)}`);
+    if (deeplink) mainWindow.loadURL(resolveDeepLinkTarget(deeplink, APP_URL));
   }
 });
 
