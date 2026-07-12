@@ -383,6 +383,7 @@ export async function usbAttach(host: string, busId: string): Promise<number> {
       console.info(`[usb] rud1-tap self-assigned ${r.finalIp} to reach ${host}`);
     } else if (
       r.reason !== "already-reachable" &&
+      r.reason !== "link-local-reachable" &&
       r.reason !== "non-windows" &&
       r.reason !== "host-not-ipv4"
     ) {

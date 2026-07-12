@@ -144,18 +144,26 @@ export interface TapReachabilityResult {
 }
 
 /**
- * Ensure `adapterName` can reach `host` on-link, self-assigning a same-/24
- * address when it can't. Conservative by design:
+ * Ensure `adapterName` can reach `host` on-link. Two host classes, because the
+ * device (rud1-fw) now always carries a link-local 169.254/16 on br-rud1 in
+ * addition to any customer-LAN address:
  *
- *   - non-Windows                       → no-op (`non-windows`).
- *   - host is not an IPv4 literal        → skip (`host-not-ipv4`); we can't
- *                                          derive a subnet from a DNS name.
- *   - adapter already in host's /24 and  → no-op (`already-reachable`); DHCP,
- *     not APIPA                            STATIC push, or apipa-fallback
- *                                          already did the job.
- *   - adapter has a real (non-APIPA) IP  → leave it (`foreign-lease-kept`); we
- *     in a DIFFERENT subnet                never clobber a working DHCP lease.
- *   - adapter absent / APIPA / no IPv4   → assign a free same-/24 address.
+ *  • host is LINK-LOCAL (169.254.x.y) — the no-DHCP / no-Ethernet path. The
+ *    client only needs ANY 169.254/16 address, and Windows APIPA already
+ *    assigns one automatically when DHCP fails. So:
+ *      - adapter APIPA or no IPv4 → `link-local-reachable` (no-op — the whole
+ *        169.254/16 is on-link; narrowing to a /24 would be WRONG).
+ *      - adapter has a routable lease → `link-local-host-routable-client`; on a
+ *        shared L2 bridge this is a non-case (DHCP is symmetric — if the client
+ *        got a lease the device would have one too), so we leave the lease
+ *        rather than ARP-blindly stacking a link-local.
+ *
+ *  • host is ROUTABLE (real LAN IP) — the DHCP path, incl. the apipa race where
+ *    the client's lease is slow. Self-assign a free same-/24 address:
+ *      - adapter already in host's /24 (not APIPA) → `already-reachable`.
+ *      - adapter routable in a DIFFERENT subnet    → `foreign-lease-kept`
+ *        (never clobber a working lease).
+ *      - adapter APIPA / no IPv4                    → assign a free same-/24 IP.
  *
  * Best-effort: any failure resolves to `applied:false` with a diagnostic and
  * never throws, so a flaky netsh can't block a USB attach.
@@ -171,6 +179,27 @@ export async function ensureTapReachableForHost(
     return { applied: false, reason: "host-not-ipv4" };
   }
   const current = await readAdapterIpV4(adapterName);
+
+  // Link-local host: the client just needs to be on 169.254/16, which APIPA
+  // already guarantees. Do NOT synthesise a /24 — that would drop the /16 and
+  // could actually break reachability to a device whose link-local sits in a
+  // different third octet.
+  if (isApipa(host)) {
+    if (!current || isApipa(current)) {
+      return {
+        applied: false,
+        reason: "link-local-reachable",
+        ...(current ? { finalIp: current } : {}),
+      };
+    }
+    return {
+      applied: false,
+      reason: "link-local-host-routable-client",
+      finalIp: current,
+    };
+  }
+
+  // Routable host below.
   if (current && !isApipa(current)) {
     if (sameSlash24(current, host)) {
       return { applied: false, reason: "already-reachable", finalIp: current };
