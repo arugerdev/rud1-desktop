@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// Controllable adapter IP + real isApipa. netsh/ping are stubbed via the
-// child_process mock below so no subprocess is ever spawned.
+// Controllable adapter IP + real isApipa. This module never spawns a
+// subprocess (it only READS the adapter IP), so there's no child_process to
+// stub — we only control what readAdapterIpV4 returns.
 let mockAdapterIp: string | null = null;
 vi.mock("./apipa-fallback", async (importActual) => {
   const actual = await importActual<typeof import("./apipa-fallback")>();
@@ -11,28 +12,11 @@ vi.mock("./apipa-fallback", async (importActual) => {
   };
 });
 
-// promisify(execFile)-compatible stub: ping "fails" (host free), netsh succeeds.
-const execFileCalls: string[][] = [];
-vi.mock("child_process", () => ({
-  execFile: (
-    cmd: string,
-    args: string[],
-    _opts: unknown,
-    cb?: (err: Error | null, out?: { stdout: string; stderr: string }) => void,
-  ) => {
-    const done = cb ?? (_opts as typeof cb)!;
-    execFileCalls.push([cmd, ...args]);
-    if (cmd === "ping") done(new Error("request timed out"));
-    else done(null, { stdout: "", stderr: "" });
-  },
-}));
-
 import {
   parseIpv4,
   isIpv4Literal,
   sameSlash24,
-  candidateClientIps,
-  ensureTapReachableForHost,
+  diagnoseTapReachability,
 } from "./tap-reachability";
 
 describe("tap-reachability pure helpers", () => {
@@ -71,35 +55,13 @@ describe("tap-reachability pure helpers", () => {
       expect(sameSlash24("not-an-ip", "192.168.0.10")).toBe(false);
     });
   });
-
-  describe("candidateClientIps", () => {
-    it("returns .250 → .200 inside the device /24", () => {
-      const c = candidateClientIps("192.168.0.10");
-      expect(c[0]).toBe("192.168.0.250");
-      expect(c[c.length - 1]).toBe("192.168.0.200");
-      expect(c).toHaveLength(51);
-    });
-    it("never collides with the device's own octet", () => {
-      const c = candidateClientIps("192.168.0.222");
-      expect(c).not.toContain("192.168.0.222");
-      expect(c).toHaveLength(50);
-    });
-    it("preserves the device's network prefix", () => {
-      const c = candidateClientIps("10.44.7.9");
-      expect(c.every((ip) => ip.startsWith("10.44.7."))).toBe(true);
-    });
-    it("empty for a non-literal host", () => {
-      expect(candidateClientIps("device.rud1.es")).toEqual([]);
-    });
-  });
 });
 
-describe("ensureTapReachableForHost", () => {
+describe("diagnoseTapReachability (read-only — never mutates)", () => {
   const ADAPTER = "rud1-tap";
   let originalPlatform: PropertyDescriptor | undefined;
 
   beforeEach(() => {
-    execFileCalls.length = 0;
     mockAdapterIp = null;
     // Force the Windows path regardless of the CI/host OS.
     originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
@@ -109,67 +71,66 @@ describe("ensureTapReachableForHost", () => {
     if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
   });
 
-  it("skips non-IPv4 hosts (can't derive a subnet from a DNS name)", async () => {
-    const r = await ensureTapReachableForHost("device.rud1.es", ADAPTER);
-    expect(r).toEqual({ applied: false, reason: "host-not-ipv4" });
-    expect(execFileCalls).toHaveLength(0);
+  it("non-IPv4 host → not assessed, not flagged", async () => {
+    const d = await diagnoseTapReachability("device.rud1.es", ADAPTER);
+    expect(d).toEqual({ likelyReachable: true, reason: "host-not-ipv4", adapterIp: null });
   });
 
-  it("link-local host + APIPA adapter → reachable, no netsh (the no-Ethernet case)", async () => {
+  it("link-local host + APIPA adapter → reachable (the no-Ethernet case)", async () => {
     mockAdapterIp = "169.254.238.104";
-    const r = await ensureTapReachableForHost("169.254.10.20", ADAPTER);
-    expect(r.applied).toBe(false);
-    expect(r.reason).toBe("link-local-reachable");
-    // Must NOT narrow the /16 by writing a static address.
-    expect(execFileCalls.some((c) => c[0] === "netsh")).toBe(false);
+    const d = await diagnoseTapReachability("169.254.10.20", ADAPTER);
+    expect(d.likelyReachable).toBe(true);
+    expect(d.reason).toBe("link-local-both-169254");
+    expect(d.adapterIp).toBe("169.254.238.104");
   });
 
   it("link-local host + no adapter IP → reachable (APIPA will appear)", async () => {
     mockAdapterIp = null;
-    const r = await ensureTapReachableForHost("169.254.10.20", ADAPTER);
-    expect(r.reason).toBe("link-local-reachable");
-    expect(execFileCalls.some((c) => c[0] === "netsh")).toBe(false);
+    const d = await diagnoseTapReachability("169.254.10.20", ADAPTER);
+    expect(d.likelyReachable).toBe(true);
+    expect(d.reason).toBe("link-local-both-169254");
   });
 
-  it("link-local host + routable lease → left alone (non-case on shared bridge)", async () => {
+  it("link-local host + routable client → flagged unreachable", async () => {
     mockAdapterIp = "192.168.0.50";
-    const r = await ensureTapReachableForHost("169.254.10.20", ADAPTER);
-    expect(r).toEqual({
-      applied: false,
-      reason: "link-local-host-routable-client",
-      finalIp: "192.168.0.50",
+    const d = await diagnoseTapReachability("169.254.10.20", ADAPTER);
+    expect(d).toEqual({
+      likelyReachable: false,
+      reason: "link-local-host-but-routable-client",
+      adapterIp: "192.168.0.50",
     });
-    expect(execFileCalls.some((c) => c[0] === "netsh")).toBe(false);
   });
 
-  it("routable host + APIPA adapter → self-assigns a same-/24 static IP", async () => {
-    mockAdapterIp = "169.254.238.104";
-    const r = await ensureTapReachableForHost("192.168.0.10", ADAPTER);
-    expect(r.applied).toBe(true);
-    expect(r.reason).toBe("self-assigned");
-    expect(r.finalIp?.startsWith("192.168.0.")).toBe(true);
-    const netsh = execFileCalls.find((c) => c[0] === "netsh");
-    expect(netsh).toBeTruthy();
-    expect(netsh!.join(" ")).toContain("255.255.255.0");
-  });
-
-  it("routable host already in the same /24 → already-reachable, no netsh", async () => {
+  it("routable host + same /24 adapter → reachable", async () => {
     mockAdapterIp = "192.168.0.77";
-    const r = await ensureTapReachableForHost("192.168.0.10", ADAPTER);
-    expect(r).toEqual({ applied: false, reason: "already-reachable", finalIp: "192.168.0.77" });
-    expect(execFileCalls.some((c) => c[0] === "netsh")).toBe(false);
+    const d = await diagnoseTapReachability("192.168.0.10", ADAPTER);
+    expect(d).toEqual({ likelyReachable: true, reason: "same-subnet", adapterIp: "192.168.0.77" });
   });
 
-  it("routable host + routable lease in another subnet → keeps the lease", async () => {
+  it("routable host + APIPA adapter → flagged unreachable", async () => {
+    mockAdapterIp = "169.254.238.104";
+    const d = await diagnoseTapReachability("192.168.0.10", ADAPTER);
+    expect(d.likelyReachable).toBe(false);
+    expect(d.reason).toBe("routable-host-apipa-client");
+  });
+
+  it("routable host + no adapter IP → flagged unreachable", async () => {
+    mockAdapterIp = null;
+    const d = await diagnoseTapReachability("192.168.0.10", ADAPTER);
+    expect(d.likelyReachable).toBe(false);
+    expect(d.reason).toBe("routable-host-no-adapter-ip");
+  });
+
+  it("routable host + adapter in a different subnet → flagged unreachable", async () => {
     mockAdapterIp = "10.0.0.5";
-    const r = await ensureTapReachableForHost("192.168.0.10", ADAPTER);
-    expect(r.reason).toBe("foreign-lease-kept");
-    expect(execFileCalls.some((c) => c[0] === "netsh")).toBe(false);
+    const d = await diagnoseTapReachability("192.168.0.10", ADAPTER);
+    expect(d.likelyReachable).toBe(false);
+    expect(d.reason).toBe("different-subnet");
   });
 
-  it("non-Windows → no-op", async () => {
+  it("non-Windows → not assessed", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-    const r = await ensureTapReachableForHost("192.168.0.10", ADAPTER);
-    expect(r).toEqual({ applied: false, reason: "non-windows" });
+    const d = await diagnoseTapReachability("192.168.0.10", ADAPTER);
+    expect(d).toEqual({ likelyReachable: true, reason: "non-windows", adapterIp: null });
   });
 });
