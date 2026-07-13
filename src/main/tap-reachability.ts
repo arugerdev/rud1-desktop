@@ -1,45 +1,27 @@
-// Client-side, self-sufficient reachability guard for the rud1-tap adapter.
+// Read-only reachability diagnostic for the rud1-tap adapter.
 //
-// The USB transport (usbip) dials the device at `host:3240` (+ `host:7070`
-// for the Pi-side bind). On the bridged OpenVPN TAP topology the device and
-// the desktop share one L2 segment, so the desktop can only reach `host` when
-// rud1-tap carries an IPv4 in the device's subnet. Two upstream mechanisms
-// already provide that IP:
-//   1. STATIC LAN mode — the server pushes ifconfig-push (deterministic IP).
-//   2. DHCP + apipa-fallback.ts — rescues an APIPA lease using a CLOUD HINT
-//      embedded in the .ovpn (needs the device heartbeat to have reported a
-//      subnet, and needs a first-party .ovpn that carries the hint block).
+// The USB transport (usbip) dials the device at `host:3240` (+ `host:7070` for
+// the Pi-side bind). Over the bridged OpenVPN TAP the desktop and the device
+// share one L2 segment, so the desktop reaches `host` only when rud1-tap
+// already carries a compatible IPv4. That address comes entirely from
+// mechanisms this module does NOT touch:
+//   • DHCP over the bridge (Ethernet present) — client and device get
+//     same-subnet leases from the same customer LAN.
+//   • Windows APIPA 169.254/16 (no DHCP) — meets the device's permanent
+//     link-local floor (rud1-fw sets ipv4.link-local on br-rud1).
+//   • OpenVPN STATIC push (STATIC LAN mode) — the server assigns the tap IP.
 //
-// Both can be absent: no STATIC pool configured, no DHCP server on the LAN,
-// AND no cloud hint (fresh device with no heartbeat subnet yet, or a
-// third-party .ovpn). In that gap rud1-tap sits at 169.254.x.x (or has no
-// IPv4 at all) and every USB attach fails even though the tunnel is up.
+// This module used to SELF-ASSIGN a static /24 on rud1-tap when it looked
+// unreachable. That was removed: the address was derived from the device IP,
+// which can be stale (a previous Ethernet session's subnet), so it left a
+// persistent wrong static on rud1-tap that then BLOCKED the link-local path —
+// and it could fight the server's STATIC push. The desktop now NEVER mutates
+// rud1-tap; it only observes and logs a reachability verdict so attach failures
+// are diagnosable. Fixing the address is left to DHCP / APIPA / the server push.
 //
-// This module closes that gap WITHOUT any cloud dependency: at attach time we
-// already know the device's IP (it's the usbip `host`), so we derive a free
-// same-subnet address for rud1-tap straight from it and assign it statically.
-// It complements apipa-fallback — if that (or DHCP, or STATIC push) already
-// gave rud1-tap a usable IP in the device's subnet, this is a no-op.
-//
-// Windows-only (netsh); a no-op elsewhere. Best-effort: every failure mode
-// resolves to `{ applied:false, reason }` so it never blocks or breaks an
-// attach.
-
-import { execFile } from "child_process";
-import { promisify } from "util";
+// Windows-only assessment; elsewhere it reports "non-windows". Never throws.
 
 import { readAdapterIpV4, isApipa } from "./apipa-fallback";
-
-const execFileAsync = promisify(execFile);
-
-const NETSH_TIMEOUT_MS = 5_000;
-const PING_TIMEOUT_MS = 300;
-
-// We assume a /24 when we have to synthesise an address from the device IP.
-// It is by far the most common LAN prefix, and an over-wide guess (e.g. /16)
-// would risk on-link collisions across unrelated subnets; /24 keeps the
-// derived address provably adjacent to the device.
-const ASSUMED_MASK = "255.255.255.0";
 
 const IPV4_LITERAL_REGEX = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 
@@ -64,163 +46,64 @@ export function sameSlash24(a: string, b: string): boolean {
   return pa[0] === pb[0] && pa[1] === pb[1] && pa[2] === pb[2];
 }
 
-/**
- * Ordered list of candidate client addresses inside the device's /24,
- * highest-first (.250 → .200) to dodge typical DHCP scopes (.100-.199) and
- * mirror rud1-es's own `pickFallbackIp` convention. Excludes the device's
- * own octet plus the usual reserved ends (.0/.1/.254/.255) so we never
- * collide with the device or the gateway.
- */
-export function candidateClientIps(host: string): string[] {
-  const p = parseIpv4(host);
-  if (!p) return [];
-  const [a, b, c, hostOctet] = p;
-  const out: string[] = [];
-  for (let last = 250; last >= 200; last--) {
-    if (last === hostOctet) continue;
-    out.push(`${a}.${b}.${c}.${last}`);
-  }
-  return out;
-}
-
-/**
- * Is `ip` already answering on the wire? Used to skip candidates that are in
- * use before we claim one. A ping timeout / error is treated as "free" — we
- * would rather risk a rare collision than refuse connectivity when the host
- * is simply firewalled against ICMP.
- */
-async function isIpInUse(ip: string): Promise<boolean> {
-  if (process.platform !== "win32") return false;
-  try {
-    await execFileAsync("ping", ["-n", "1", "-w", String(PING_TIMEOUT_MS), ip], {
-      timeout: PING_TIMEOUT_MS + 1_000,
-      windowsHide: true,
-    });
-    // `ping` exits 0 on a reply. On Windows it also exits 0 for
-    // "Destination host unreachable"; guard against that by requiring the
-    // reply to come from the pinged IP (the stdout scrape below).
-    return true;
-  } catch {
-    // Non-zero exit → request timed out / no reply → free to claim.
-    return false;
-  }
-}
-
-/**
- * Pick the first candidate address in the device's /24 that isn't already
- * answering. Falls back to the first candidate when every probe is
- * inconclusive so we always return SOMETHING to assign.
- */
-export async function pickFreeClientIp(host: string): Promise<string | null> {
-  const candidates = candidateClientIps(host);
-  if (candidates.length === 0) return null;
-  for (const ip of candidates) {
-    if (!(await isIpInUse(ip))) return ip;
-  }
-  return candidates[0]!;
-}
-
-async function setStaticIp(adapterName: string, ip: string, mask: string): Promise<void> {
-  await execFileAsync(
-    "netsh",
-    [
-      "interface",
-      "ipv4",
-      "set",
-      "address",
-      `name=${adapterName}`,
-      "static",
-      ip,
-      mask,
-    ],
-    { timeout: NETSH_TIMEOUT_MS },
-  );
-}
-
-export interface TapReachabilityResult {
-  applied: boolean;
+export interface TapReachabilityDiag {
+  /** Best-effort: does rud1-tap's current addressing put `host` on-link? */
+  likelyReachable: boolean;
+  /** Short machine-readable classification, surfaced in the attach log. */
   reason: string;
-  finalIp?: string;
+  /** rud1-tap's current IPv4, or null when it has none / can't be read. */
+  adapterIp: string | null;
 }
 
 /**
- * Ensure `adapterName` can reach `host` on-link. Two host classes, because the
- * device (rud1-fw) now always carries a link-local 169.254/16 on br-rud1 in
- * addition to any customer-LAN address:
+ * Classify whether rud1-tap can currently reach `host`, WITHOUT changing
+ * anything. Pure observation — the result is for logging/diagnosis only.
  *
- *  • host is LINK-LOCAL (169.254.x.y) — the no-DHCP / no-Ethernet path. The
- *    client only needs ANY 169.254/16 address, and Windows APIPA already
- *    assigns one automatically when DHCP fails. So:
- *      - adapter APIPA or no IPv4 → `link-local-reachable` (no-op — the whole
- *        169.254/16 is on-link; narrowing to a /24 would be WRONG).
- *      - adapter has a routable lease → `link-local-host-routable-client`; on a
- *        shared L2 bridge this is a non-case (DHCP is symmetric — if the client
- *        got a lease the device would have one too), so we leave the lease
- *        rather than ARP-blindly stacking a link-local.
+ * Reachable-on-paper cases:
+ *   • link-local host + adapter on APIPA/169.254 (or no IPv4 yet) — both sit on
+ *     the 169.254/16 link-local segment.
+ *   • routable host + adapter in the same /24 — same customer-LAN subnet.
  *
- *  • host is ROUTABLE (real LAN IP) — the DHCP path, incl. the apipa race where
- *    the client's lease is slow. Self-assign a free same-/24 address:
- *      - adapter already in host's /24 (not APIPA) → `already-reachable`.
- *      - adapter routable in a DIFFERENT subnet    → `foreign-lease-kept`
- *        (never clobber a working lease).
- *      - adapter APIPA / no IPv4                    → assign a free same-/24 IP.
- *
- * Best-effort: any failure resolves to `applied:false` with a diagnostic and
- * never throws, so a flaky netsh can't block a USB attach.
+ * Not-reachable cases (worth flagging when an attach then fails):
+ *   • link-local host + adapter has a routable lease (no 169.254 to meet on).
+ *   • routable host + adapter on APIPA / no IPv4 (mid-DHCP, or a subnet the
+ *     tunnel doesn't carry).
+ *   • routable host + adapter routable in a DIFFERENT subnet.
  */
-export async function ensureTapReachableForHost(
+export async function diagnoseTapReachability(
   host: string,
   adapterName: string,
-): Promise<TapReachabilityResult> {
+): Promise<TapReachabilityDiag> {
   if (process.platform !== "win32") {
-    return { applied: false, reason: "non-windows" };
+    return { likelyReachable: true, reason: "non-windows", adapterIp: null };
   }
   if (!isIpv4Literal(host)) {
-    return { applied: false, reason: "host-not-ipv4" };
+    // A DNS-name host resolves via the normal stack; we can't reason about
+    // on-link subnets, so don't flag it.
+    return { likelyReachable: true, reason: "host-not-ipv4", adapterIp: null };
   }
   const current = await readAdapterIpV4(adapterName);
 
-  // Link-local host: the client just needs to be on 169.254/16, which APIPA
-  // already guarantees. Do NOT synthesise a /24 — that would drop the /16 and
-  // could actually break reachability to a device whose link-local sits in a
-  // different third octet.
   if (isApipa(host)) {
     if (!current || isApipa(current)) {
-      return {
-        applied: false,
-        reason: "link-local-reachable",
-        ...(current ? { finalIp: current } : {}),
-      };
+      return { likelyReachable: true, reason: "link-local-both-169254", adapterIp: current };
     }
     return {
-      applied: false,
-      reason: "link-local-host-routable-client",
-      finalIp: current,
+      likelyReachable: false,
+      reason: "link-local-host-but-routable-client",
+      adapterIp: current,
     };
   }
 
-  // Routable host below.
-  if (current && !isApipa(current)) {
-    if (sameSlash24(current, host)) {
-      return { applied: false, reason: "already-reachable", finalIp: current };
-    }
-    // A legitimate lease in another subnet — don't override it. On a flat L2
-    // bridge this is unusual, but clobbering a working config is worse than
-    // leaving an edge case unhandled.
-    return { applied: false, reason: "foreign-lease-kept", finalIp: current };
+  // Routable host.
+  if (!current) {
+    return { likelyReachable: false, reason: "routable-host-no-adapter-ip", adapterIp: null };
   }
-  // No IPv4, or APIPA — synthesise one adjacent to the device.
-  const ip = await pickFreeClientIp(host);
-  if (!ip) {
-    return { applied: false, reason: "no-candidate" };
+  if (isApipa(current)) {
+    return { likelyReachable: false, reason: "routable-host-apipa-client", adapterIp: current };
   }
-  try {
-    await setStaticIp(adapterName, ip, ASSUMED_MASK);
-  } catch (err) {
-    return {
-      applied: false,
-      reason: `netsh-set-failed: ${err instanceof Error ? err.message : String(err)}`,
-    };
+  if (sameSlash24(current, host)) {
+    return { likelyReachable: true, reason: "same-subnet", adapterIp: current };
   }
-  return { applied: true, reason: "self-assigned", finalIp: ip };
+  return { likelyReachable: false, reason: "different-subnet", adapterIp: current };
 }

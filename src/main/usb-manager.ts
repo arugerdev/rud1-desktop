@@ -2,7 +2,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helper";
-import { ensureTapReachableForHost } from "./tap-reachability";
+import { diagnoseTapReachability } from "./tap-reachability";
 
 const execFileAsync = promisify(execFile);
 
@@ -373,25 +373,24 @@ export async function usbAttach(host: string, busId: string): Promise<number> {
   assertHost(host);
   assertBusId(busId);
   ensureUsbipAvailable();
-  // Self-sufficient reachability guard: if rud1-tap has no usable IP in the
-  // device's subnet (no DHCP, no STATIC push, no cloud APIPA hint), derive a
-  // free same-/24 address from `host` and assign it before we dial the device.
-  // Best-effort — never throws; a no-op when the adapter is already reachable.
+  // Read-only reachability diagnostic — logs whether rud1-tap's current
+  // addressing can reach `host`, but NEVER mutates the adapter (the desktop
+  // must never write a static IP to rud1-tap: it can go stale and block the
+  // link-local path, or fight the server's STATIC push). Fixing the address is
+  // DHCP / APIPA / the OpenVPN push's job. Best-effort — never throws.
   try {
-    const r = await ensureTapReachableForHost(host, TAP_ADAPTER_NAME);
-    if (r.applied) {
-      console.info(`[usb] rud1-tap self-assigned ${r.finalIp} to reach ${host}`);
-    } else if (
-      r.reason !== "already-reachable" &&
-      r.reason !== "link-local-reachable" &&
-      r.reason !== "non-windows" &&
-      r.reason !== "host-not-ipv4"
-    ) {
-      console.warn(`[usb] rud1-tap reachability guard skipped: ${r.reason}`);
+    const diag = await diagnoseTapReachability(host, TAP_ADAPTER_NAME);
+    if (!diag.likelyReachable) {
+      console.warn(
+        `[usb] rud1-tap may not reach ${host}: ${diag.reason} ` +
+          `(adapter ip: ${diag.adapterIp ?? "none"})`,
+      );
+    } else {
+      console.info(`[usb] rud1-tap reachability: ${diag.reason} → ${host}`);
     }
   } catch (err) {
     console.warn(
-      "[usb] rud1-tap reachability guard errored (non-fatal):",
+      "[usb] rud1-tap reachability diagnostic errored (non-fatal):",
       err instanceof Error ? err.message : err,
     );
   }
