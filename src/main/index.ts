@@ -1131,6 +1131,14 @@ app.whenReady().then(async () => {
       mirrorAutoUpdateConfig(prefs.autoUpdate);
       // Posición/sonido de los avisos, en vivo y sin recrear el overlay.
       applyToastPreferences();
+      // El panel web comparte el tema: sin esto, cambiarlo aquí sólo repintaba
+      // las ventanas nativas y la web se quedaba como estaba. La ventana de
+      // ajustes también escucha, para seguir un cambio hecho desde la web.
+      for (const win of [mainWindow, settingsWindow]) {
+        if (win && !win.isDestroyed()) {
+          win.webContents.send("app:theme-changed", prefs.theme);
+        }
+      }
     },
     versionCheck: {
       getState: () =>

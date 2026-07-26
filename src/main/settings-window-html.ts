@@ -1307,6 +1307,14 @@ export function buildSettingsWindowHtml(
       setDiag('Ajustes sin respuesta del proceso principal: ' + ((e && e.message) ? e.message : 'IPC rechazado'));
     });
 
+    // Cambiar el tema desde el panel web debe repintar esta ventana también.
+    if (typeof window.electronAPI.app.onThemeChanged === 'function') {
+      window.electronAPI.app.onThemeChanged(function(next) {
+        applyThemeToDom(next);
+        syncThemePicker(next);
+      });
+    }
+
     var themeRadios = document.querySelectorAll('input[name="theme-pick"]');
     for (var i = 0; i < themeRadios.length; i++) {
       themeRadios[i].addEventListener('change', function(e) {
