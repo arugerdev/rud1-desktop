@@ -46,6 +46,7 @@ import {
   notifyUsbAttached,
   notifyUsbDetached,
 } from "./notifications";
+import { listComPorts, captureComPort } from "./flash-integration";
 import {
   ping,
   interfaces,
@@ -164,6 +165,10 @@ export interface UsbSessionStateAccessor {
   }) => Promise<void>;
   recordDetachByPort: (port: number) => Promise<void>;
   recordDetachByBusId: (busId: string) => Promise<void>;
+  /** Attach the Windows COM captured for an already-recorded (host, busId)
+   *  session, so the flasher shim's COM→busId map stays in sync. Optional:
+   *  bare test harnesses omit it. */
+  recordComPort?: (entry: { host: string; busId: string; com: string }) => Promise<void>;
   onVpnConnected: () => Promise<void>;
 }
 
@@ -781,13 +786,25 @@ export function registerIpcHandlers(opts: {
     async (event, host: string, busId: string, label?: string) => {
       if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
       try {
+        // Snapshot COM ports BEFORE the attach so we can diff out the one it
+        // creates. Empty/instant on non-Windows.
+        const comBefore = await listComPorts();
         const port = await usbAttach(host, busId);
         rememberUsbLabel(port, label);
         notifyUsbAttached(label ?? null, busId);
-        if (opts.usbSessionState) {
-          await opts.usbSessionState
-            .recordAttach({ host, busId, label, port })
-            .catch(() => undefined);
+        const sessionState = opts.usbSessionState;
+        if (sessionState) {
+          await sessionState.recordAttach({ host, busId, label, port }).catch(() => undefined);
+          // Capture the COM the attach exposed and register it for the flasher
+          // shim, off the critical path — COM enumeration settles ~4s and must
+          // not delay the IPC reply.
+          if (sessionState.recordComPort) {
+            void captureComPort(comBefore)
+              .then((com) =>
+                com ? sessionState.recordComPort!({ host, busId, com }) : undefined,
+              )
+              .catch(() => undefined);
+          }
         }
         return { ok: true, port };
       } catch (err) {

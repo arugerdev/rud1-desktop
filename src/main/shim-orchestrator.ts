@@ -17,14 +17,15 @@ const FW_PORT = 7070;
 
 export interface ResolvedDevice {
   host: string; // VPN-reachable device address
-  busId: string; // e.g. "1-1"
-  vhciPort?: number; // usbip vhci port to detach (if attached)
+  busId: string; // e.g. "1-1.4"
 }
 
 export interface OrchestratorDeps {
   /** Map a Windows COM port to a live rud1 device, or null if not ours. */
   resolvePort(comPort: string): ResolvedDevice | null;
-  detach(vhciPort: number): Promise<void>;
+  /** Release the Windows COM by detaching the live usbip attachment for this
+   *  bus id (resolved fresh — no cached vhci port that could go stale). */
+  detach(busId: string): Promise<void>;
   attach(host: string, busId: string): Promise<void>;
 }
 
@@ -76,12 +77,11 @@ async function handleFlash(deps: OrchestratorDeps, job: ShimJob): Promise<{ hand
   if (!dev) {
     return { handled: false, rc: 0, log: "" }; // not a rud1 device → shim passes through
   }
-  let detached = false;
   try {
-    if (typeof dev.vhciPort === "number") {
-      await deps.detach(dev.vhciPort);
-      detached = true;
-    }
+    // Release the Windows COM so the device leaves usbip and the Pi's kernel
+    // serial driver can reclaim its local tty. Idempotent: a bus id with no
+    // live attachment is a silent no-op.
+    await deps.detach(dev.busId);
     const { rc, log } = await fwFlash(dev.host, {
       busid: dev.busId,
       argv: job.argv,
@@ -90,12 +90,10 @@ async function handleFlash(deps: OrchestratorDeps, job: ShimJob): Promise<{ hand
     return { handled: true, rc, log };
   } finally {
     // Always restore the COM for the serial monitor / next upload.
-    if (detached || typeof dev.vhciPort !== "number") {
-      try {
-        await deps.attach(dev.host, dev.busId);
-      } catch {
-        /* best-effort */
-      }
+    try {
+      await deps.attach(dev.host, dev.busId);
+    } catch {
+      /* best-effort */
     }
   }
 }
