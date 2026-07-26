@@ -986,6 +986,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
           }
         | { ok: false; error: string }
       >,
+
+    /**
+     * Aviso de que el tema cambió en los ajustes del escritorio, para que el
+     * panel web se ponga igual sin recargar. Devuelve la baja de suscripción.
+     */
+    onThemeChanged: (cb: (theme: "system" | "light" | "dark") => void) => {
+      const handler = (_e: unknown, theme: "system" | "light" | "dark") => cb(theme);
+      ipcRenderer.on("app:theme-changed", handler);
+      return () => ipcRenderer.removeListener("app:theme-changed", handler);
+    },
   },
 
   setup: {
