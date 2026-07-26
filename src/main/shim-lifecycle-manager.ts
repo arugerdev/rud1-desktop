@@ -35,12 +35,29 @@ function realSibling(toolPath: string): string {
   return `${base}-real${ext}`;
 }
 
+// True para un backup nuestro "<tool>-real(.exe)". Nunca debe re-envolverse:
+// hacerlo encadenaba "-real-real-real…" y perdía el flasher real.
+function isRealBackupName(p: string): boolean {
+  const ext = path.extname(p);
+  const base = path.basename(p);
+  const stem = base.slice(0, base.length - ext.length);
+  return stem.toLowerCase().endsWith("-real");
+}
+
+// Firmas embebidas en el binario del shim. Detectamos por CONTENIDO (no por
+// tamaño, que cambia entre builds) para reconocer nuestro shim de cualquier
+// versión y no re-envolverlo/clobbering del real.
+const SHIM_MARKERS: readonly Buffer[] = [
+  Buffer.from("RUD1SHIM/v1 flasher-interceptor"),
+  Buffer.from("rud1shim passthrough error"),
+  Buffer.from("rud1: routing upload to"),
+];
+
 export class ShimManager {
   private shimPath: string;
   private statePath: string;
   private endpoint: string;
   private state: ShimState = { wraps: [] };
-  private shimSize = -1;
 
   constructor(opts: { statePath: string; endpoint: string; shimPath?: string }) {
     this.shimPath = opts.shimPath ?? rud1shimPath();
@@ -51,19 +68,47 @@ export class ShimManager {
     } catch {
       this.state = { wraps: [] };
     }
-    try {
-      this.shimSize = fs.statSync(this.shimPath).size;
-    } catch {
-      this.shimSize = -1;
-    }
   }
 
   private isOurShim(p: string): boolean {
-    if (this.shimSize < 0) return false;
     try {
-      return fs.statSync(p).size === this.shimSize;
+      const buf = fs.readFileSync(p);
+      return SHIM_MARKERS.some((m) => buf.includes(m));
     } catch {
       return false;
+    }
+  }
+
+  // Recorre <tool>, <tool>-real, <tool>-real-real… y devuelve el PRIMER fichero
+  // que NO es nuestro shim: el flasher real. null si se perdió (cadena de solo
+  // shims o rota) — típico de instalaciones antiguas defectuosas.
+  private findGenuine(basePath: string): { path: string; bytes: Buffer } | null {
+    let p = basePath;
+    for (let i = 0; i < 12; i++) {
+      if (!fs.existsSync(p)) return null;
+      if (!this.isOurShim(p)) {
+        try {
+          return { path: p, bytes: fs.readFileSync(p) };
+        } catch {
+          return null;
+        }
+      }
+      p = realSibling(p);
+    }
+    return null;
+  }
+
+  // Borra cualquier copia sobrante más profunda que <tool>-real (los
+  // "-real-real…" que dejó el bug de encadenado).
+  private cleanDeeperChain(realPath: string): void {
+    let p = realSibling(realPath);
+    for (let i = 0; i < 12 && fs.existsSync(p); i++) {
+      try {
+        fs.rmSync(p, { force: true });
+      } catch {
+        /* ignore */
+      }
+      p = realSibling(p);
     }
   }
 
@@ -98,19 +143,24 @@ export class ShimManager {
     if (!isRud1shimAvailable()) return; // nothing bundled → do nothing, ever
     const wraps: WrapRecord[] = [];
     for (const f of detectFlashers()) {
+      if (isRealBackupName(f.path)) continue; // nunca envolver un backup -real
       const realPath = realSibling(f.path);
       try {
-        if (this.isOurShim(f.path)) {
-          // already wrapped (or an IDE reinstall left our shim in place)
-        } else if (fs.existsSync(realPath)) {
-          // IDE updated the real flasher over our shim → adopt the new real
-          fs.copyFileSync(f.path, realPath);
-          fs.copyFileSync(this.shimPath, f.path);
-        } else {
-          // fresh wrap: back up real, drop shim in its place
-          fs.copyFileSync(f.path, realPath);
-          fs.copyFileSync(this.shimPath, f.path);
+        // Localiza el flasher real recorriendo la cadena (maneja por igual: sin
+        // envolver, ya envuelto, o cadena "-real-real…" apilada por el bug).
+        const genuine = this.findGenuine(f.path);
+        if (!genuine) {
+          // El flasher real se perdió (instalación antigua defectuosa). No se
+          // puede recrear: se deja intacto y el usuario debe reinstalar el core
+          // del IDE; el próximo sync lo re-envolverá bien. No lo registramos
+          // como wrap para no intentar restaurarlo desde una copia inexistente.
+          continue;
         }
+        // Estado objetivo, idempotente: <tool>-real = real, <tool> = shim,
+        // sin copias "-real-real…" sobrantes.
+        fs.writeFileSync(realPath, genuine.bytes);
+        fs.copyFileSync(this.shimPath, f.path);
+        this.cleanDeeperChain(realPath);
         this.writeConfig(path.dirname(f.path), ports);
         wraps.push({ tool: f.tool, toolPath: f.path, realPath, source: f.source });
       } catch {
@@ -132,9 +182,12 @@ export class ShimManager {
   restoreAll(): void {
     for (const w of this.state.wraps) {
       try {
-        if (fs.existsSync(w.realPath)) {
-          fs.copyFileSync(w.realPath, w.toolPath);
-          fs.rmSync(w.realPath, { force: true });
+        // Recupera el flasher real de la cadena y déjalo en su ruta original,
+        // eliminando el shim y todas las copias "-real…".
+        const genuine = this.findGenuine(w.toolPath);
+        if (genuine) {
+          fs.writeFileSync(w.toolPath, genuine.bytes);
+          this.cleanDeeperChain(w.toolPath);
         }
         fs.rmSync(path.join(path.dirname(w.toolPath), "rud1shim.json"), { force: true });
         fs.rmSync(path.join(path.dirname(w.toolPath), "rud1shim.log"), { force: true });

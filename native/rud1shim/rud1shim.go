@@ -67,6 +67,13 @@ var (
 	fmtRe   = regexp.MustCompile(`^[A-Za-z]+$`)
 )
 
+// shimMarker es una firma estable y única que el instalador del desktop busca
+// dentro del ejecutable para reconocer NUESTRO shim con independencia de la
+// versión/tamaño del build (el tamaño no es fiable y comparar por él provocaba
+// que se re-envolviera el shim y se perdiera el flasher real). Se emite al log
+// para garantizar que queda embebida en el binario.
+const shimMarker = "RUD1SHIM/v1 flasher-interceptor do-not-delete"
+
 func selfDir() string { p, _ := os.Executable(); return filepath.Dir(p) }
 
 func loadConfig() config {
@@ -140,7 +147,7 @@ func main() {
 		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if logf != nil {
 		defer logf.Close()
-		fmt.Fprintf(logf, "\n[%s] argv=%q\n", time.Now().Format(time.RFC3339), os.Args)
+		fmt.Fprintf(logf, "\n[%s] %s argv=%q\n", time.Now().Format(time.RFC3339), shimMarker, os.Args)
 	}
 	cfg := loadConfig()
 

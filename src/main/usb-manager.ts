@@ -2,8 +2,12 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helper";
+import { diagnoseTapReachability } from "./tap-reachability";
 
 const execFileAsync = promisify(execFile);
+
+// Adapter the OpenVPN client binds; kept in sync with vpn-manager's TUNNEL_NAME.
+const TAP_ADAPTER_NAME = "rud1-tap";
 
 const USBIP_WIN_INSTALL_URL = "https://github.com/vadimgrn/usbip-win2/releases";
 
@@ -369,6 +373,27 @@ export async function usbAttach(host: string, busId: string): Promise<number> {
   assertHost(host);
   assertBusId(busId);
   ensureUsbipAvailable();
+  // Read-only reachability diagnostic — logs whether rud1-tap's current
+  // addressing can reach `host`, but NEVER mutates the adapter (the desktop
+  // must never write a static IP to rud1-tap: it can go stale and block the
+  // link-local path, or fight the server's STATIC push). Fixing the address is
+  // DHCP / APIPA / the OpenVPN push's job. Best-effort — never throws.
+  try {
+    const diag = await diagnoseTapReachability(host, TAP_ADAPTER_NAME);
+    if (!diag.likelyReachable) {
+      console.warn(
+        `[usb] rud1-tap may not reach ${host}: ${diag.reason} ` +
+          `(adapter ip: ${diag.adapterIp ?? "none"})`,
+      );
+    } else {
+      console.info(`[usb] rud1-tap reachability: ${diag.reason} → ${host}`);
+    }
+  } catch (err) {
+    console.warn(
+      "[usb] rud1-tap reachability diagnostic errored (non-fatal):",
+      err instanceof Error ? err.message : err,
+    );
+  }
   await bindOnPi(host, busId);
   try {
     if (process.platform === "win32") return await attachWindows(host, busId);
