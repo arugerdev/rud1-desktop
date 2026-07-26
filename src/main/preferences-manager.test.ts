@@ -109,6 +109,55 @@ describe("loadPreferences / setPreferences round-trip", () => {
   });
 });
 
+describe("toast position + sound", () => {
+  it("defaults to the top-right corner with the sound off", () => {
+    expect(DEFAULT_PREFERENCES.toastPosition).toBe("top-right");
+    expect(DEFAULT_PREFERENCES.toastSound).toBe(false);
+  });
+
+  it("accepts the six anchors and rejects anything else", async () => {
+    await loadPreferences(prefsPath);
+    for (const pos of [
+      "top-left",
+      "top-center",
+      "top-right",
+      "bottom-left",
+      "bottom-center",
+      "bottom-right",
+    ] as const) {
+      const out = await setPreferences({ toastPosition: pos });
+      expect(out.toastPosition).toBe(pos);
+    }
+    // Un valor inventado no debe pisar el guardado.
+    const kept = await setPreferences({
+      toastPosition: "middle-nowhere" as never,
+    });
+    expect(kept.toastPosition).toBe("bottom-right");
+  });
+
+  it("persists both fields across a reload", async () => {
+    await loadPreferences(prefsPath);
+    await setPreferences({ toastPosition: "bottom-center", toastSound: true });
+    __test.reset();
+    const reloaded = await loadPreferences(prefsPath);
+    expect(reloaded.toastPosition).toBe("bottom-center");
+    expect(reloaded.toastSound).toBe(true);
+  });
+
+  // Un preferences.json anterior a estos campos no debe perder el resto de
+  // ajustes: se toleran ausentes en vez de bumpear SCHEMA_VERSION.
+  it("tolerates a preferences file written before these fields existed", () => {
+    const out = sanitizePreferences({
+      version: 1,
+      preferences: { theme: "dark", language: "en" },
+    });
+    expect(out.theme).toBe("dark");
+    expect(out.language).toBe("en");
+    expect(out.toastPosition).toBe(DEFAULT_PREFERENCES.toastPosition);
+    expect(out.toastSound).toBe(DEFAULT_PREFERENCES.toastSound);
+  });
+});
+
 describe("isNotificationEnabled", () => {
   it("reflects the in-memory cache without touching disk", async () => {
     await loadPreferences(prefsPath);
@@ -119,5 +168,12 @@ describe("isNotificationEnabled", () => {
     await setPreferences({ notifications: { vpn: false } });
     expect(isNotificationEnabled("vpn")).toBe(false);
     expect(isNotificationEnabled("firstBoot")).toBe(true);
+  });
+
+  it("saves deviceReady, which the IPC validation used to drop", async () => {
+    await loadPreferences(prefsPath);
+    expect(isNotificationEnabled("deviceReady")).toBe(true);
+    await setPreferences({ notifications: { deviceReady: false } });
+    expect(isNotificationEnabled("deviceReady")).toBe(false);
   });
 });

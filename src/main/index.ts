@@ -65,7 +65,12 @@ import {
 import { detectLocale, getLocale, setLocale, t } from "./i18n";
 import { NotificationStreamManager } from "./notification-stream-manager";
 import { notifyDeviceReady } from "./notifications";
-import { destroyToastOverlay, onToastAction, pushToast } from "./toast-overlay";
+import {
+  applyToastPreferences,
+  destroyToastOverlay,
+  onToastAction,
+  pushToast,
+} from "./toast-overlay";
 import {
   USB_SESSION_FILENAME,
   addSession as addUsbSessionEntry,
@@ -1124,6 +1129,8 @@ app.whenReady().then(async () => {
       // Keep the tray's isAutoUpdateEnabled() gate consistent with the
       // Settings toggle.
       mirrorAutoUpdateConfig(prefs.autoUpdate);
+      // Posición/sonido de los avisos, en vivo y sin recrear el overlay.
+      applyToastPreferences();
     },
     versionCheck: {
       getState: () =>

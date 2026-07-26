@@ -55,6 +55,28 @@ const LANGUAGE_PREFERENCES: readonly LanguagePreference[] = [
   "ar",
 ];
 
+/** Esquina o lado de la pantalla donde se apila el overlay de avisos. */
+export type ToastPosition =
+  | "top-left"
+  | "top-center"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-center"
+  | "bottom-right";
+
+const TOAST_POSITIONS: readonly ToastPosition[] = [
+  "top-left",
+  "top-center",
+  "top-right",
+  "bottom-left",
+  "bottom-center",
+  "bottom-right",
+];
+
+export function isToastPosition(v: unknown): v is ToastPosition {
+  return typeof v === "string" && (TOAST_POSITIONS as readonly string[]).includes(v);
+}
+
 export interface NotificationToggles {
   /** Tray "first-boot device on LAN" toast (firmware-discovery probe). */
   firstBoot: boolean;
@@ -80,6 +102,10 @@ export interface Preferences {
    */
   language: LanguagePreference;
   notifications: NotificationToggles;
+  /** Dónde salen los avisos en pantalla. */
+  toastPosition: ToastPosition;
+  /** Sonido corto al aparecer un aviso. Apagado por defecto. */
+  toastSound: boolean;
   /**
    * Iter 8 — auto-reconnect when the WireGuard handshake goes stale
    * (>3 min without traffic). Default true; the renderer can flip it
@@ -104,6 +130,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   theme: "system",
   language: "system",
   notifications: { firstBoot: true, vpn: true, usb: true, deviceReady: true },
+  toastPosition: "top-right",
+  toastSound: false,
   vpnAutoReconnect: true,
   autoUpdate: false,
 };
@@ -126,6 +154,8 @@ function clonePreferences(p: Preferences): Preferences {
     theme: p.theme,
     language: p.language,
     notifications: { ...p.notifications },
+    toastPosition: p.toastPosition,
+    toastSound: p.toastSound,
     vpnAutoReconnect: p.vpnAutoReconnect,
     autoUpdate: p.autoUpdate,
   };
@@ -169,6 +199,15 @@ export function sanitizePreferences(parsed: unknown): Preferences {
           ? rawN.deviceReady
           : DEFAULT_PREFERENCES.notifications.deviceReady,
     },
+    // Tolerante como `language`: un fichero anterior a estos campos coge el
+    // defecto sin bump de SCHEMA_VERSION (que borraría las prefs existentes).
+    toastPosition: isToastPosition(raw.toastPosition)
+      ? raw.toastPosition
+      : DEFAULT_PREFERENCES.toastPosition,
+    toastSound:
+      typeof raw.toastSound === "boolean"
+        ? raw.toastSound
+        : DEFAULT_PREFERENCES.toastSound,
     vpnAutoReconnect:
       typeof raw.vpnAutoReconnect === "boolean"
         ? raw.vpnAutoReconnect
@@ -213,6 +252,8 @@ export interface PreferencesPatch {
   theme?: ThemePreference;
   language?: LanguagePreference;
   notifications?: Partial<NotificationToggles>;
+  toastPosition?: ToastPosition;
+  toastSound?: boolean;
   vpnAutoReconnect?: boolean;
   autoUpdate?: boolean;
 }
@@ -249,6 +290,11 @@ export async function setPreferences(patch: PreferencesPatch): Promise<Preferenc
     theme: isThemePreference(patch.theme) ? patch.theme : current.theme,
     language: isLanguagePreference(patch.language) ? patch.language : current.language,
     notifications: nextNotifications,
+    toastPosition: isToastPosition(patch.toastPosition)
+      ? patch.toastPosition
+      : current.toastPosition,
+    toastSound:
+      typeof patch.toastSound === "boolean" ? patch.toastSound : current.toastSound,
     vpnAutoReconnect:
       typeof patch.vpnAutoReconnect === "boolean"
         ? patch.vpnAutoReconnect

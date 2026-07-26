@@ -77,6 +77,9 @@ export function buildSettingsWindowHtml(
     languageSaveFailedPrefix: t("settings.languageSaveFailed", { error: "" }),
     notifSavedOn: t("settings.notifSavedOn", { key: "{key}" }),
     notifSavedOff: t("settings.notifSavedOff", { key: "{key}" }),
+    notifPositionToastPrefix: t("settings.notifPositionToastPrefix"),
+    notifSoundOn: t("settings.notifSoundOn"),
+    notifSoundOff: t("settings.notifSoundOff"),
     saveFailedPrefix: t("settings.saveFailed", { error: "" }),
     openFromTray: t("settings.openFromTray"),
     unknownError: t("settings.unknownError"),
@@ -542,6 +545,40 @@ export function buildSettingsWindowHtml(
       <input type="checkbox" id="notif-usb" />
       <span class="slider"></span>
     </label>
+  </div>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">${t("settings.notifDeviceReadyLabel")}</div>
+      <div class="hint">${t("settings.notifDeviceReadyHint")}</div>
+    </div>
+    <label class="toggle" aria-label="${t("settings.notifDeviceReadyLabel")}">
+      <input type="checkbox" id="notif-deviceReady" />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">${t("settings.notifSoundLabel")}</div>
+      <div class="hint">${t("settings.notifSoundHint")}</div>
+    </div>
+    <label class="toggle" aria-label="${t("settings.notifSoundLabel")}">
+      <input type="checkbox" id="toast-sound-toggle" />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="pref-row">
+    <div class="pref-text">
+      <div class="label">${t("settings.notifPositionLabel")}</div>
+      <div class="hint">${t("settings.notifPositionHint")}</div>
+    </div>
+    <div class="theme-picker lang-picker" role="radiogroup" aria-label="${t("settings.notifPositionLabel")}">
+      <label><input type="radio" name="toast-pos" value="top-left" /><span>${t("settings.posTopLeft")}</span></label>
+      <label><input type="radio" name="toast-pos" value="top-center" /><span>${t("settings.posTopCenter")}</span></label>
+      <label><input type="radio" name="toast-pos" value="top-right" /><span>${t("settings.posTopRight")}</span></label>
+      <label><input type="radio" name="toast-pos" value="bottom-left" /><span>${t("settings.posBottomLeft")}</span></label>
+      <label><input type="radio" name="toast-pos" value="bottom-center" /><span>${t("settings.posBottomCenter")}</span></label>
+      <label><input type="radio" name="toast-pos" value="bottom-right" /><span>${t("settings.posBottomRight")}</span></label>
+    </div>
   </div>
 
   <h2>${t("settings.startupHeading")}</h2>
@@ -1229,6 +1266,14 @@ export function buildSettingsWindowHtml(
     document.getElementById('notif-firstBoot').checked = !!notifs.firstBoot;
     document.getElementById('notif-vpn').checked = !!notifs.vpn;
     document.getElementById('notif-usb').checked = !!notifs.usb;
+    var ready = document.getElementById('notif-deviceReady');
+    if (ready) ready.checked = !!notifs.deviceReady;
+  }
+  function syncToastPosition(pos) {
+    var radios = document.querySelectorAll('input[name="toast-pos"]');
+    for (var i = 0; i < radios.length; i++) {
+      radios[i].checked = radios[i].value === pos;
+    }
   }
   function syncLangPicker(language) {
     var radios = document.querySelectorAll('input[name="lang-pick"]');
@@ -1253,6 +1298,9 @@ export function buildSettingsWindowHtml(
       syncThemePicker(res.result.theme);
       syncLangPicker(res.result.language);
       syncNotifToggles(res.result.notifications);
+      syncToastPosition(res.result.toastPosition);
+      var snd = document.getElementById('toast-sound-toggle');
+      if (snd) snd.checked = !!res.result.toastSound;
       var autoUpd = document.getElementById('auto-update-toggle');
       if (autoUpd) autoUpd.checked = !!res.result.autoUpdate;
     }).catch(function(e) {
@@ -1321,6 +1369,42 @@ export function buildSettingsWindowHtml(
     bindNotifToggle('notif-firstBoot', 'firstBoot');
     bindNotifToggle('notif-vpn', 'vpn');
     bindNotifToggle('notif-usb', 'usb');
+    bindNotifToggle('notif-deviceReady', 'deviceReady');
+
+    // Posición de los avisos: se aplica en vivo al overlay al guardar.
+    var posRadios = document.querySelectorAll('input[name="toast-pos"]');
+    for (var p = 0; p < posRadios.length; p++) {
+      posRadios[p].addEventListener('change', function(e) {
+        var next = e.target.value;
+        syncToastPosition(next);
+        window.electronAPI.app.setPreferences({ toastPosition: next }).then(function(res) {
+          if (res && res.ok) {
+            syncToastPosition(res.result.toastPosition);
+            toast(L.notifPositionToastPrefix + res.result.toastPosition);
+          } else {
+            toast(L.saveFailedPrefix + (res && res.error ? res.error : L.unknownError));
+          }
+        });
+      });
+    }
+
+    var soundToggle = document.getElementById('toast-sound-toggle');
+    if (soundToggle) {
+      soundToggle.addEventListener('change', function() {
+        var desired = !!soundToggle.checked;
+        soundToggle.disabled = true;
+        window.electronAPI.app.setPreferences({ toastSound: desired }).then(function(res) {
+          soundToggle.disabled = false;
+          if (res && res.ok) {
+            soundToggle.checked = !!res.result.toastSound;
+            toast(res.result.toastSound ? L.notifSoundOn : L.notifSoundOff);
+          } else {
+            soundToggle.checked = !desired;
+            toast(L.saveFailedPrefix + (res && res.error ? res.error : L.unknownError));
+          }
+        });
+      });
+    }
 
     // Auto-update opt-in. Reflects the OS-confirmed post-merge value so a
     // rejected save snaps the switch back instead of leaving it lying.
