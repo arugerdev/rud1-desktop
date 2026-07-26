@@ -8,15 +8,13 @@
  *   - One overlay window per app run, lazily created on the first
  *     `pushToast()` call. Stays alive until app quit; show()/hide()
  *     follow the queue size.
- *   - Pinned to the top-right of the primary display. We deliberately do
- *     NOT track DPI / multi-monitor moves yet — the overlay always
- *     surfaces above the primary display so the user always knows where
- *     to look. A future tweak can follow the focused window.
- *   - Click-through by default (`setIgnoreMouseEvents(true, { forward: true })`).
- *     The renderer flips it off when the cursor enters a toast card
- *     via `toast:hover` IPC. This is the only way to make a transparent
- *     borderless window pass clicks through to the desktop below while
- *     still receiving mouse events on its own interactive widgets.
+ *   - Anclado en la esquina/lado que elija el operador (`toastPosition`),
+ *     siempre sobre la pantalla primaria. No seguimos aún la ventana con
+ *     foco ni cambios de DPI entre monitores.
+ *   - La ventana se redimensiona al alto de la pila (`toast:height`) y NO es
+ *     click-through: al cubrir sólo los avisos, los clics llegan a la X y a
+ *     los botones. El montaje anterior (click-through + rehabilitar al pasar
+ *     el ratón vía IPC) se comía los clics y dejaba los avisos incerrables.
  *   - Tied to the user's theme preference (`light`/`dark`/`system`).
  *     `system` is resolved at show-time via `nativeTheme.shouldUseDarkColors`.
  *
@@ -33,8 +31,21 @@ import { getPreferences } from "./preferences-manager";
 import { markWebContentsTrusted, unmarkWebContentsTrusted } from "./ipc-handlers";
 
 const OVERLAY_WIDTH = 400;
-const OVERLAY_MARGIN = 18;
+const OVERLAY_MARGIN = 10;
 const DEFAULT_AUTODISMISS_MS = 5500;
+// Alto de arranque hasta que el renderer reporta el real.
+const OVERLAY_MIN_HEIGHT = 96;
+
+/** Alto vivo de la pila, reportado por el renderer. */
+let overlayHeight = OVERLAY_MIN_HEIGHT;
+
+function anchorOf(): { vpos: "top" | "bottom"; hpos: "left" | "center" | "right" } {
+  const [vpos, hpos] = getPreferences().toastPosition.split("-");
+  return {
+    vpos: vpos === "bottom" ? "bottom" : "top",
+    hpos: hpos === "left" ? "left" : hpos === "center" ? "center" : "right",
+  };
+}
 
 export type ToastKind = "info" | "success" | "warning" | "error";
 
@@ -55,7 +66,6 @@ let overlayWindow: BrowserWindow | null = null;
 let overlayReady = false;
 let pendingToasts: ToastDescriptor[] = [];
 const liveToastIds = new Set<string>();
-let mouseEventsIgnored = true;
 let bridgeWired = false;
 let actionHandlers = new Map<string, (id: string) => void>();
 
@@ -79,14 +89,14 @@ function ensureBridgeWired(): void {
   if (bridgeWired) return;
   bridgeWired = true;
 
-  // Hover state — used to gate click-through. The renderer sends `true`
-  // when the cursor enters a toast card and `false` on leave.
-  ipcMain.on("toast:hover", (_evt, payload: { hovering: boolean }) => {
+  // Alto de la pila: la ventana se redimensiona para cubrir sólo los avisos.
+  ipcMain.on("toast:height", (_evt, payload: { height: number }) => {
     if (!overlayWindow || overlayWindow.isDestroyed()) return;
-    const ignore = !payload?.hovering;
-    if (ignore === mouseEventsIgnored) return;
-    mouseEventsIgnored = ignore;
-    overlayWindow.setIgnoreMouseEvents(ignore, { forward: ignore });
+    const h = Math.round(payload?.height ?? 0);
+    if (h <= 0) return; // pila vacía: la oculta `toast:empty`
+    if (h === overlayHeight) return;
+    overlayHeight = h;
+    positionOverlay(overlayWindow);
   });
 
   // User clicked the X on a toast.
@@ -123,17 +133,45 @@ function ensureBridgeWired(): void {
   });
 }
 
+/**
+ * La ventana se ajusta al alto de la pila y se ancla en la esquina/lado que
+ * pida la preferencia. Al cubrir sólo los avisos ya no hace falta el
+ * click-through, que era lo que impedía pulsar la X y los botones.
+ */
 function positionOverlay(win: BrowserWindow): void {
-  const primary = screen.getPrimaryDisplay();
-  const wa = primary.workArea;
-  // Tall sliver pinned to the right edge of the work area so the toast
-  // stack can grow downward without colliding with the taskbar / dock.
-  // Width is fixed; the HTML constrains the inner stack to the same
-  // visible bounds.
-  const height = Math.max(280, Math.min(wa.height - OVERLAY_MARGIN * 2, 900));
-  const x = wa.x + wa.width - OVERLAY_WIDTH - OVERLAY_MARGIN;
-  const y = wa.y + OVERLAY_MARGIN;
+  const wa = screen.getPrimaryDisplay().workArea;
+  const { vpos, hpos } = anchorOf();
+  const height = Math.max(
+    1,
+    Math.min(overlayHeight || OVERLAY_MIN_HEIGHT, wa.height - OVERLAY_MARGIN * 2),
+  );
+  const x =
+    hpos === "left"
+      ? wa.x + OVERLAY_MARGIN
+      : hpos === "center"
+        ? wa.x + Math.round((wa.width - OVERLAY_WIDTH) / 2)
+        : wa.x + wa.width - OVERLAY_WIDTH - OVERLAY_MARGIN;
+  const y =
+    vpos === "bottom"
+      ? wa.y + wa.height - height - OVERLAY_MARGIN
+      : wa.y + OVERLAY_MARGIN;
   win.setBounds({ x, y, width: OVERLAY_WIDTH, height });
+}
+
+/**
+ * Reaplica posición y sonido tras guardar preferencias, sin recrear la ventana.
+ */
+export function applyToastPreferences(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const { vpos, hpos } = anchorOf();
+  if (overlayReady) {
+    overlayWindow.webContents.send("toast:opts", {
+      vpos,
+      hpos,
+      sound: getPreferences().toastSound,
+    });
+  }
+  positionOverlay(overlayWindow);
 }
 
 function ensureOverlayWindow(): BrowserWindow {
@@ -163,6 +201,9 @@ function ensureOverlayWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // El chirrido se sintetiza con Web Audio y no hay gesto del usuario en
+      // el overlay: sin esto Chromium deja el AudioContext suspendido.
+      autoplayPolicy: "no-user-gesture-required",
     },
   });
 
@@ -171,15 +212,23 @@ function ensureOverlayWindow(): BrowserWindow {
   // surfaces; on Windows "screen-saver" is treated the same as topmost.
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  win.setIgnoreMouseEvents(true, { forward: true });
-  mouseEventsIgnored = true;
+  // Los clics llegan a las tarjetas: la ventana sólo cubre la pila.
+  win.setIgnoreMouseEvents(false);
   win.setMenu(null);
   positionOverlay(win);
 
   const trustedId = win.webContents.id;
   markWebContentsTrusted(trustedId);
 
-  void win.loadURL(buildToastOverlayHtml({ theme: resolvedTheme() }));
+  const anchor = anchorOf();
+  void win.loadURL(
+    buildToastOverlayHtml({
+      theme: resolvedTheme(),
+      vpos: anchor.vpos,
+      hpos: anchor.hpos,
+      sound: getPreferences().toastSound,
+    }),
+  );
 
   win.webContents.once("did-finish-load", () => {
     overlayReady = true;

@@ -10,8 +10,11 @@
  *     onDismiss(cb)  — request a specific toast be removed
  *     onTheme(cb)    — theme changed; re-skin the document
  *
+ *     onOpts(cb)     — posición/sonido cambiados desde los ajustes
+ *
  *   outbound (renderer → main):
- *     setHovering(b)        — gate the main process's click-through
+ *     reportHeight(px)      — alto de la pila; main ajusta la ventana al
+ *                             contenido para no tapar el escritorio
  *     userDismiss(id)       — operator clicked the X
  *     fireAction(id, ch)    — operator clicked a CTA button
  *     notifyEmpty()         — stack drained; main can hide the window
@@ -38,9 +41,12 @@ contextBridge.exposeInMainWorld("rud1Bridge", {
     ipcRenderer.on("toast:dismiss", (_e, payload: { id: string }) => cb(payload?.id)),
   onTheme: (cb: (theme: "light" | "dark") => void) =>
     ipcRenderer.on("toast:theme", (_e, theme: "light" | "dark") => cb(theme)),
+  onOpts: (
+    cb: (o: { vpos?: string; hpos?: string; sound?: boolean }) => void,
+  ) => ipcRenderer.on("toast:opts", (_e, o) => cb(o)),
 
-  setHovering: (hovering: boolean) =>
-    ipcRenderer.send("toast:hover", { hovering: !!hovering }),
+  reportHeight: (height: number) =>
+    ipcRenderer.send("toast:height", { height: Number(height) || 0 }),
   userDismiss: (id: string) =>
     ipcRenderer.send("toast:user-dismiss", { id }),
   fireAction: (id: string, channel: string) =>

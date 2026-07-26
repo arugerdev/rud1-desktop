@@ -5,6 +5,7 @@ import {
   getPreferences,
   setPreferences,
   isLanguagePreference,
+  isToastPosition,
   type PreferencesPatch,
 } from "./preferences-manager";
 import {
@@ -1369,7 +1370,16 @@ export function registerIpcHandlers(opts: {
       if (typeof n.firstBoot === "boolean") partial.firstBoot = n.firstBoot;
       if (typeof n.vpn === "boolean") partial.vpn = n.vpn;
       if (typeof n.usb === "boolean") partial.usb = n.usb;
+      // deviceReady existía en las preferencias pero se caía aquí: el toggle
+      // no llegaba nunca a guardarse.
+      if (typeof n.deviceReady === "boolean") partial.deviceReady = n.deviceReady;
       if (Object.keys(partial).length > 0) cleaned.notifications = partial;
+    }
+    if (isToastPosition(patch.toastPosition)) {
+      cleaned.toastPosition = patch.toastPosition;
+    }
+    if (typeof patch.toastSound === "boolean") {
+      cleaned.toastSound = patch.toastSound;
     }
     if (typeof patch.vpnAutoReconnect === "boolean") {
       cleaned.vpnAutoReconnect = patch.vpnAutoReconnect;

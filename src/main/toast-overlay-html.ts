@@ -26,13 +26,22 @@ export interface ToastOverlayHtmlOpts {
    *  resolved by the main process before rendering so the iframe never
    *  has to read prefers-color-scheme at runtime. */
   theme: "light" | "dark";
+  /** Vertical anchor: la pila crece hacia el centro de la pantalla. */
+  vpos?: "top" | "bottom";
+  /** Horizontal anchor: manda la alineación de las tarjetas. */
+  hpos?: "left" | "center" | "right";
+  /** Chirrido corto al aparecer un aviso. */
+  sound?: boolean;
 }
 
 export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
   const themeAttr = ` data-theme="${opts.theme}"`;
+  const vpos = opts.vpos ?? "top";
+  const hpos = opts.hpos ?? "right";
+  const anchorAttr = ` data-vpos="${vpos}" data-hpos="${hpos}"`;
   const lang = getLocale();
   const html = `<!doctype html>
-<html lang="${lang}"${themeAttr}>
+<html lang="${lang}"${themeAttr}${anchorAttr}>
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none';" />
@@ -44,10 +53,13 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
 
     --fg: #1a2030;
     --muted-fg: #6b7588;
-    --surface: rgba(255, 255, 255, 0.78);
-    --surface-strong: rgba(255, 255, 255, 0.92);
-    --border: rgba(180, 195, 220, 0.55);
-    --shadow: rgba(60, 80, 120, 0.22);
+    /* Casi opaco a propósito: en una ventana transparent:true el
+       backdrop-filter no tiene nada que difuminar (el escritorio de detrás no
+       entra en la página), así que un alpha bajo sólo se veía deslavado. */
+    --surface: rgba(252, 253, 255, 0.98);
+    --surface-strong: rgba(236, 241, 250, 1);
+    --border: rgba(150, 170, 205, 0.7);
+    --shadow: rgba(40, 60, 100, 0.28);
 
     --primary: #a8c4ff;
     --primary-accent: #86a8ff;
@@ -70,11 +82,11 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
   }
   :root[data-theme="dark"] {
     --fg: #e6eaf2;
-    --muted-fg: #93a0b8;
-    --surface: rgba(28, 36, 50, 0.72);
-    --surface-strong: rgba(28, 36, 50, 0.92);
-    --border: rgba(120, 140, 175, 0.28);
-    --shadow: rgba(0, 0, 0, 0.6);
+    --muted-fg: #a3b0c8;
+    --surface: rgba(26, 33, 47, 0.985);
+    --surface-strong: rgba(44, 55, 75, 1);
+    --border: rgba(130, 150, 190, 0.45);
+    --shadow: rgba(0, 0, 0, 0.55);
 
     --primary: #86a8ff;
     --primary-accent: #a8c4ff;
@@ -99,33 +111,30 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
   * { box-sizing: border-box; }
   html, body {
     margin: 0;
-    padding: 0;
+    /* Hueco para que la sombra no se recorte: la ventana se ajusta al
+       contenido y overflow hidden cortaría el box-shadow. */
+    padding: 14px;
     width: 100%;
-    height: 100%;
     background: transparent;
     overflow: hidden;
-    /* Whole document is click-through by default; toast cards re-enable
-       pointer events. This works together with the main process's
-       setIgnoreMouseEvents(true, { forward: true }) — the renderer
-       still sees mouse-move events so it can ask main to flip
-       click-through off when the cursor enters a toast. */
-    pointer-events: none;
     font-family: -apple-system, "Segoe UI", "SF Pro Text", Inter, Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
     user-select: none;
     -webkit-user-select: none;
   }
 
+  /* La ventana la coloca y dimensiona el proceso principal según la
+     preferencia; aquí sólo alineamos la pila dentro de ella. */
   #stack {
-    position: fixed;
-    top: 18px;
-    right: 18px;
     display: flex;
     flex-direction: column;
     gap: 10px;
     align-items: flex-end;
-    max-width: 380px;
   }
+  :root[data-hpos="left"] #stack { align-items: flex-start; }
+  :root[data-hpos="center"] #stack { align-items: center; }
+  /* Anclado abajo el aviso más nuevo va pegado al borde de la pantalla. */
+  :root[data-vpos="bottom"] #stack { flex-direction: column-reverse; }
 
   .toast {
     pointer-events: auto;
@@ -140,21 +149,25 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
     width: 360px;
     min-height: 64px;
     opacity: 0;
-    transform: translateX(110%);
-    transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1),
-                opacity 220ms ease,
+    /* Entrada por desvanecido + 10px: un slide del 110% se recortaría contra
+       los bordes de una ventana ajustada al contenido. */
+    transform: translateY(-10px) scale(0.98);
+    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
+                opacity 200ms ease,
                 box-shadow 180ms ease;
     position: relative;
     overflow: hidden;
   }
+  :root[data-vpos="bottom"] .toast { transform: translateY(10px) scale(0.98); }
   .toast.in {
     opacity: 1;
-    transform: translateX(0);
+    transform: translateY(0) scale(1);
   }
   .toast.out {
     opacity: 0;
-    transform: translateX(110%);
+    transform: translateY(-6px) scale(0.98);
   }
+  :root[data-vpos="bottom"] .toast.out { transform: translateY(6px) scale(0.98); }
   .toast:hover {
     box-shadow: 0 14px 38px var(--shadow);
   }
@@ -267,6 +280,39 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
   <div id="stack" role="region" aria-label="${t("toast.regionLabel")}"></div>
 <script>
   var DISMISS_LABEL = ${JSON.stringify(t("toast.dismiss"))};
+  var soundOn = ${JSON.stringify(Boolean(opts.sound))};
+  var PAD = 14;
+
+  // Chirrido sintetizado con Web Audio: sin fichero de audio no hay nada que
+  // cargar y la CSP del overlay (default-src 'none') lo permite.
+  var audioCtx = null;
+  function chime(kind) {
+    if (!soundOn) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      var now = audioCtx.currentTime;
+      var notes = kind === "error" ? [622, 415]
+        : kind === "warning" ? [587, 587]
+        : kind === "success" ? [784, 1047]
+        : [740, 988];
+      var gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.08, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+      gain.connect(audioCtx.destination);
+      for (var i = 0; i < notes.length; i++) {
+        var osc = audioCtx.createOscillator();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(notes[i], now + i * 0.085);
+        osc.connect(gain);
+        osc.start(now + i * 0.085);
+        osc.stop(now + i * 0.085 + 0.3);
+      }
+    } catch (e) {
+      /* sin audio disponible: el aviso visual ya salió */
+    }
+  }
   // ---- shared helpers ----
   function escapeText(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -328,21 +374,43 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
       });
     });
 
-    var record = { el: el, timer: 0, progressTimer: 0 };
+    var record = { el: el, timer: 0, progressTimer: 0, remainingMs: 0, startedAt: 0 };
     toasts.set(t.id, record);
+    chime(t.kind || "info");
 
     var dwellMs = typeof t.autoDismissMs === "number" && t.autoDismissMs > 0
       ? t.autoDismissMs
       : 5500;
-    if (dwellMs > 0 && dwellMs < 60000) {
-      var progress = el.querySelector(".progress");
+    var progress = el.querySelector(".progress");
+    function runDwell(ms) {
+      record.remainingMs = ms;
+      record.startedAt = Date.now();
       if (progress) {
-        progress.style.transition = "transform " + dwellMs + "ms linear";
-        requestAnimationFrame(function () {
-          progress.style.transform = "scaleX(0)";
-        });
+        progress.style.transition = "transform " + ms + "ms linear";
+        requestAnimationFrame(function () { progress.style.transform = "scaleX(0)"; });
       }
-      record.timer = window.setTimeout(function () { removeToast(t.id); }, dwellMs);
+      record.timer = window.setTimeout(function () { removeToast(t.id); }, ms);
+    }
+    // Congela el temporizador con el ratón encima: si no, el aviso se
+    // desvanecía justo cuando ibas a pulsar la X o el botón.
+    function freezeDwell() {
+      if (!record.timer) return;
+      window.clearTimeout(record.timer);
+      record.timer = 0;
+      var elapsed = Date.now() - record.startedAt;
+      record.remainingMs = Math.max(600, record.remainingMs - elapsed);
+      if (progress) {
+        var scale = getComputedStyle(progress).transform;
+        progress.style.transition = "none";
+        progress.style.transform = scale === "none" ? "scaleX(1)" : scale;
+      }
+    }
+    if (dwellMs > 0 && dwellMs < 60000) {
+      runDwell(dwellMs);
+      el.addEventListener("mouseenter", freezeDwell);
+      el.addEventListener("mouseleave", function () {
+        if (!record.timer && toasts.has(t.id)) runDwell(record.remainingMs);
+      });
     }
 
     // Bind events.
@@ -362,8 +430,7 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
         });
       }
     }
-    el.addEventListener("mouseenter", function () { setHovering(true); });
-    el.addEventListener("mouseleave", function () { setHovering(false); });
+    reportHeight();
   }
 
   function removeToast(id) {
@@ -375,25 +442,26 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
     rec.el.classList.add("out");
     window.setTimeout(function () {
       if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
+      reportHeight();
       if (toasts.size === 0 && window.rud1Bridge) {
         window.rud1Bridge.notifyEmpty();
       }
     }, 320);
   }
 
-  // Hover state propagation so the main process can flip click-through.
-  // We debounce a tick to coalesce rapid enter/leave when crossing
-  // adjacent toasts.
-  var hoverTimer = 0;
-  var lastHovering = false;
-  function setHovering(h) {
-    if (hoverTimer) window.clearTimeout(hoverTimer);
-    hoverTimer = window.setTimeout(function () {
-      if (h !== lastHovering) {
-        lastHovering = h;
-        if (window.rud1Bridge) window.rud1Bridge.setHovering(h);
-      }
-    }, 30);
+  // La ventana se ajusta a la pila: así sólo tapa los avisos de verdad y no
+  // hace falta el click-through (que era lo que se comía los clics).
+  var lastH = -1;
+  function reportHeight() {
+    var h = toasts.size === 0 ? 0 : Math.ceil(stack.getBoundingClientRect().height) + PAD * 2;
+    if (h === lastH) return;
+    lastH = h;
+    if (window.rud1Bridge && window.rud1Bridge.reportHeight) {
+      window.rud1Bridge.reportHeight(h);
+    }
+  }
+  if (window.ResizeObserver) {
+    new window.ResizeObserver(function () { reportHeight(); }).observe(stack);
   }
 
   // ---- bridge ----
@@ -408,6 +476,17 @@ export function buildToastOverlayHtml(opts: ToastOverlayHtmlOpts): string {
   if (window.rud1Bridge && window.rud1Bridge.onTheme) {
     window.rud1Bridge.onTheme(function (theme) {
       document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+    });
+  }
+  // Cambios en vivo de posición/sonido desde los ajustes, sin recrear la ventana.
+  if (window.rud1Bridge && window.rud1Bridge.onOpts) {
+    window.rud1Bridge.onOpts(function (o) {
+      if (!o) return;
+      if (o.vpos) document.documentElement.setAttribute("data-vpos", o.vpos);
+      if (o.hpos) document.documentElement.setAttribute("data-hpos", o.hpos);
+      if (typeof o.sound === "boolean") soundOn = o.sound;
+      lastH = -1;
+      reportHeight();
     });
   }
 </script>
