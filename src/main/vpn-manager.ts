@@ -35,6 +35,7 @@ import {
   type OpenVpnRuntimeStatus,
 } from "./openvpn-installer";
 import { writeOvpnConfig, defaultOvpnConfigPath } from "./ovpn-config-store";
+import { createSerialQueue } from "./serial-queue";
 import {
   maybeApplyApipaFallback,
   parseLanFallbackHint,
@@ -585,9 +586,13 @@ export function openvpnLogPath(): string {
  * `service-wrapper` handler treats as a hard stop — the TAP adapter is
  * released either way).
  */
-async function killRunning(): Promise<void> {
-  if (!running) return;
-  const live = running;
+async function killRunning(target?: RunningProc): Promise<void> {
+  // Sin `target` mata al actual. CON target mata ESE proceso, que es lo que
+  // necesita el camino de fallo: si otra conexión ya reemplazó `running`,
+  // matar "el actual" liquidaba al recién llegado y dejaba huérfano al que
+  // había fallado — reteniendo el TAP y bloqueando todo intento posterior.
+  const live = target ?? running;
+  if (!live) return;
   const pid = live.proc.pid;
   try {
     live.proc.kill();
@@ -621,7 +626,9 @@ async function killRunning(): Promise<void> {
       /* already gone or never existed */
     }
   }
-  running = null;
+  // Solo se limpia el puntero si el que hemos matado ES el activo: en caso
+  // contrario borraríamos la referencia a un proceso ajeno que sigue vivo.
+  if (running === live) running = null;
 }
 
 /**
@@ -677,6 +684,21 @@ export function isOpenvpnAlive(): boolean {
  * Liquid Glass modal.
  */
 export async function vpnConnect(ovpnConfig: string): Promise<void> {
+  // Serializado a la fuerza. Hay DOS orígenes de conexión —el clic del
+  // usuario (`vpn:connect`) y el auto-reconector del health monitor— y el
+  // arranque tarda segundos (detección de runtime, rename y enable del TAP)
+  // antes de publicar `running`. Solapados, ambos pasaban el `killRunning()`
+  // inicial sin nada que matar, ambos lanzaban openvpn, y el segundo pisaba
+  // `running`: el primero moría con "VPN connection was torn down before
+  // initialization" y dejaba un proceso huérfano reteniendo el TAP, de modo
+  // que TODOS los intentos siguientes fallaban con ERROR_GEN_FAILURE.
+  return connectQueue(() => vpnConnectSerialized(ovpnConfig));
+}
+
+/** Cola de conexiones: cada llamada espera a que termine la anterior. */
+const connectQueue = createSerialQueue();
+
+async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   if (typeof ovpnConfig !== "string" || ovpnConfig.length === 0) {
     throw new Error("invalid .ovpn config");
   }
@@ -821,9 +843,10 @@ export async function vpnConnect(ovpnConfig: string): Promise<void> {
     // sockets / local tests).
     onTick();
   }).catch(async (err) => {
-    // Tear down the child so we don't leave an orphan openvpn.exe
-    // owning the TAP adapter after a failed connect.
-    await killRunning();
+    // Matar ESTE hijo, no "el actual": si otra conexión ya reemplazó
+    // `running`, matar el actual liquidaba al recién llegado y dejaba vivo
+    // al que acaba de fallar, aferrado al adaptador TAP.
+    await killRunning(live);
     throw err;
   });
 
