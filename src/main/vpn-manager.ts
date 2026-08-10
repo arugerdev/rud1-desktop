@@ -877,16 +877,27 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   })();
 }
 
+/**
+ * Desconecta. Va por la MISMA cola que `vpnConnect`, no en paralelo: durante
+ * el arranque hay segundos en los que el hijo ya existe pero `running` aún no
+ * lo apunta, y un `killRunning()` en ese hueco no encontraba nada que matar.
+ * El usuario pulsaba Desconectar y acababa conectado igual.
+ *
+ * El precio es que un Desconectar durante un intento de conexión espera a que
+ * ese intento termine. Preferible a que no desconecte.
+ */
 export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
-  const uptimeMs = computeTunnelUptimeMs(
-    running !== null,
-    lastConnectedAt,
-    Date.now(),
-  );
-  await killRunning();
-  lastDisconnectedAt = Date.now();
-  lastOvpnConfig = null;
-  return { uptimeMs };
+  return connectQueue(async () => {
+    const uptimeMs = computeTunnelUptimeMs(
+      running !== null,
+      lastConnectedAt,
+      Date.now(),
+    );
+    await killRunning();
+    lastDisconnectedAt = Date.now();
+    lastOvpnConfig = null;
+    return { uptimeMs };
+  });
 }
 
 export async function vpnStatus(): Promise<VpnStatusResult> {
