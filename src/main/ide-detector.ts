@@ -34,12 +34,23 @@ function exeName(tool: string): string {
   return process.platform === "win32" ? `${tool}.exe` : tool;
 }
 
+/** Extra roots an operator can add without a new build: paths separated by the
+ *  platform delimiter. Escape hatch for toolchains we don't know about yet. */
+export const EXTRA_ROOTS_ENV = "RUD1_FLASHER_ROOTS";
+
+interface SearchRoot {
+  root: string;
+  source: string;
+  /** Recursion depth. 0 = just this directory (PATH entries hold the exe flat). */
+  depth: number;
+}
+
 /** Roots under which IDEs keep their bundled flasher `bin/` directories. */
-function searchRoots(): { root: string; source: string }[] {
+function searchRoots(): SearchRoot[] {
   const home = os.homedir();
-  const roots: { root: string; source: string }[] = [];
-  const add = (root: string | undefined, source: string) => {
-    if (root && fs.existsSync(root)) roots.push({ root, source });
+  const roots: SearchRoot[] = [];
+  const add = (root: string | undefined, source: string, depth = 6) => {
+    if (root && fs.existsSync(root)) roots.push({ root, source, depth });
   };
 
   if (process.platform === "win32") {
@@ -53,6 +64,12 @@ function searchRoots(): { root: string; source: string }[] {
     add(programFilesX86 && path.join(programFilesX86, "Arduino", "hardware", "tools"), "Arduino IDE (legacy)");
     // PlatformIO
     add(path.join(home, ".platformio", "packages"), "PlatformIO");
+    // Visuino trae su propia toolchain y no cuelga de Arduino15: sin esto sus
+    // subidas nunca se interceptan y salen por la VPN en vez de correr junto al
+    // hardware. Se prueban varias ubicaciones porque el instalador varía.
+    for (const base of [programFiles, programFilesX86, localApp, path.join(home, "Documents")]) {
+      add(base && path.join(base, "Visuino"), "Visuino");
+    }
   } else if (process.platform === "darwin") {
     add(path.join(home, "Library", "Arduino15", "packages"), "Arduino IDE");
     add("/Applications/Arduino.app/Contents/Java/hardware/tools", "Arduino IDE (legacy)");
@@ -60,6 +77,15 @@ function searchRoots(): { root: string; source: string }[] {
   } else {
     add(path.join(home, ".arduino15", "packages"), "Arduino IDE");
     add(path.join(home, ".platformio", "packages"), "PlatformIO");
+  }
+
+  // Instalaciones sueltas: el flasher está en el propio directorio del PATH,
+  // así que depth 0 — recorrer el PATH entero sería carísimo.
+  for (const dir of (process.env["PATH"] ?? "").split(path.delimiter)) {
+    add(dir.trim(), "PATH", 0);
+  }
+  for (const dir of (process.env[EXTRA_ROOTS_ENV] ?? "").split(path.delimiter)) {
+    add(dir.trim(), EXTRA_ROOTS_ENV);
   }
   return roots;
 }
@@ -95,9 +121,9 @@ export function detectFlashers(): DetectedFlasher[] {
   const results: DetectedFlasher[] = [];
   const seen = new Set<string>();
 
-  for (const { root, source } of searchRoots()) {
+  for (const { root, source, depth } of searchRoots()) {
     const hits = new Map<string, string>();
-    findUnder(root, wanted, 6, hits);
+    findUnder(root, wanted, depth, hits);
     for (const [full, tool] of hits) {
       if (seen.has(full)) continue;
       seen.add(full);
