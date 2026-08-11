@@ -48,6 +48,13 @@ import {
   notifyUsbDetached,
 } from "./notifications";
 import { listComPorts, captureComPort } from "./flash-integration";
+import type { ProgrammerMode, ProgrammerModeMap } from "./programmer-mode-store";
+
+const PROGRAMMER_MODES: ReadonlySet<string> = new Set<ProgrammerMode>([
+  "auto",
+  "always",
+  "never",
+]);
 import {
   ping,
   interfaces,
@@ -450,6 +457,11 @@ export function registerIpcHandlers(opts: {
    * have to stub a no-op.
    */
   onPreferencesUpdated?: (prefs: import("./preferences-manager").Preferences) => void;
+  /** Per-USB choice of programmer (shim vs the IDE's own flasher). */
+  programmerMode?: {
+    list(): ProgrammerModeMap;
+    set(host: string, busId: string, mode: ProgrammerMode): Promise<void>;
+  };
 } = {}): void {
   // Per-port label cache for detach notifications. The renderer already
   // knows the human-readable name when it calls attach (vendor + product
@@ -896,6 +908,31 @@ export function registerIpcHandlers(opts: {
       return [];
     }
   });
+
+  // Qué programador usa cada USB: el shim (junto al hardware) o el flasher
+  // original del IDE. La clave es (host, busId) porque un bus id sólo es único
+  // dentro de un equipo.
+  ipcMain.handle("usb:programmerModes", async (event) => {
+    if (!checkSender(event)) return {};
+    return opts.programmerMode?.list() ?? {};
+  });
+
+  ipcMain.handle(
+    "usb:setProgrammerMode",
+    async (event, host: string, busId: string, mode: ProgrammerMode) => {
+      if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+      if (!PROGRAMMER_MODES.has(mode)) {
+        return { ok: false, error: `Invalid mode: ${String(mode)}` };
+      }
+      if (!host || !busId) return { ok: false, error: "host and busId are required" };
+      try {
+        await opts.programmerMode?.set(host, busId, mode);
+        return { ok: true as const, mode };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
 
   // Status probe used by the panel to decide whether to surface the
   // "Install USB/IP" CTA before the user even tries Attach.

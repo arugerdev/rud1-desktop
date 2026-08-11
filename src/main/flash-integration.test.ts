@@ -18,7 +18,9 @@ describe("projectSessions", () => {
       { com: "COM3", host: "10.8.0.2", busId: "2-1.4" },
       { host: "10.8.0.3", busId: "2-1.5" }, // no COM yet → not routable
     ]);
-    expect([...m]).toEqual([["COM3", { host: "10.8.0.2", busId: "2-1.4" }]]);
+    expect([...m]).toEqual([
+      ["COM3", { host: "10.8.0.2", busId: "2-1.4", mode: "auto" }],
+    ]);
   });
 
   it("is a full rebuild: a detached device drops out of the map", () => {
@@ -36,6 +38,46 @@ describe("projectSessions", () => {
 
   it("reflects a busId remap on the same COM (device swapped ports)", () => {
     const m = projectSessions([{ com: "COM3", host: "10.8.0.2", busId: "1-1.2" }]);
-    expect(m.get("COM3")).toEqual({ host: "10.8.0.2", busId: "1-1.2" });
+    expect(m.get("COM3")).toEqual({ host: "10.8.0.2", busId: "1-1.2", mode: "auto" });
+  });
+});
+
+// La elección del operador se aplica en la proyección, que es el único sitio
+// del que leen tanto la config del shim como resolvePort.
+describe("projectSessions con modo de programador", () => {
+  const session = { com: "COM7", host: "10.8.0.2", busId: "1-1" };
+
+  it("never deja el puerto fuera del mapa: el shim pasa al flasher original", () => {
+    const m = projectSessions([session], { "10.8.0.2|1-1": "never" });
+    expect(m.size).toBe(0);
+  });
+
+  it("always enruta y marca el modo para que un fallo no caiga al flasher local", () => {
+    const m = projectSessions([session], { "10.8.0.2|1-1": "always" });
+    expect(m.get("COM7")).toEqual({ host: "10.8.0.2", busId: "1-1", mode: "always" });
+  });
+
+  it("auto (y sin elección) mantiene el comportamiento de siempre", () => {
+    expect(projectSessions([session], { "10.8.0.2|1-1": "auto" }).get("COM7")?.mode).toBe("auto");
+    expect(projectSessions([session], {}).get("COM7")?.mode).toBe("auto");
+  });
+
+  // Un bus id sólo es único dentro de un equipo: la clave lleva el host para
+  // que apagarlo en uno no lo apague en otro.
+  it("no aplica la elección de un equipo a otro con el mismo busId", () => {
+    const modes = { "10.8.0.2|1-1": "never" as const };
+    const m = projectSessions(
+      [session, { com: "COM8", host: "10.8.0.9", busId: "1-1" }],
+      modes,
+    );
+    expect([...m.keys()]).toEqual(["COM8"]);
+  });
+
+  it("never gana aunque la sesión tenga COM capturado", () => {
+    const m = projectSessions(
+      [session, { com: "COM3", host: "10.8.0.2", busId: "2-1" }],
+      { "10.8.0.2|1-1": "never" },
+    );
+    expect([...m.keys()]).toEqual(["COM3"]);
   });
 });

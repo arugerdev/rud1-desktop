@@ -26,6 +26,12 @@ import {
   OrchestratorDeps,
 } from "./shim-orchestrator";
 import { ShimManager } from "./shim-lifecycle-manager";
+import {
+  DEFAULT_PROGRAMMER_MODE,
+  ProgrammerMode,
+  ProgrammerModeMap,
+  modeFor,
+} from "./programmer-mode-store";
 
 export interface FlashIntegrationDeps {
   statePath?: string;
@@ -46,13 +52,21 @@ export interface FlashSession {
  * aren't routable yet. A full rebuild each call means a detached device simply
  * disappears, so the map can never drift from what is attached. Exported for
  * unit testing without standing up the orchestrator/shim.
+ *
+ * The operator's per-device programmer choice is applied here, at the single
+ * point both the shim config and resolvePort read from, so "never" cannot be
+ * bypassed by one path while the other honours it.
  */
 export function projectSessions(
   sessions: ReadonlyArray<FlashSession>,
+  modes: ProgrammerModeMap = {},
 ): Map<string, ResolvedDevice> {
   const m = new Map<string, ResolvedDevice>();
   for (const s of sessions) {
-    if (s.com) m.set(s.com, { host: s.host, busId: s.busId });
+    if (!s.com) continue;
+    const mode = modeFor(modes, s.host, s.busId);
+    if (mode === "never") continue; // uses the IDE's original flasher
+    m.set(s.com, { host: s.host, busId: s.busId, mode });
   }
   return m;
 }
@@ -61,6 +75,8 @@ export class FlashIntegration {
   private registry = new Map<string, ResolvedDevice>(); // comPort -> device
   private shim: ShimManager;
   private server: ReturnType<typeof startShimOrchestrator>;
+  private sessions: ReadonlyArray<FlashSession> = [];
+  private modes: ProgrammerModeMap = {};
 
   constructor(deps: FlashIntegrationDeps) {
     const statePath =
@@ -85,8 +101,20 @@ export class FlashIntegration {
    * reroute yet). Safe to call on every session change.
    */
   syncSessions(sessions: ReadonlyArray<FlashSession>): void {
-    this.registry = projectSessions(sessions);
+    this.sessions = sessions;
+    this.registry = projectSessions(sessions, this.modes);
     this.refreshShims();
+  }
+
+  /** Adopt the persisted per-device programmer choices (startup) and re-project. */
+  setModes(modes: ProgrammerModeMap): void {
+    this.modes = modes;
+    this.registry = projectSessions(this.sessions, this.modes);
+    this.refreshShims();
+  }
+
+  modeOf(host: string, busId: string): ProgrammerMode {
+    return modeFor(this.modes, host, busId);
   }
 
   /** Current COM→busId map for the shim config. */

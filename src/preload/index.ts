@@ -222,6 +222,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("usb:launchInstaller") as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+
+    /**
+     * Qué programador usa cada USB al subir un sketch: "always" fuerza el shim
+     * (se programa junto al hardware), "never" deja pasar al flasher original
+     * del IDE, "auto" enruta cuando se conoce su COM. Mapa con clave
+     * `${host}|${busId}`; sólo aparecen las elecciones explícitas.
+     */
+    programmerModes: () =>
+      ipcRenderer.invoke("usb:programmerModes") as Promise<
+        Record<string, "auto" | "always" | "never">
+      >,
+
+    setProgrammerMode: (host: string, busId: string, mode: "auto" | "always" | "never") =>
+      ipcRenderer.invoke("usb:setProgrammerMode", host, busId, mode) as Promise<
+        { ok: true; mode: string } | { ok: false; error: string }
+      >,
   },
 
   net: {
