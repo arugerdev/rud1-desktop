@@ -83,6 +83,14 @@ import {
 import { usbAttach, usbDetachByBusId } from "./usb-manager";
 import { initFlashIntegration, type FlashIntegration } from "./flash-integration";
 import {
+  PROGRAMMER_MODE_FILENAME,
+  loadProgrammerModes,
+  saveProgrammerModes,
+  setMode as setProgrammerModeEntry,
+  type ProgrammerMode,
+  type ProgrammerModeMap,
+} from "./programmer-mode-store";
+import {
   isAutoUpdateEnabled,
   isRolloutForceEnabled,
   isSigStrictEnabled,
@@ -127,6 +135,8 @@ let dedupeFilepath: string | null = null;
 let usbSessions: AttachedUsbSession[] = [];
 let usbSessionFilepath: string | null = null;
 let flashIntegration: FlashIntegration | null = null;
+let programmerModeFilepath: string | null = null;
+let programmerModes: ProgrammerModeMap = {};
 let trayAttentionCount = 0;
 let versionCheckManager: VersionCheckManager | null = null;
 let lastVersionCheckState: VersionCheckState = { kind: "idle" };
@@ -1118,6 +1128,18 @@ app.whenReady().then(async () => {
       clearHost: (host) => clearNotifiedHost(host),
       clearAll: () => clearAllNotifiedHosts(),
     },
+    programmerMode: {
+      list: () => programmerModes,
+      set: async (host, busId, mode) => {
+        programmerModes = setProgrammerModeEntry(programmerModes, host, busId, mode);
+        // Reproyecta antes de persistir: el efecto en el shim es inmediato y no
+        // depende de que la escritura en disco haya terminado.
+        flashIntegration?.setModes(programmerModes);
+        if (programmerModeFilepath) {
+          await saveProgrammerModes(programmerModeFilepath, programmerModes);
+        }
+      },
+    },
     onPreferencesUpdated: (prefs) => {
       applyThemeFromPreference(prefs.theme);
       // Re-resolve the locale (the language preference may have changed)
@@ -1270,8 +1292,16 @@ app.whenReady().then(async () => {
   // value even if the config file drifted (hand-edit, deletion, prior failed
   // mirror write).
   mirrorAutoUpdateConfig(bootPrefs.autoUpdate);
+  programmerModeFilepath = path.join(app.getPath("userData"), PROGRAMMER_MODE_FILENAME);
+  void loadProgrammerModes(programmerModeFilepath).then((loaded) => {
+    programmerModes = loaded;
+    flashIntegration?.setModes(loaded);
+  });
   void loadUsbSessions(usbSessionFilepath, new Date()).then((loaded) => {
     usbSessions = loaded;
+    // Sin esto el mapa del shim arranca vacío y no se repuebla hasta el
+    // siguiente attach: las sesiones persistidas ya traen su COM.
+    flashIntegration?.syncSessions(usbSessions);
   });
   void loadNotifiedHosts(dedupeFilepath, new Date()).then((loaded) => {
     notifiedHosts = loaded;

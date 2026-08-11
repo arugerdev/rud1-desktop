@@ -18,6 +18,9 @@ const FW_PORT = 7070;
 export interface ResolvedDevice {
   host: string; // VPN-reachable device address
   busId: string; // e.g. "1-1.4"
+  /** Operator's programmer choice. "never" never reaches here (it is filtered
+   *  out of the map), so this is "auto" or "always". */
+  mode?: "auto" | "always";
 }
 
 export interface OrchestratorDeps {
@@ -72,7 +75,9 @@ async function fwFlash(
   return { rc: data.rc ?? 1, log: data.log ?? "" };
 }
 
-async function handleFlash(deps: OrchestratorDeps, job: ShimJob): Promise<{ handled: boolean; rc: number; log: string }> {
+/** Exported for unit tests: the passthrough-vs-fail decision is the contract
+ *  the operator's "always" choice depends on. */
+export async function handleFlash(deps: OrchestratorDeps, job: ShimJob): Promise<{ handled: boolean; rc: number; log: string }> {
   const dev = deps.resolvePort(job.comPort);
   if (!dev) {
     return { handled: false, rc: 0, log: "" }; // not a rud1 device → shim passes through
@@ -88,6 +93,14 @@ async function handleFlash(deps: OrchestratorDeps, job: ShimJob): Promise<{ hand
       files: job.files ?? {},
     });
     return { handled: true, rc, log };
+  } catch (err) {
+    // "always" = el operador ha pedido que este equipo se programe SIEMPRE
+    // junto al hardware. Devolver handled:false aquí haría que el shim cayera
+    // al flasher local, que es justo lo que pidió evitar: se reporta el fallo.
+    if (dev.mode === "always") {
+      return { handled: true, rc: 1, log: `rud1: flash remoto fallido: ${String(err)}` };
+    }
+    return { handled: false, rc: 0, log: "" };
   } finally {
     // Always restore the COM for the serial monitor / next upload.
     try {
