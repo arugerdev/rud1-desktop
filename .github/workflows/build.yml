@@ -36,6 +36,11 @@ jobs:
         shell: powershell
         run: npm run fetch:openvpn-win
 
+      # Modelo Vosk español (wake word de RIA). ~40 MB, sha256 verificado;
+      # como OpenVPN, se descarga en build y no se comitea.
+      - name: Fetch Vosk wake-word model
+        run: npm run fetch:vosk-model
+
       - name: Build Windows installer
         shell: powershell
         env:
@@ -73,6 +78,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Fetch Vosk wake-word model
+        run: npm run fetch:vosk-model
+
       - name: Build Linux artifacts
         run: npm run dist:linux
 
@@ -105,6 +113,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Fetch Vosk wake-word model
+        run: npm run fetch:vosk-model
 
       - name: Build macOS DMGs
         env:
