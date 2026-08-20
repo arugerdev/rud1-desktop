@@ -73,6 +73,14 @@ if ($SkipFetch) {
     throw "fetch-usbip-win.ps1 failed: $_"
   }
 
+  # ── 1c. Fetch Vosk wake-word model (RIA "Oye, RIA") ─────────────────────
+  Step "Fetching Vosk es model (idempotent)"
+  try {
+    node (Join-Path $ScriptDir "fetch-vosk-model.mjs")
+  } catch {
+    throw "fetch-vosk-model.mjs failed: $_"
+  }
+
 }
 
 # ── 1c. Generate app icons from rud1-es favicon ─────────────────────────────
