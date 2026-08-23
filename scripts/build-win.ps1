@@ -75,24 +75,10 @@ if ($SkipFetch) {
 
 }
 
-# ── 1c. Generate app icons from rud1-es favicon ─────────────────────────────
-# Idempotente: copia el .ico tal cual y re-renderiza el .png. Si el
-# operador no tiene Python instalado, dejamos que el build siga — los
-# iconos por defecto de Electron se usan como fallback.
-# ────────────────────────────────────────────────────────────────────────────
-# Step "Generating app icons (resources/icon.{ico,png})"
-# $icons = Join-Path $ScriptDir "generate-app-icons.py"
-# $python = Get-Command python -ErrorAction SilentlyContinue
-# if ($null -eq $python) {
-#   Warn2 "python no encontrado en PATH; saltando generate-app-icons.py."
-#   Warn2 "Instala Python 3 y Pillow (`pip install --user Pillow`) para empaquetar los iconos."
-# } else {
-#   try {
-#   & $python.Source $icons
-#   } catch {
-#     throw "generate-app-icons.py failed: $_"
-#   }
-# }
+# ── 1c. App icons ───────────────────────────────────────────────────────────
+# Ya no se generan aquí. resources/icon.{ico,png} y resources/tray/*.png
+# vienen del manual de marca y están en git, así que el build los coge tal
+# cual. Para refrescarlos cuando cambie el logo: resources/README.md.
 # ────────────────────────────────────────────────────────────────────────────
 
 # ── 2. tsc compile ──────────────────────────────────────────────────────────

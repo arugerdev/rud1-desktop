@@ -14,7 +14,7 @@
     "dist": "npm run build && electron-builder",
     "fetch:openvpn-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-openvpn-win.ps1",
     "fetch:usbip-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-usbip-win.ps1",
-    "icons:generate": "python scripts/generate-app-icons.py",
+    "icons:tray": "node scripts/generate-tray-icons.mjs",
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "dist:win:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1 -SkipFetch",
