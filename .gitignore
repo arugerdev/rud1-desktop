@@ -24,3 +24,7 @@ resources/win32/openvpn/*
 !resources/win32/openvpn/*.ps1
 resources/win32/openvpn/driver/*
 !resources/win32/openvpn/driver/.gitkeep
+
+# Modelo Vosk del wake word: se descarga en build (scripts/fetch-vosk-model.mjs),
+# ~40 MB que no pintan nada en git. Igual que el runtime de OpenVPN.
+resources/models/*.tar.gz

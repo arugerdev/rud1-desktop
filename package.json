@@ -1,6 +1,6 @@
 {
   "name": "rud1-desktop",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
   "main": "dist/main/index.js",
   "author": "rud1",
@@ -15,6 +15,7 @@
     "fetch:openvpn-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-openvpn-win.ps1",
     "fetch:usbip-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-usbip-win.ps1",
     "icons:tray": "node scripts/generate-tray-icons.mjs",
+    "fetch:vosk-model": "node scripts/fetch-vosk-model.mjs",
     "check:locks-win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-build-locks.ps1",
     "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "dist:win:ci": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-win.ps1 -SkipFetch",
@@ -67,6 +68,13 @@
           "filter": [
             "**/*"
           ]
+        },
+        {
+          "from": "resources/models",
+          "to": "models",
+          "filter": [
+            "*.tar.gz"
+          ]
         }
       ]
     },
@@ -102,6 +110,13 @@
           "filter": [
             "**/*"
           ]
+        },
+        {
+          "from": "resources/models",
+          "to": "models",
+          "filter": [
+            "*.tar.gz"
+          ]
         }
       ]
     },
@@ -129,6 +144,13 @@
           "to": "bin",
           "filter": [
             "**/*"
+          ]
+        },
+        {
+          "from": "resources/models",
+          "to": "models",
+          "filter": [
+            "*.tar.gz"
           ]
         }
       ]

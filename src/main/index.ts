@@ -81,6 +81,7 @@ import {
   type AttachedUsbSession,
 } from "./usb-session-state";
 import { usbAttach, usbDetachByBusId } from "./usb-manager";
+import { registerWakeModelHandlers } from "./wake-model";
 import { initFlashIntegration, type FlashIntegration } from "./flash-integration";
 import {
   PROGRAMMER_MODE_FILENAME,
@@ -1122,6 +1123,7 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
 
+  registerWakeModelHandlers();
   registerIpcHandlers({
     firstBootDedupe: {
       list: () => notifiedHosts,

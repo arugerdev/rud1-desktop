@@ -1175,4 +1175,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
         | { ok: false; error: string }
       >,
   },
+
+  // Wake word de RIA ("Oye, RIA") — Electron no trae el servicio de voz de
+  // Chrome, así que el panel corre Vosk (WASM) con el modelo español que
+  // empaqueta el instalador. Aquí solo viajan los bytes del modelo.
+  wakeWord: {
+    available: () => ipcRenderer.invoke("wake:available") as Promise<boolean>,
+    /** tar.gz del modelo (~40 MB, una vez por sesión) o null si no está. */
+    getModel: () => ipcRenderer.invoke("wake:get-model") as Promise<Uint8Array | null>,
+  },
 });
