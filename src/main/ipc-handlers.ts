@@ -30,7 +30,7 @@ import {
   type VpnHealthChangeEvent,
 } from "./vpn-health-monitor";
 import {
-  usbAttach,
+  usbAttachEx,
   usbDetach,
   usbDetachAll,
   usbDetachByBusId,
@@ -167,6 +167,7 @@ export interface UpdaterDialogAccessor {
 export interface UsbSessionStateAccessor {
   recordAttach: (entry: {
     host: string;
+    fallbackHost?: string;
     busId: string;
     label?: string;
     port?: number;
@@ -796,25 +797,39 @@ export function registerIpcHandlers(opts: {
 
   ipcMain.handle(
     "usb:attach",
-    async (event, host: string, busId: string, label?: string) => {
+    async (
+      event,
+      host: string,
+      busId: string,
+      label?: string,
+      attachOpts?: { fallbackHost?: string | null },
+    ) => {
       if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
       try {
         // Snapshot COM ports BEFORE the attach so we can diff out the one it
         // creates. Empty/instant on non-Windows.
         const comBefore = await listComPorts();
-        const port = await usbAttach(host, busId);
+        const fallbackHost = attachOpts?.fallbackHost ?? null;
+        const attached = await usbAttachEx(host, busId, { fallbackHost });
+        const port = attached.port;
+        // The session keeps the address that answered (mgmt or legacy) so the
+        // flasher shim and the post-reconnect reattach dial the same one.
+        const sessionHost = attached.host;
+        const sessionFallback = [host, fallbackHost].find((h) => h && h !== sessionHost) ?? undefined;
         rememberUsbLabel(port, label);
         notifyUsbAttached(label ?? null, busId);
         const sessionState = opts.usbSessionState;
         if (sessionState) {
-          await sessionState.recordAttach({ host, busId, label, port }).catch(() => undefined);
+          await sessionState
+            .recordAttach({ host: sessionHost, fallbackHost: sessionFallback, busId, label, port })
+            .catch(() => undefined);
           // Capture the COM the attach exposed and register it for the flasher
           // shim, off the critical path — COM enumeration settles ~4s and must
           // not delay the IPC reply.
           if (sessionState.recordComPort) {
             void captureComPort(comBefore)
               .then((com) =>
-                com ? sessionState.recordComPort!({ host, busId, com }) : undefined,
+                com ? sessionState.recordComPort!({ host: sessionHost, busId, com }) : undefined,
               )
               .catch(() => undefined);
           }

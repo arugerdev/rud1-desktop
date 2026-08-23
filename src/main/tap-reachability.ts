@@ -70,9 +70,17 @@ export interface TapReachabilityDiag {
  *     tunnel doesn't carry).
  *   • routable host + adapter routable in a DIFFERENT subnet.
  */
+export interface TapReachabilityOptions {
+  /** The desktop pinned an on-link /32 route to `host` on the adapter (mgmt-route.ts). */
+  onLinkRouteEnsured?: boolean;
+  /** Adapter IPv4 already read by the caller (skips the netsh round-trip). */
+  adapterIp?: string | null;
+}
+
 export async function diagnoseTapReachability(
   host: string,
   adapterName: string,
+  opts: TapReachabilityOptions = {},
 ): Promise<TapReachabilityDiag> {
   if (process.platform !== "win32") {
     return { likelyReachable: true, reason: "non-windows", adapterIp: null };
@@ -82,11 +90,14 @@ export async function diagnoseTapReachability(
     // on-link subnets, so don't flag it.
     return { likelyReachable: true, reason: "host-not-ipv4", adapterIp: null };
   }
-  const current = await readAdapterIpV4(adapterName);
+  const current = opts.adapterIp !== undefined ? opts.adapterIp : await readAdapterIpV4(adapterName);
 
   if (isApipa(host)) {
     if (!current || isApipa(current)) {
       return { likelyReachable: true, reason: "link-local-both-169254", adapterIp: current };
+    }
+    if (opts.onLinkRouteEnsured) {
+      return { likelyReachable: true, reason: "link-local-host-via-route", adapterIp: current };
     }
     return {
       likelyReachable: false,

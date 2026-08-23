@@ -45,6 +45,8 @@ import {
   validatePort,
   usbAttach,
   usbDetach,
+  planAttachTargets,
+  isConnectivityError,
   __test,
 } from "./usb-manager";
 
@@ -424,4 +426,30 @@ describe("usbAttach / usbDetach / usbList — happy paths", () => {
     "usbList returns parsed AttachedDevice rows from `usbip port` stdout " +
       "(skipped: parseUsbipPort is exercised directly via raw fixtures)",
   );
+});
+
+describe("planAttachTargets", () => {
+  it("dials the requested host first and the fallback second", () => {
+    expect(planAttachTargets("169.254.0.77", "192.168.0.10")).toEqual(["169.254.0.77", "192.168.0.10"]);
+  });
+  it("never dials the same address twice and tolerates a missing fallback", () => {
+    expect(planAttachTargets("192.168.0.10", "192.168.0.10")).toEqual(["192.168.0.10"]);
+    expect(planAttachTargets("192.168.0.10", null)).toEqual(["192.168.0.10"]);
+    expect(planAttachTargets("192.168.0.10")).toEqual(["192.168.0.10"]);
+  });
+});
+
+describe("isConnectivityError", () => {
+  it("recognises 'the address did not answer' outcomes", () => {
+    expect(isConnectivityError("connect: connection timed out")).toBe(true);
+    expect(isConnectivityError("usbip: error: failed to connect to 169.254.0.77:3240 (10060)")).toBe(true);
+    expect(isConnectivityError("Se produjo un error durante el intento de conexión ya que la parte conectada no respondió adecuadamente")).toBe(true);
+    expect(isConnectivityError("TypeError: fetch failed")).toBe(true);
+    expect(isConnectivityError("No route to host")).toBe(true);
+  });
+  it("treats policy/driver/bus-id errors as final", () => {
+    expect(isConnectivityError("Rud1 refused USB bind: this client is not in the device's authorized_nets")).toBe(false);
+    expect(isConnectivityError("Rud1 rejected USB bind for 1-1.4 (HTTP 404)")).toBe(false);
+    expect(isConnectivityError("usbip: error: open vhci_driver (is vhci_hcd loaded?)")).toBe(false);
+  });
 });

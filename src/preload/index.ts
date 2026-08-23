@@ -150,6 +150,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   usb: {
     /**
+     * Feature flags the web UI checks before changing how it calls us.
+     * `mgmtRoute`: this build dials the device's management address
+     * (169.254.0.x) and pins the on-link route itself, so the renderer may
+     * pass `deviceMgmtIP` as host with the legacy IP as `fallbackHost`.
+     */
+    capabilities: { mgmtRoute: true } as const,
+
+    /**
      * Attach a remote USB device. The optional `label` is forwarded to
      * the OS notification so the toast reads "SanDisk Cruzer attached"
      * instead of "USB 1-1.4 attached" — the renderer assembles the
@@ -160,8 +168,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
      * `usbipMissing: true` + the absolute path to the bundled
      * installer so the renderer can offer a one-click Install CTA.
      */
-    attach: (host: string, busId: string, label?: string) =>
-      ipcRenderer.invoke("usb:attach", host, busId, label) as Promise<{
+    attach: (
+      host: string,
+      busId: string,
+      label?: string,
+      opts?: { fallbackHost?: string | null },
+    ) =>
+      ipcRenderer.invoke("usb:attach", host, busId, label, opts) as Promise<{
         ok: boolean;
         port?: number;
         error?: string;

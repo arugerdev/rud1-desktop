@@ -18,6 +18,8 @@
  */
 
 import { spawn, ChildProcess, execFile } from "child_process";
+
+import { removeTrackedRoutes } from "./mgmt-route";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
@@ -893,6 +895,9 @@ export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
       lastConnectedAt,
       Date.now(),
     );
+    // Management-address host routes only make sense while this tunnel is
+    // up; drop them before the adapter goes away (best-effort).
+    await removeTrackedRoutes().catch(() => undefined);
     await killRunning();
     lastDisconnectedAt = Date.now();
     lastOvpnConfig = null;
