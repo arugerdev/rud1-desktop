@@ -1,0 +1,3 @@
+macOS: iconutil -c icns rud1.iconset
+Windows: usa rud1-windows.ico
+Linux: usa los PNG de favicon/ en hicolor.
