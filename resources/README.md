@@ -51,6 +51,40 @@ need a system `openvpn` on PATH. `binary-helper.ts` resolves both via PATH.
 `openvpn` is NOT bundled on macOS — install via `brew install openvpn`;
 `binary-helper.ts` resolves it via PATH. `usbip` is a Homebrew/source fallback.
 
+## App icons
+
+| File | Used by | Source in the brand kit |
+|------|---------|-------------------------|
+| `icon.ico` | Windows EXE + NSIS installer (`win.icon`) | `03-iconos/app-escritorio/rud1-windows.ico` |
+| `icon.png` | Linux deb/AppImage (`linux.icon`), 512×512 | `03-iconos/app-escritorio/rud1.iconset/icon_512x512.png` |
+| `rud1.iconset/` | macOS, to build the `.icns` | `03-iconos/app-escritorio/rud1.iconset/` |
+| `tray/tray-*.png` | System tray (`src/main/tray.ts`) | derived from `icon.png` — see below |
+
+These are committed to git and the build uses them as-is. Nothing is generated
+at build time, so an operator without Python or an image toolchain still gets
+the right icons.
+
+**To refresh them after a logo change**, copy the two files from the brand kit
+and re-derive the tray icons:
+
+```bash
+cp brand/03-iconos/app-escritorio/rud1-windows.ico                   resources/icon.ico
+cp brand/03-iconos/app-escritorio/rud1.iconset/icon_512x512.png      resources/icon.png
+cp -r brand/03-iconos/app-escritorio/rud1.iconset                    resources/
+npm run icons:tray
+```
+
+`npm run icons:tray` reads `resources/icon.png` and writes the four tray PNGs
+(16/32 px, normal and with the amber "attention" badge). It has no
+dependencies — it decodes and encodes PNG with `node:zlib` — and it is
+deterministic, so re-running it produces byte-identical files.
+
+macOS needs an `.icns`, which can only be built on a Mac:
+
+```bash
+iconutil -c icns resources/rud1.iconset -o build/icon.icns
+```
+
 ## Notes
 
 - On Linux, VPN operations require `CAP_NET_ADMIN` or running as root.
