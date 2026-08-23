@@ -37,7 +37,7 @@ function buildLinuxDesktopEntry(execPath: string): string {
     "[Desktop Entry]",
     "Type=Application",
     `Name=${APP_NAME}`,
-    "Comment=rud1 desktop — remote device management with VPN and USB/IP",
+    "Comment=Rud1",
     `Exec=${safeExec} --autostart`,
     "Terminal=false",
     "Hidden=false",

@@ -1,7 +1,7 @@
 {
   "name": "rud1-desktop",
-  "version": "0.3.0",
-  "description": "rud1 Desktop — remote device management with VPN and USB/IP connectivity",
+  "version": "0.3.1",
+  "description": "Rud1",
   "main": "dist/main/index.js",
   "author": "rud1",
   "license": "Freeware",
