@@ -261,6 +261,31 @@ const SIG_VERIFY_ENV = "RUD1_DESKTOP_SIG_VERIFY";
 // doesn't require a code change to rotate keys; iter 50+ may move
 // to a key registry once rotation becomes a real workflow.
 const SIG_PUBKEY_ENV = "RUD1_DESKTOP_SIG_PUBKEY";
+
+// A-20 — clave del publicador HORNEADA en la build.
+//
+// Con la clave solo en una variable de entorno, una build de fábrica no
+// verificaba nada: quien controlara el manifiesto (o su DNS, o un MITM con una
+// CA de confianza) conseguía ejecución de código sin que nadie tuviera que
+// hacer clic. Aquí es donde el instalador que se distribuye lleva su ancla de
+// confianza.
+//
+// El sustituto lo escribe el empaquetado; vacío = build sin firma, que se
+// comporta exactamente como hasta ahora. Es lo que hace que activar la
+// verificación sea hornear una clave y no otro cambio de código.
+const BUILD_SIG_PUBKEY = process.env.RUD1_DESKTOP_SIG_PUBKEY_BAKED ?? "";
+
+/** Clave efectiva: la del entorno pisa a la horneada (rotación sin rebuild). */
+function rawSigPubkey(env: NodeJS.ProcessEnv): string {
+  const fromEnv = env[SIG_PUBKEY_ENV];
+  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return fromEnv;
+  return BUILD_SIG_PUBKEY;
+}
+
+/** ¿Lleva esta build una clave con la que poder verificar? */
+export function hasBakedSigPubkey(env?: NodeJS.ProcessEnv): boolean {
+  return parseSigPubkey(env ?? process.env) != null;
+}
 // Iter 48 — per-fetch timeout for the .sig HEAD/GET. Short enough that
 // a stuck CDN doesn't block the operator's "Restart to install" click
 // for more than a few seconds; long enough that a slow phone tether
@@ -502,6 +527,9 @@ export function isSigStrictEnabled(opts: {
   const a = opts.appOverride ?? deps.app ?? electronApp;
   const fileSystem = opts.fileSystem ?? deps.fileSystem ?? fs;
   if (env[SIG_STRICT_ENV] === "1") return true;
+  // A-20: si la build lleva clave del publicador, se verifica por defecto.
+  // Apagarlo pasa a ser una decisión explícita (=0), no el estado de fábrica.
+  if (env[SIG_STRICT_ENV] !== "0" && hasBakedSigPubkey(env)) return true;
   if (!a) return false;
   const cfg = readPersistedConfigSigStrict(() => a.getPath("userData"), fileSystem);
   return cfg.sigStrict === true;
@@ -572,6 +600,10 @@ export function isSigVerifyEnabled(opts: {
   const a = opts.appOverride ?? deps.app ?? electronApp;
   const fileSystem = opts.fileSystem ?? deps.fileSystem ?? fs;
   if (env[SIG_VERIFY_ENV] === "1") return true;
+  // Con clave horneada, verificar la firma es el comportamiento de fábrica:
+  // comprobar que el fichero EXISTE sin comprobar que es válido no protege
+  // de nada.
+  if (env[SIG_VERIFY_ENV] !== "0" && hasBakedSigPubkey(env)) return true;
   if (!a) return false;
   const cfg = readPersistedConfigSigVerify(() => a.getPath("userData"), fileSystem);
   return cfg.sigVerify === true;
@@ -621,7 +653,7 @@ export function parseSigPubkey(
   env?: NodeJS.ProcessEnv,
 ): { keyId: Buffer; pubkey: Buffer } | null {
   const e = env ?? process.env;
-  const raw = e[SIG_PUBKEY_ENV];
+  const raw = rawSigPubkey(e);
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
@@ -893,6 +925,8 @@ export const __test = {
   isSigVerifyEnabled,
   readPersistedConfigSigVerify,
   parseSigPubkey,
+  // A-20 — la clave horneada es la que decide si se verifica de fabrica.
+  hasBakedSigPubkey,
   setStateForTesting: (s: AutoUpdateState) => { state = s; },
   resetStateForTesting: () => { state = { kind: "idle" }; listeners = []; deps = {}; },
 };
