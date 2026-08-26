@@ -66,7 +66,9 @@ const {
   SIG_FETCH_TIMEOUT_ENV,
   SIG_FETCH_TIMEOUT_DEFAULT_MS,
   SIG_FETCH_TIMEOUT_MAX_MS,
+  hasBakedSigPubkey,
   isSigStrictEnabled,
+  isSigVerifyEnabled,
   parseSigFetchTimeoutMs,
   setStateForTesting,
   resetStateForTesting,
@@ -1013,5 +1015,42 @@ describe("parseSigFetchTimeoutMs (iter 48)", () => {
     expect(parseSigFetchTimeoutMs({ [SIG_FETCH_TIMEOUT_ENV]: "60000" })).toBe(
       SIG_FETCH_TIMEOUT_MAX_MS,
     );
+  });
+});
+
+// Clave minisign bien formada: 0x4564 (algo) + keyId(8) + ed25519(32) = 42 bytes.
+const VALID_PUBKEY_B64 = "RWQCAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygp";
+
+describe("A-20 — clave del publicador horneada en la build", () => {
+  it("sin clave, la verificación sigue apagada (build de hoy, sin cambio)", () => {
+    expect(hasBakedSigPubkey({})).toBe(false);
+    expect(isSigStrictEnabled({ env: {}, appOverride: undefined })).toBe(false);
+    expect(isSigVerifyEnabled({ env: {} })).toBe(false);
+  });
+
+  // La clave horneada llega por el mismo lector que la del entorno, así que
+  // basta una válida para comprobar que enciende ambos modos sola.
+  it("con clave válida, verificar es el comportamiento de fábrica", () => {
+    const env = { RUD1_DESKTOP_SIG_PUBKEY: VALID_PUBKEY_B64 };
+    expect(hasBakedSigPubkey(env)).toBe(true);
+    expect(isSigStrictEnabled({ env, appOverride: undefined })).toBe(true);
+    expect(isSigVerifyEnabled({ env })).toBe(true);
+  });
+
+  // Apagarlo tiene que ser una decisión explícita, no el estado por defecto.
+  it('"0" apaga la verificación aunque haya clave', () => {
+    const env = {
+      RUD1_DESKTOP_SIG_PUBKEY: VALID_PUBKEY_B64,
+      RUD1_DESKTOP_SIG_STRICT: "0",
+      RUD1_DESKTOP_SIG_VERIFY: "0",
+    };
+    expect(isSigStrictEnabled({ env, appOverride: undefined })).toBe(false);
+    expect(isSigVerifyEnabled({ env })).toBe(false);
+  });
+
+  it("una clave malformada no cuenta como clave", () => {
+    for (const raw of ["", "   ", "no-base64!!", "aGVsbG8="]) {
+      expect(hasBakedSigPubkey({ RUD1_DESKTOP_SIG_PUBKEY: raw })).toBe(false);
+    }
   });
 });

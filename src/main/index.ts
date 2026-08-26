@@ -283,33 +283,7 @@ function rebuildTrayMenu(): void {
       openExternal: (u) => { void shell.openExternal(u); },
       recheck: () => { void versionCheckManager?.checkOnce(); },
       startDownload: (u, sha) => {
-        if (!isSigStrictEnabled()) {
-          void startBackgroundDownload(u, { sha256: sha });
-          return;
-        }
-        void (async () => {
-          const verifyEnabled = isSigVerifyEnabled();
-          const parsedPub = verifyEnabled ? parseSigPubkey() : null;
-          const signedData =
-            typeof lastManifestSha256 === "string" && lastManifestSha256.length > 0
-              ? Buffer.from(lastManifestSha256, "utf8")
-              : null;
-          const gated = await applySignatureFetchGate(lastVersionCheckState, {
-            manifestUrl: VERSION_MANIFEST_URL,
-            fetchTimeoutMs: parseSigFetchTimeoutMs(),
-            verifyEnabled,
-            verifyPubkey: parsedPub != null ? parsedPub.pubkey : null,
-            verifySignedData: signedData,
-            manifestVersion: lastManifestVersion,
-          });
-          if (gated.kind === "update-blocked-by-signature-fetch") {
-            lastVersionCheckState = gated;
-            rebuildTrayMenu();
-            broadcastVersionCheckUpdate(gated);
-            return;
-          }
-          void startBackgroundDownload(u, { sha256: sha });
-        })();
+        void startGatedDownload(u, sha);
       },
       applyAndRestart: () => { void applyAndRestart(); },
       resetAutoUpdate: () => { resetAutoUpdateState(); },
@@ -903,6 +877,51 @@ function showUpdateDialog(): void {
   });
 }
 
+/**
+ * Única puerta de entrada a la descarga de una actualización (A-20).
+ *
+ * La comprobación de firma vivía SOLO en el menú de la bandeja, así que el
+ * camino de verdad —el diálogo de arranque, que además se dispara solo cuando
+ * la actualización automática está activada— aplicaba sin verificar nada.
+ * Quien controlara el manifiesto conseguía ejecución de código desatendida.
+ *
+ * Con la verificación apagada esto es exactamente lo de antes, byte por byte.
+ * Con clave del publicador horneada en la build, ningún camino se la salta.
+ */
+async function startGatedDownload(
+  url: string,
+  sha?: string | null,
+): Promise<void> {
+  if (!isSigStrictEnabled()) {
+    startBackgroundDownload(url, { sha256: sha });
+    return;
+  }
+  const verifyEnabled = isSigVerifyEnabled();
+  const parsedPub = verifyEnabled ? parseSigPubkey() : null;
+  const signedData =
+    typeof lastManifestSha256 === "string" && lastManifestSha256.length > 0
+      ? Buffer.from(lastManifestSha256, "utf8")
+      : null;
+  const gated = await applySignatureFetchGate(lastVersionCheckState, {
+    manifestUrl: VERSION_MANIFEST_URL,
+    fetchTimeoutMs: parseSigFetchTimeoutMs(),
+    verifyEnabled,
+    verifyPubkey: parsedPub != null ? parsedPub.pubkey : null,
+    verifySignedData: signedData,
+    manifestVersion: lastManifestVersion,
+  });
+  if (gated.kind === "update-blocked-by-signature-fetch") {
+    // Se queda bloqueado y VISIBLE: una actualización que no verifica tiene
+    // que notarse, no caerse en silencio a «no hay nada nuevo».
+    lastVersionCheckState = gated;
+    rebuildTrayMenu();
+    broadcastVersionCheckUpdate(gated);
+    broadcastUpdaterState();
+    return;
+  }
+  startBackgroundDownload(url, { sha256: sha });
+}
+
 function closeUpdateDialogAndShowMain(): void {
   const w = updateDialogWindow;
   updateDialogWindow = null;
@@ -930,9 +949,10 @@ function startUpdateDownload(): void {
     void shell.openExternal(ext);
     return;
   }
-  // Sig-strict (opt-in, off by default) keeps its dedicated gate on the tray
-  // path; the dialog download is the plain artifact fetch.
-  void startBackgroundDownload(url, { sha256: lastManifestSha256 });
+  // Mismo camino que la bandeja: el diálogo es el que se dispara solo al
+  // arrancar con la actualización automática puesta, así que es JUSTO el que
+  // no podía saltarse la firma.
+  void startGatedDownload(url, lastManifestSha256);
   broadcastUpdaterState();
 }
 
