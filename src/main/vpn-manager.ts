@@ -109,6 +109,14 @@ export interface VpnStatusResult {
   handshakeStatus: VpnHandshakeStatus | null;
   /** ms since the last successful handshake (or last keepalive ping). */
   handshakeAgeMs: number | null;
+  /**
+   * Por qué se bajó el túnel la última vez, cuando no lo pidió el técnico.
+   * El panel lo lee para explicar una desconexión que él no ha provocado, y
+   * sigue ahí aunque recargue la página: el aviso no se puede perder.
+   */
+  lastDropReason: "tunnel-lost" | "peer-lost" | null;
+  /** Equipo que dejó de responder, cuando el motivo es `peer-lost`. */
+  lastDropDeviceName: string | null;
 }
 
 export interface VpnDisconnectResult {
@@ -153,6 +161,8 @@ let running: RunningProc | null = null;
 let lastConnectedAt: number | null = null;
 let lastDisconnectedAt: number | null = null;
 let lastOvpnConfig: string | null = null;
+let lastDropReason: "tunnel-lost" | "peer-lost" | null = null;
+let lastDropDeviceName: string | null = null;
 
 // ─── Validators ───────────────────────────────────────────────────────────────
 
@@ -702,6 +712,9 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   if (typeof ovpnConfig !== "string" || ovpnConfig.length === 0) {
     throw new Error("invalid .ovpn config");
   }
+  // Sesión nueva: el motivo de la caída anterior deja de aplicar.
+  lastDropReason = null;
+  lastDropDeviceName = null;
   if (!isBinaryAvailable("openvpn")) {
     throw new OpenVpnMissingError();
   }
@@ -914,7 +927,27 @@ export async function vpnStatus(): Promise<VpnStatusResult> {
     tunnelUptimeMs: computeTunnelUptimeMs(connected, lastConnectedAt, now),
     handshakeStatus,
     handshakeAgeMs,
+    lastDropReason,
+    lastDropDeviceName,
   };
+}
+
+/** Marca que el túnel se cayó solo (reintentos agotados), no que se pidió. */
+export function markTunnelLost(): void {
+  lastDropReason = "tunnel-lost";
+  lastDropDeviceName = null;
+}
+
+/** Marca que se cortó porque el equipo del otro lado dejó de responder. */
+export function markPeerLost(deviceName?: string): void {
+  lastDropReason = "peer-lost";
+  lastDropDeviceName = deviceName?.trim() || null;
+}
+
+/** Lo limpia el siguiente connect y también el "entendido" del panel. */
+export function clearDropReason(): void {
+  lastDropReason = null;
+  lastDropDeviceName = null;
 }
 
 /**

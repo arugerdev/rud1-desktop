@@ -122,6 +122,29 @@ export function notifyVpnDisconnected(
   );
 }
 
+/**
+ * El equipo del otro lado dejó de dar señales y se ha cortado el túnel por él.
+ * Va como error y no como info: el técnico no lo ha pedido, y creerse conectado
+ * a un equipo apagado es peor que quedarse fuera.
+ */
+export function notifyVpnPeerLost(deviceName?: string) {
+  const name = deviceName?.trim() || t("notifications.deviceFallback");
+  show(
+    t("notifications.vpnPeerLostTitle"),
+    t("notifications.vpnPeerLostBody", { name }),
+    { kind: "error", category: "vpn", autoDismissMs: 12_000 },
+  );
+}
+
+/** Se agotaron los reintentos de reconexión y el túnel se ha bajado. */
+export function notifyVpnGaveUp() {
+  show(
+    t("notifications.vpnGaveUpTitle"),
+    t("notifications.vpnGaveUpBody"),
+    { kind: "error", category: "vpn", autoDismissMs: 12_000 },
+  );
+}
+
 /** Used when the bridge surfaces a structured failure rather than a
  *  successful state transition. */
 export function notifyVpnError(message: string) {
