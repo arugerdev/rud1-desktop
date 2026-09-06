@@ -39,7 +39,12 @@ export function formatTrayTooltip(count: number): string {
   return t("tray.tooltipManyDevices", { count: n });
 }
 
-export type TrayVpnHealth = "unknown" | "up" | "down" | "recovering";
+export type TrayVpnHealth =
+  | "unknown"
+  | "up"
+  | "down"
+  | "recovering"
+  | "gave-up";
 
 export function formatTrayTooltipWithVpn(
   count: number,
@@ -48,6 +53,7 @@ export function formatTrayTooltipWithVpn(
   const base = formatTrayTooltip(count);
   if (vpn === "down") return `${base} — ${t("tray.vpnDown")}`;
   if (vpn === "recovering") return `${base} — ${t("tray.vpnRecovering")}`;
+  if (vpn === "gave-up") return `${base} — ${t("tray.vpnGaveUp")}`;
   return base;
 }
 

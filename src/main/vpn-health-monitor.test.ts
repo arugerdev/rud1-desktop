@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  MAX_RECONNECT_ATTEMPTS,
   STALE_THRESHOLD_MS,
   VpnHealthMonitor,
   parseHandshakeSnapshot,
@@ -346,5 +347,68 @@ describe("VpnHealthMonitor.onHealthChange transitions", () => {
     });
     await monitor.tick();
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+// Reintentar en silencio para siempre dejaba al técnico creyendo que trabajaba
+// sobre un túnel muerto: al agotar los intentos se baja y se le dice.
+describe("rendición tras agotar los reintentos", () => {
+  function makeGiveUpMonitor(giveUp: () => void, events: VpnHealthChangeEvent[]) {
+    let clock = 1_000_000;
+    const monitor = new VpnHealthMonitor({
+      fetchSnapshot: async () => ({ kind: "stale", handshakeAgeMs: 9 * 60_000 }),
+      // Reconecta "bien" pero el handshake nunca vuelve: es el caso que
+      // estiraba el backoff hasta el infinito.
+      reconnect: async () => undefined,
+      enabled: () => true,
+      onHealthChange: (e) => events.push(e),
+      giveUp,
+      now: () => clock,
+    });
+    const advance = (ms: number) => {
+      clock += ms;
+    };
+    return { monitor, advance };
+  }
+
+  it("corta el túnel al tercer intento fallido y deja de intentarlo", async () => {
+    const events: VpnHealthChangeEvent[] = [];
+    const giveUp = vi.fn();
+    const { monitor, advance } = makeGiveUpMonitor(giveUp, events);
+
+    // Tres intentos, cada uno pasado su cooldown (20 s, 40 s, 80 s).
+    await monitor.tick();
+    advance(10 * 60_000);
+    await monitor.tick();
+    advance(10 * 60_000);
+    await monitor.tick();
+    expect(giveUp).not.toHaveBeenCalled();
+    expect(monitor.getConsecutiveFailures()).toBe(MAX_RECONNECT_ATTEMPTS);
+
+    advance(10 * 60_000);
+    await monitor.tick();
+    expect(giveUp).toHaveBeenCalledTimes(1);
+    expect(monitor.getLastHealth()).toBe("gave-up");
+
+    // Y ya no vuelve a intentarlo por su cuenta.
+    advance(10 * 60_000);
+    await monitor.tick();
+    expect(giveUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("start() borra la cuenta: la sesión siguiente no hereda la rendición", async () => {
+    const events: VpnHealthChangeEvent[] = [];
+    const giveUp = vi.fn();
+    const { monitor, advance } = makeGiveUpMonitor(giveUp, events);
+    for (let i = 0; i < 4; i++) {
+      await monitor.tick();
+      advance(10 * 60_000);
+    }
+    expect(giveUp).toHaveBeenCalledTimes(1);
+
+    monitor.start();
+    expect(monitor.getConsecutiveFailures()).toBe(0);
+    expect(monitor.getLastHealth()).toBe("unknown");
+    monitor.stop();
   });
 });

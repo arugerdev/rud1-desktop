@@ -7,6 +7,13 @@ export const RECONNECT_GRACE_MS = 45_000;
 
 export const RECONNECT_COOLDOWN_MS = RECONNECT_COOLDOWN_MS_INITIAL;
 
+/**
+ * Reintentos antes de rendirse. Reintentar en silencio para siempre deja al
+ * técnico creyendo que trabaja sobre un túnel que ya no existe; al agotarlos se
+ * baja el túnel y se le dice.
+ */
+export const MAX_RECONNECT_ATTEMPTS = 3;
+
 // Cooldown duplica por intento; cap a 5min.
 export function nextCooldownMs(consecutiveFailures: number): number {
   if (consecutiveFailures <= 0) return RECONNECT_COOLDOWN_MS_INITIAL;
@@ -103,8 +110,10 @@ export function parseHandshakeSnapshot(
  *                   while the monitor thought it was healthy.
  *   "recovering"  → reconnect attempted but no fresh handshake yet.
  *   "up"          → fresh handshake observed after a previous down/recovering.
+ *   "gave-up"     → se agotaron los reintentos; el monitor para y el túnel
+ *                   se baja. Estado final hasta el siguiente connect.
  */
-export type VpnHealthTransition = "down" | "recovering" | "up";
+export type VpnHealthTransition = "down" | "recovering" | "up" | "gave-up";
 
 export interface VpnHealthChangeEvent {
   transition: VpnHealthTransition;
@@ -144,6 +153,14 @@ export interface MonitorDeps {
    * legacy entry points) keep the same behaviour when this is omitted.
    */
   onHealthChange?: (event: VpnHealthChangeEvent) => void;
+  /**
+   * Se llama UNA vez, al agotar los reintentos: baja el túnel y avisa. Sin él
+   * el monitor sólo para de reintentar (comportamiento anterior menos el
+   * bucle infinito).
+   */
+  giveUp?: () => Promise<void> | void;
+  /** Override del tope de reintentos — para tests. */
+  maxReconnectAttempts?: number;
 }
 
 export class VpnHealthMonitor {
@@ -166,6 +183,9 @@ export class VpnHealthMonitor {
   // emits something concrete (up/down/recovering) so consumers can
   // paint their initial banner without waiting for a real transition.
   private lastHealth: "unknown" | VpnHealthTransition = "unknown";
+  // Rendirse es terminal: sin esto cada tick posterior volvía a bajar el túnel
+  // y a soltar otro aviso.
+  private gaveUp = false;
   private readonly deps: MonitorDeps;
 
   constructor(deps: MonitorDeps) {
@@ -174,6 +194,15 @@ export class VpnHealthMonitor {
 
   start(): void {
     if (this.timer) return;
+    // Sesión nueva, cuenta nueva: sin esto, un monitor que se rindió arrastra
+    // sus 3 fallos y se vuelve a rendir en el primer tick del túnel siguiente,
+    // cuando todavía no ha dado tiempo al primer handshake.
+    this.consecutiveFailures = 0;
+    this.lastReconnectAt = 0;
+    this.reconnectInFlight = false;
+    this.lastHealth = "unknown";
+    this.lastDiagnostic = "";
+    this.gaveUp = false;
     const interval = this.deps.pollIntervalMs ?? POLL_INTERVAL_MS;
     this.timer = setInterval(() => {
       void this.tick();
@@ -201,6 +230,7 @@ export class VpnHealthMonitor {
 
   /** Force one tick — exposed for tests; not called from production. */
   async tick(): Promise<void> {
+    if (this.gaveUp) return;
     if (!this.deps.enabled()) return;
     let snapshot: HandshakeSnapshot;
     try {
@@ -230,6 +260,22 @@ export class VpnHealthMonitor {
     // soon as we observe the stale signal, not after a 20-30 s
     // reconnect attempt completes.
     this.maybeEmitTransition(snapshot, now);
+
+    // Reintentos agotados: se para aquí. Seguir intentando en silencio deja al
+    // técnico trabajando contra un túnel que no va a volver.
+    const maxAttempts = this.deps.maxReconnectAttempts ?? MAX_RECONNECT_ATTEMPTS;
+    if (snapshot.kind !== "fresh" && this.consecutiveFailures >= maxAttempts) {
+      this.lastDiagnostic = `Sin conexión tras ${this.consecutiveFailures} intentos`;
+      this.gaveUp = true;
+      this.stop();
+      this.emitTransition("gave-up", snapshot, now);
+      try {
+        await this.deps.giveUp?.();
+      } catch {
+        // El aviso ya salió; que falle el corte no puede tumbar el monitor.
+      }
+      return;
+    }
 
     const fire = shouldReconnect({
       snapshot,

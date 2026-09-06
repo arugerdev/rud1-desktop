@@ -30,8 +30,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
         openvpnMissing?: boolean;
       }>,
 
-    disconnect: () =>
-      ipcRenderer.invoke("vpn:disconnect") as Promise<{ ok: boolean; error?: string }>,
+    /**
+     * Baja el túnel. `reason` sólo cambia el aviso del sistema: sin él es una
+     * desconexión pedida por el técnico; con `peer-lost` es que el equipo dejó
+     * de responder y se ha cortado por él.
+     */
+    disconnect: (reason?: { kind: "peer-lost"; deviceName?: string }) =>
+      ipcRenderer.invoke("vpn:disconnect", reason) as Promise<{
+        ok: boolean;
+        error?: string;
+      }>,
 
     status: () =>
       ipcRenderer.invoke("vpn:status") as Promise<{
@@ -50,7 +58,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
           | "stale"
           | null;
         handshakeAgeMs: number | null;
+        /** Motivo de una caída que el técnico no pidió; null si no la hubo. */
+        lastDropReason?: "tunnel-lost" | "peer-lost" | null;
+        /** Equipo que dejó de responder, cuando el motivo es `peer-lost`. */
+        lastDropDeviceName?: string | null;
       }>,
+
+    /** Marca como leído el motivo de la última caída del túnel. */
+    ackDrop: () =>
+      ipcRenderer.invoke("vpn:ackDrop") as Promise<{ ok: boolean }>,
 
     /**
      * Inspect the OpenVPN runtime: is `openvpn.exe` present + is the

@@ -14,6 +14,9 @@ import {
   vpnConnect,
   vpnDisconnect,
   vpnStatus,
+  markTunnelLost,
+  markPeerLost,
+  clearDropReason,
   inspectConfig,
   formatUptimeMs,
   TapDriverMissingError,
@@ -43,6 +46,8 @@ import {
   notifyVpnConnected,
   notifyVpnCgnatWarning,
   notifyVpnDisconnected,
+  notifyVpnPeerLost,
+  notifyVpnGaveUp,
   notifyVpnTapDriverMissing,
   notifyUsbAttached,
   notifyUsbDetached,
@@ -516,6 +521,22 @@ export function registerIpcHandlers(opts: {
       const prefs = getPreferences();
       return prefs.vpnAutoReconnect !== false;
     },
+    // Reintentos agotados: se baja el túnel y se marca el motivo para que el
+    // panel pueda explicar una desconexión que el técnico no ha pedido.
+    giveUp: async () => {
+      markTunnelLost();
+      try {
+        await usbDetachAll();
+      } catch {
+        // Best-effort, igual que en el disconnect manual.
+      }
+      try {
+        await vpnDisconnect();
+      } catch {
+        // Puede que el proceso ya no estuviera: el aviso sale igual.
+      }
+      notifyVpnGaveUp();
+    },
     // Iter 71: surface health transitions to the user. Two layers:
     //   1. Native OS notification — handled here because we already own
     //      the notifyVpn* imports and the per-category mute toggle.
@@ -630,8 +651,20 @@ export function registerIpcHandlers(opts: {
     }
   });
 
-  ipcMain.handle("vpn:disconnect", async (event) => {
+  ipcMain.handle("vpn:disconnect", async (event, reason?: unknown) => {
     if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    // El renderer puede decir POR QUÉ se baja el túnel. Sólo cambia el aviso
+    // que ve el técnico: una desconexión que él no ha pedido no puede leerse
+    // igual que la que sí. Builds antiguas del panel no mandan nada y siguen
+    // viendo el aviso de siempre.
+    const peerLost =
+      typeof reason === "object" &&
+      reason !== null &&
+      (reason as { kind?: unknown }).kind === "peer-lost";
+    const peerName =
+      peerLost && typeof (reason as { deviceName?: unknown }).deviceName === "string"
+        ? ((reason as { deviceName?: string }).deviceName as string)
+        : undefined;
     // Pre-flight: detach any USB devices currently attached over the
     // tunnel BEFORE we tear it down. Once the tunnel is gone the vhci
     // port is left pointing at an unreachable peer — every URB times
@@ -663,6 +696,10 @@ export function registerIpcHandlers(opts: {
       // Swallow — the disconnect itself is the user-visible action and
       // a missing usbip binary or transient list failure shouldn't gate it.
     }
+    // Antes de bajar nada: el motivo se guarda aunque el corte falle. Es lo que
+    // sostiene el aviso si el técnico recarga el panel, y perderlo por un error
+    // en el apagado sería dejarle sin explicación.
+    if (peerLost) markPeerLost(peerName);
     try {
       // Iter 59: capture uptime via the result envelope so the
       // notification toast can render "Tunnel dropped after 2h 14m".
@@ -672,7 +709,11 @@ export function registerIpcHandlers(opts: {
       // monitor so it doesn't immediately pull the tunnel back up.
       // Re-armed by the next vpn:connect.
       vpnHealthMonitor.stop();
-      notifyVpnDisconnected(undefined, formatUptimeMs(result.uptimeMs));
+      if (peerLost) {
+        notifyVpnPeerLost(peerName);
+      } else {
+        notifyVpnDisconnected(undefined, formatUptimeMs(result.uptimeMs));
+      }
       return {
         ok: true,
         uptimeMs: result.uptimeMs,
@@ -680,6 +721,9 @@ export function registerIpcHandlers(opts: {
         usbDetachFailed: usbCleanup.failed,
       };
     } catch (err) {
+      // Que el apagado falle no anula el motivo: el técnico tiene que enterarse
+      // igual de que el equipo dejó de responder.
+      if (peerLost) notifyVpnPeerLost(peerName);
       return {
         ok: false,
         error: err instanceof Error ? err.message : String(err),
@@ -792,6 +836,14 @@ export function registerIpcHandlers(opts: {
         tunnelUptimeMs: null,
       };
     }
+  });
+
+  // El panel ha enseñado el motivo de la última caída y el técnico lo ha dado
+  // por leído: se olvida para que no reaparezca en cada refresco.
+  ipcMain.handle("vpn:ackDrop", async (event) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    clearDropReason();
+    return { ok: true };
   });
 
   ipcMain.handle(
