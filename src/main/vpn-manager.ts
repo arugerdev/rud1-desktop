@@ -114,7 +114,7 @@ export interface VpnStatusResult {
    * El panel lo lee para explicar una desconexión que él no ha provocado, y
    * sigue ahí aunque recargue la página: el aviso no se puede perder.
    */
-  lastDropReason: "tunnel-lost" | "peer-lost" | null;
+  lastDropReason: "tunnel-lost" | "peer-lost" | "kicked" | null;
   /** Equipo que dejó de responder, cuando el motivo es `peer-lost`. */
   lastDropDeviceName: string | null;
 }
@@ -161,7 +161,7 @@ let running: RunningProc | null = null;
 let lastConnectedAt: number | null = null;
 let lastDisconnectedAt: number | null = null;
 let lastOvpnConfig: string | null = null;
-let lastDropReason: "tunnel-lost" | "peer-lost" | null = null;
+let lastDropReason: "tunnel-lost" | "peer-lost" | "kicked" | null = null;
 let lastDropDeviceName: string | null = null;
 
 // ─── Validators ───────────────────────────────────────────────────────────────
@@ -941,6 +941,18 @@ export function markTunnelLost(): void {
 /** Marca que se cortó porque el equipo del otro lado dejó de responder. */
 export function markPeerLost(deviceName?: string): void {
   lastDropReason = "peer-lost";
+  lastDropDeviceName = deviceName?.trim() || null;
+}
+
+/**
+ * Marca que a este técnico le han cerrado la sesión desde la nube.
+ *
+ * Se separa de una caída porque no es un problema de red: alguien con permisos
+ * lo ha echado, y el aviso tiene que decir eso. Sin este motivo el cliente se
+ * quedaba pintando "conectado" mientras OpenVPN volvía a entrar solo.
+ */
+export function markKicked(deviceName?: string): void {
+  lastDropReason = "kicked";
   lastDropDeviceName = deviceName?.trim() || null;
 }
 

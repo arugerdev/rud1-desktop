@@ -136,6 +136,16 @@ export function notifyVpnPeerLost(deviceName?: string) {
   );
 }
 
+/** Alguien con permisos ha cerrado esta sesión desde la nube. */
+export function notifyVpnKicked(deviceName?: string) {
+  const name = deviceName?.trim() || t("notifications.deviceFallback");
+  show(
+    t("notifications.vpnKickedTitle"),
+    t("notifications.vpnKickedBody", { name }),
+    { kind: "error", category: "vpn", autoDismissMs: 0 },
+  );
+}
+
 /** Se agotaron los reintentos de reconexión y el túnel se ha bajado. */
 export function notifyVpnGaveUp() {
   show(
