@@ -33,9 +33,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     /**
      * Baja el túnel. `reason` sólo cambia el aviso del sistema: sin él es una
      * desconexión pedida por el técnico; con `peer-lost` es que el equipo dejó
-     * de responder y se ha cortado por él.
+     * de responder y se ha cortado por él; con `kicked`, que alguien con
+     * permisos le ha cerrado la sesión desde la nube.
      */
-    disconnect: (reason?: { kind: "peer-lost"; deviceName?: string }) =>
+    disconnect: (reason?: {
+      kind: "peer-lost" | "kicked";
+      deviceName?: string;
+    }) =>
       ipcRenderer.invoke("vpn:disconnect", reason) as Promise<{
         ok: boolean;
         error?: string;
@@ -59,8 +63,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
           | null;
         handshakeAgeMs: number | null;
         /** Motivo de una caída que el técnico no pidió; null si no la hubo. */
-        lastDropReason?: "tunnel-lost" | "peer-lost" | null;
-        /** Equipo que dejó de responder, cuando el motivo es `peer-lost`. */
+        lastDropReason?: "tunnel-lost" | "peer-lost" | "kicked" | null;
+        /** Equipo implicado, cuando el motivo es `peer-lost` o `kicked`. */
         lastDropDeviceName?: string | null;
       }>,
 

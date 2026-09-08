@@ -5,15 +5,17 @@ import { t, type Locale } from "./i18n";
 /**
  * Combined updater state pushed to the dialog renderer. Computed in
  * index.ts from the live VersionCheckState + AutoUpdateState + the
- * `autoUpdate` preference. The renderer maps `phase` to a card; the
- * `installing` phase is set optimistically renderer-side on the restart
- * click (the process quits right after `apply()`).
+ * `autoUpdate` preference. The renderer maps `phase` to a card. `installing`
+ * llega desde main (y también se pinta optimista al pulsar reiniciar) e
+ * `installed` es el aviso del arranque siguiente a una actualización.
  */
 export type UpdaterDialogPhase =
   | "checking"
   | "available"
   | "downloading"
   | "ready"
+  | "installing"
+  | "installed"
   | "error"
   | "up-to-date";
 
@@ -55,6 +57,11 @@ export function buildUpdateDialogHtml(
     readyBody: t("updateDialog.readyBody"),
     restartNow: t("updateDialog.restartNow"),
     installing: t("updateDialog.installing"),
+    installingBody: t("updateDialog.installingBody"),
+    installingHint: t("updateDialog.installingHint"),
+    installedHeading: t("updateDialog.installedHeading", { version: "{version}" }),
+    installedBody: t("updateDialog.installedBody"),
+    continueLabel: t("updateDialog.continueLabel"),
     errorHeading: t("updateDialog.errorHeading"),
     retry: t("updateDialog.retry"),
     upToDateHeading: t("updateDialog.upToDateHeading"),
@@ -206,6 +213,7 @@ export function buildUpdateDialogHtml(
   .stat .k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted-fg); }
   .stat .v { font-size: 14px; font-weight: 600; color: var(--fg); margin-top: 3px; font-variant-numeric: tabular-nums; }
   .actions { display: flex; gap: 10px; margin-top: 20px; }
+  p.hint { font-size: 12px; margin-top: 14px; opacity: 0.85; }
   button {
     flex: 1;
     background: var(--surface);
@@ -243,6 +251,7 @@ export function buildUpdateDialogHtml(
   var L = ${L};
   var cardEl = document.getElementById('card');
   var downloadStartTs = null;     // wall-clock when 'downloading' first seen
+  var installedTimer = null;      // auto-continuar tras avisar de la actualización
   var lastBytes = 0;
 
   function fmt(template, vars) {
@@ -341,6 +350,38 @@ export function buildUpdateDialogHtml(
     });
   }
 
+  // Instalación en marcha. La app se va a cerrar de un momento a otro: esta
+  // tarjeta es lo último que se ve antes de que tome el relevo la ventana de
+  // progreso del instalador.
+  function renderInstalling() {
+    cardEl.innerHTML =
+      '<div class="icon">⚙</div>' +
+      '<h1><span class="spinner"></span>' + escape(L.installing) + '</h1>' +
+      '<p class="strong">' + escape(L.installingBody) + '</p>' +
+      '<div class="progress-wrap">' +
+        '<div class="bar indeterminate"><div class="fill" style="width:35%"></div></div>' +
+      '</div>' +
+      '<p class="hint">' + escape(L.installingHint) + '</p>';
+  }
+
+  function renderInstalled(st) {
+    cardEl.innerHTML =
+      '<div class="icon">✔</div>' +
+      '<h1>' + fmt(L.installedHeading, { version: escape(st.current) }) + '</h1>' +
+      '<p>' + escape(L.installedBody) + '</p>' +
+      '<div class="actions">' +
+        '<button id="later" class="primary">' + escape(L.continueLabel) + '</button>' +
+      '</div>';
+    document.getElementById('later').addEventListener('click', function() {
+      window.electronAPI.updater.later();
+    });
+    // Nadie tiene que confirmar un aviso de "ya está": si no se toca, seguimos.
+    if (installedTimer != null) clearTimeout(installedTimer);
+    installedTimer = setTimeout(function() {
+      window.electronAPI.updater.later();
+    }, 6000);
+  }
+
   function renderError(st) {
     cardEl.innerHTML =
       '<div class="icon">⚠</div>' +
@@ -376,11 +417,14 @@ export function buildUpdateDialogHtml(
   function render(st) {
     if (!st) { renderChecking(); return; }
     if (st.phase !== 'downloading') downloadStartTs = null;
+    if (st.phase !== 'installed' && installedTimer != null) { clearTimeout(installedTimer); installedTimer = null; }
     switch (st.phase) {
       case 'checking': renderChecking(); break;
       case 'available': renderAvailable(st); break;
       case 'downloading': renderDownloading(st); break;
       case 'ready': renderReady(); break;
+      case 'installing': renderInstalling(); break;
+      case 'installed': renderInstalled(st); break;
       case 'error': renderError(st); break;
       case 'up-to-date': renderUpToDate(st); break;
       default: renderChecking();

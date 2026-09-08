@@ -110,6 +110,26 @@ import {
   statusGlyph,
   type DeviceSummary,
 } from "./device-list-manager";
+import {
+  cleanupSplashFiles,
+  planSilentInstall,
+  readInstallProfile,
+  startSilentInstall,
+} from "./silent-install";
+import {
+  UPDATE_MARKER_FILENAME,
+  classifyUpdateOutcome,
+  clearUpdateMarker,
+  readUpdateMarker,
+  writeUpdateMarker,
+  type UpdateOutcome,
+} from "./update-marker";
+
+// Instancia única, y se pide ANTES de registrar el ciclo de vida: la segunda
+// instancia tiene que salir de inmediato SIN ejecutar el cierre ordenado, que
+// desconecta la VPN y suelta los USB de la instancia que ya está corriendo.
+const isPrimaryInstance = app.requestSingleInstanceLock();
+if (!isPrimaryInstance) app.exit(0);
 
 const OPEN_DEV_TOOLS = process.env.RUD1_DEV_TOOLS === "1";
 const VERSION_MANIFEST_URL =
@@ -151,6 +171,11 @@ let lastManifestVersion: number | null = null;
 // surface the manual "Restart and install" affordance instead of force-
 // quitting a running session.
 let autoApplyArmed = false;
+// Resultado de la actualización anterior, leído del marcador al arrancar. Se
+// pinta en el diálogo y manda sobre el veredicto hasta que el usuario lo cierra.
+let postUpdateNotice: UpdateOutcome = { kind: "none" };
+// Última versión anunciada por el manifiesto, para el marcador.
+let lastAdvertisedVersion: string | null = null;
 // Resolves with the first terminal (non-checking) version-check verdict so
 // the launch gate can decide whether to prompt before opening the app.
 let firstVersionCheckSettled = false;
@@ -225,7 +250,11 @@ function createWindow(): BrowserWindow {
 
 function showOrCreateMainWindow(): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    // Restaurar + enfocar, no solo show(): si estaba minimizada o detrás de
+    // otra ventana, un show() a secas no la trae al frente.
+    if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
+    mainWindow.focus();
     return;
   }
   mainWindow = createWindow();
@@ -792,6 +821,33 @@ function computeUpdaterDialogState(): UpdaterDialogState {
     latest = vc.latest;
   }
 
+  // El aviso de la actualización anterior manda sobre todo lo demás: es lo
+  // primero que hay que contarle al usuario al volver a abrirse la app.
+  if (postUpdateNotice.kind === "installed") {
+    return {
+      phase: "installed",
+      current: postUpdateNotice.version,
+      latest: postUpdateNotice.version,
+      downloadUrl: null,
+      bytesReceived: 0,
+      totalBytes: null,
+      message: "",
+      autoUpdate,
+    };
+  }
+  if (postUpdateNotice.kind === "not-completed" && auto.kind === "idle") {
+    return {
+      phase: "error",
+      current,
+      latest: postUpdateNotice.version,
+      downloadUrl,
+      bytesReceived: 0,
+      totalBytes: null,
+      message: t("updateDialog.installNotCompleted", { version: postUpdateNotice.version }),
+      autoUpdate,
+    };
+  }
+
   // An in-flight / finished download takes priority over the verdict — the
   // operator wants progress on the running download, not "v1.4 available".
   if (auto.kind === "downloading") {
@@ -808,6 +864,9 @@ function computeUpdaterDialogState(): UpdaterDialogState {
   }
   if (auto.kind === "ready-to-apply") {
     return { phase: "ready", current, latest, downloadUrl, bytesReceived: 0, totalBytes: null, message: "", autoUpdate };
+  }
+  if (auto.kind === "installing") {
+    return { phase: "installing", current, latest, downloadUrl, bytesReceived: 0, totalBytes: null, message: "", autoUpdate };
   }
   if (auto.kind === "error") {
     return { phase: "error", current, latest, downloadUrl, bytesReceived: 0, totalBytes: null, message: auto.message, autoUpdate };
@@ -922,6 +981,119 @@ async function startGatedDownload(
   startBackgroundDownload(url, { sha256: sha });
 }
 
+/**
+ * Instala la actualización sin pasar por el asistente.
+ *
+ * Relanza el MISMO setup descargado en modo silencioso, y el setup recupera
+ * del registro la carpeta y el ámbito que el usuario eligió la primera vez.
+ * Antes de arrancarlo deja un marcador en disco: lo vigila la ventana de
+ * progreso (para saber cuándo cerrarse) y lo lee el rud1 nuevo al abrirse
+ * (para contar cómo acabó). Si algo no cuadra devuelve false y el flujo cae
+ * al instalador visible de siempre.
+ */
+async function attemptSilentInstall(installerPath: string): Promise<boolean> {
+  const appDir = path.dirname(process.execPath);
+  let profile = null;
+  try {
+    if (process.platform === "win32" && app.isPackaged) {
+      profile = await readInstallProfile({ appDir });
+    }
+  } catch (err) {
+    console.warn("[silent-install] no se pudo leer el perfil de instalación:", err);
+  }
+  const plan = planSilentInstall({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    installerPath,
+    appDir,
+    profile,
+  });
+  if (!plan.ok) {
+    console.info(`[silent-install] instalador visible (${plan.reason})`);
+    return false;
+  }
+
+  // El setup silencioso nos mata en cuanto arranca, así que la VPN y los USB
+  // se sueltan AHORA, con tiempo, y no en el before-quit que no llegaría.
+  await teardownConnections();
+
+  const userDataDir = app.getPath("userData");
+  const target = lastAdvertisedVersion ?? app.getVersion();
+  const marker = writeUpdateMarker(userDataDir, {
+    fromVersion: app.getVersion(),
+    toVersion: target,
+    startedAt: Date.now(),
+  });
+  const result = await startSilentInstall({
+    installerPath,
+    args: plan.args,
+    splash: {
+      scriptPath: path.join(updateProgressScriptDir(), "update-progress.ps1"),
+      sentinelPath: marker ?? path.join(userDataDir, UPDATE_MARKER_FILENAME),
+      // La ventana reabre rud1 al acabar el setup: hereda nuestro token, así
+      // que Windows no vuelve a pedir permiso.
+      relaunchExe: process.execPath,
+      // Aparece donde está ahora la ventana de rud1, no en otro monitor.
+      centerOn: currentWindowCenter(),
+      // Título largo: es una ventana suelta, sin el contexto del diálogo.
+      title: t("updates.installing"),
+      body: t("updateDialog.installingBody"),
+      hint: t("updateDialog.installingHint"),
+      elapsedLabel: t("updateDialog.elapsed"),
+      theme: nativeTheme.shouldUseDarkColors ? "dark" : "light",
+    },
+  });
+  if (!result.ok) {
+    console.warn(`[silent-install] ${result.reason}`);
+    // Borrar el marcador cierra la ventana de progreso en el siguiente tick.
+    clearUpdateMarker(userDataDir);
+    return false;
+  }
+  console.info(
+    `[silent-install] setup en marcha (pid ${result.pid}) → ${plan.profile.scope} ${plan.profile.installLocation}`,
+  );
+  return true;
+}
+
+/** Centro de la ventana visible, para que la de progreso salga en su sitio. */
+function currentWindowCenter(): { x: number; y: number } | null {
+  for (const win of [updateDialogWindow, mainWindow]) {
+    if (!win || win.isDestroyed()) continue;
+    try {
+      const b = win.getBounds();
+      return { x: b.x + Math.round(b.width / 2), y: b.y + Math.round(b.height / 2) };
+    } catch {
+      /* ventana cerrándose */
+    }
+  }
+  return null;
+}
+
+/** Carpeta de los recursos win32 (bin en producción, resources/win32 en dev). */
+function updateProgressScriptDir(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "bin")
+    : path.join(app.getAppPath(), "resources", process.platform);
+}
+
+/**
+ * Lee el marcador de la actualización anterior. Borrarlo es también la señal
+ * que cierra la ventana de progreso, así que se hace lo antes posible.
+ */
+function consumePostUpdateMarker(): void {
+  const dir = app.getPath("userData");
+  const marker = readUpdateMarker(dir);
+  if (marker == null) return;
+  postUpdateNotice = classifyUpdateOutcome(marker, app.getVersion());
+  clearUpdateMarker(dir);
+  cleanupSplashFiles();
+  if (postUpdateNotice.kind !== "none") {
+    console.info(
+      `[silent-install] actualización ${marker.fromVersion} → ${marker.toVersion}: ${postUpdateNotice.kind}`,
+    );
+  }
+}
+
 function closeUpdateDialogAndShowMain(): void {
   const w = updateDialogWindow;
   updateDialogWindow = null;
@@ -995,13 +1167,17 @@ function mirrorAutoUpdateConfig(enabled: boolean): void {
 async function runLaunchUpdateGate(): Promise<void> {
   const prefs = getPreferences();
   showUpdateDialog();
+  // Pinta ya el aviso de la actualización anterior, sin esperar al manifiesto.
+  if (postUpdateNotice.kind !== "none") broadcastUpdaterState();
   versionCheckManager?.start();
   const winner = await Promise.race<VersionCheckState | null>([
     firstVersionCheckPromise,
     new Promise<null>((r) => setTimeout(() => r(null), LAUNCH_GATE_TIMEOUT_MS)),
   ]);
   if (winner && winner.kind === "update-available") {
-    if (prefs.autoUpdate) {
+    // Tras una instalación que se quedó a medias no se reintenta sola: se
+    // enseña el aviso con el botón de reintentar y decide el usuario.
+    if (prefs.autoUpdate && postUpdateNotice.kind !== "not-completed") {
       // Auto mode: arm auto-apply for THIS launch-gate download only, then
       // download. `autoApplyArmed` scopes the openPath+restart to the gate
       // so an in-session tray download never force-quits a running session.
@@ -1011,6 +1187,10 @@ async function runLaunchUpdateGate(): Promise<void> {
     broadcastUpdaterState();
     // Leave the main window closed: the dialog drives the decision (and the
     // app restarts on apply, or opens the main window on "Not now").
+  } else if (postUpdateNotice.kind !== "none") {
+    // Sin novedades, pero hay que contar cómo acabó la actualización: el
+    // diálogo se queda con el aviso y lo cierra el usuario (o su temporizador).
+    broadcastUpdaterState();
   } else {
     closeUpdateDialogAndShowMain();
   }
@@ -1143,6 +1323,10 @@ function notifyFirstBootDevice(probe: FirmwareProbeResult): void {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
 
+  // Cuanto antes: borrar el marcador es lo que cierra la ventana de progreso
+  // que dejó el instalador en pantalla.
+  consumePostUpdateMarker();
+
   registerWakeModelHandlers();
   registerIpcHandlers({
     firstBootDedupe: {
@@ -1193,10 +1377,21 @@ app.whenReady().then(async () => {
     },
     updater: {
       getState: () => computeUpdaterDialogState(),
-      start: () => { startUpdateDownload(); },
+      // Tocar cualquier acción da por leído el aviso de la actualización
+      // anterior; si no, seguiría tapando lo que el usuario acaba de pedir.
+      start: () => {
+        postUpdateNotice = { kind: "none" };
+        startUpdateDownload();
+      },
       apply: () => { void applyAndRestart(); },
-      later: () => { closeUpdateDialogAndShowMain(); },
-      recheck: () => { void versionCheckManager?.checkOnce(); },
+      later: () => {
+        postUpdateNotice = { kind: "none" };
+        closeUpdateDialogAndShowMain();
+      },
+      recheck: () => {
+        postUpdateNotice = { kind: "none" };
+        void versionCheckManager?.checkOnce();
+      },
     },
     vpnHealth: {
       onTransition: (event) => {
@@ -1342,6 +1537,10 @@ app.whenReady().then(async () => {
     forceRollout: () => isRolloutForceEnabled(),
     onStateChange: (state) => {
       lastVersionCheckState = state;
+      // La versión anunciada se recuerda: entre la descarga y la instalación
+      // el veredicto puede cambiar, y el marcador necesita saber a qué versión
+      // íbamos para poder contar después si salió bien.
+      if (state.kind === "update-available") lastAdvertisedVersion = state.latest;
       rebuildTrayMenu();
       broadcastVersionCheckUpdate(state);
       broadcastUpdaterState();
@@ -1363,7 +1562,9 @@ app.whenReady().then(async () => {
   // NB: start() is deferred to runLaunchUpdateGate() so the dialog paints
   // "Checking…" before the first fetch resolves.
 
-  configureAutoUpdaterRuntime({});
+  configureAutoUpdaterRuntime({
+    installer: { installSilently: (p) => attemptSilentInstall(p) },
+  });
   subscribeAutoUpdate((auto) => {
     rebuildTrayMenu();
     broadcastUpdaterState();
@@ -1414,8 +1615,40 @@ app.on("window-all-closed", () => {
 // `before-quit` event is the latest async-capable hook before exit —
 // we preventDefault + run cleanup + quit() to give the kill enough time.
 let isQuitting = false;
+let connectionsTornDown = false;
+
+/**
+ * Suelta lo que este equipo tiene tomado del sistema: primero los USB (que
+ * viajan por el túnel) y después la VPN. Idempotente, porque la instalación
+ * desatendida lo hace ANTES de arrancar el setup: el setup nos mata en un
+ * segundo y ahí ya no habría tiempo de cerrar nada con orden.
+ */
+async function teardownConnections(): Promise<void> {
+  if (connectionsTornDown) return;
+  connectionsTornDown = true;
+  try {
+    const { usbDetachAll } = await import("./usb-manager");
+    await usbDetachAll();
+  } catch (err) {
+    console.warn("[lifecycle] usbDetachAll on quit failed:", err);
+  }
+  try {
+    const { vpnDisconnect } = await import("./vpn-manager");
+    await vpnDisconnect();
+  } catch (err) {
+    // Don't block exit on this — log and proceed.
+    console.warn("[lifecycle] vpnDisconnect on quit failed:", err);
+  }
+}
+
 app.on("before-quit", (event) => {
   if (isQuitting) return;
+  // Una instancia que no tiene el candado no toca nada del sistema: la VPN y
+  // los USB son de la instancia que sí lo tiene.
+  if (!isPrimaryInstance) {
+    app.exit(0);
+    return;
+  }
   event.preventDefault();
   isQuitting = true;
 
@@ -1435,22 +1668,7 @@ app.on("before-quit", (event) => {
   // Block the quit on the VPN tear-down. killRunning() has its own 3-5s
   // timeouts so this can't hang indefinitely.
   void (async () => {
-    // Detach USB sessions FIRST while the tunnel still routes — the vpn:disconnect
-    // IPC handler does this too, but before-quit calls vpnDisconnect() directly
-    // and would otherwise leave an orphan VHCI port + bound device on the Pi.
-    try {
-      const { usbDetachAll } = await import("./usb-manager");
-      await usbDetachAll();
-    } catch (err) {
-      console.warn("[lifecycle] usbDetachAll on quit failed:", err);
-    }
-    try {
-      const { vpnDisconnect } = await import("./vpn-manager");
-      await vpnDisconnect();
-    } catch (err) {
-      // Don't block exit on this — log and proceed.
-      console.warn("[lifecycle] vpnDisconnect on quit failed:", err);
-    }
+    await teardownConnections();
     app.exit(0);
   })();
 });
@@ -1474,14 +1692,21 @@ app.on("open-url", (_event, url) => {
   mainWindow?.loadURL(resolveDeepLinkTarget(url, APP_URL));
 });
 
-// Windows deep-link via second-instance
+// Segundo arranque de rud1 (icono del menú inicio, buscador de Windows, deep
+// link): la instancia que ya corre es la que atiende. Con la ventana cerrada
+// —modo bandeja— antes no pasaba nada; hay que abrirla, como al pulsar el
+// icono de la bandeja.
 app.on("second-instance", (_event, argv) => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-    const deeplink = argv.find((a) => a.startsWith("rud1://"));
-    if (deeplink) mainWindow.loadURL(resolveDeepLinkTarget(deeplink, APP_URL));
+  const deeplink = argv.find((a) => a.startsWith("rud1://"));
+  // Si el diálogo de actualización es la única ventana, es el que manda: no
+  // conviene abrir la principal por encima de una instalación en marcha.
+  if (!deeplink && updateDialogWindow && !updateDialogWindow.isDestroyed()) {
+    updateDialogWindow.show();
+    updateDialogWindow.focus();
+    return;
+  }
+  showOrCreateMainWindow();
+  if (deeplink && mainWindow && !mainWindow.isDestroyed()) {
+    void mainWindow.loadURL(resolveDeepLinkTarget(deeplink, APP_URL));
   }
 });
-
-if (!app.requestSingleInstanceLock()) app.quit();

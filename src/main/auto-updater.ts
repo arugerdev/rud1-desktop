@@ -172,9 +172,10 @@ export function configureAutoUpdater(
 //     wants signed builds + a configured feed; this iter doesn't touch
 //     either, and we'd rather ship a working "open the installer" flow
 //     than half-finished silent-install plumbing.
-//   • `applyAndRestart` calls `shell.openPath(downloadedFile)` and then
-//     `app.quit()` — the user clicks through their OS installer prompt.
-//     Full silent install is out of scope; tracked for a future iter.
+//   • `applyAndRestart` intenta primero la instalación desatendida
+//     (silent-install.ts: el mismo setup en silencio, con la carpeta y el
+//     ámbito del primer install) y sólo si no aplica abre el instalador
+//     visible con `shell.openPath` + `app.quit()`.
 //   • SHA-256 verification is opt-in via the manifest. If the manifest
 //     omits `sha256` we still allow apply, but log it; the user already
 //     opted into auto-update via the env flag and the URL itself ran
@@ -333,7 +334,16 @@ export type AutoUpdateState =
   | { kind: "idle" }
   | { kind: "downloading"; url: string; bytesReceived: number; totalBytes: number | null }
   | { kind: "ready-to-apply"; url: string; filepath: string; sha256: string | null }
+  | { kind: "installing"; url: string; filepath: string; unattended: boolean }
   | { kind: "error"; message: string };
+
+/**
+ * Instalador desatendido (Windows). Devuelve true si se ha hecho cargo; con
+ * false o ausente se abre el instalador visible de siempre.
+ */
+export interface UnattendedInstaller {
+  installSilently: (filepath: string) => Promise<boolean>;
+}
 
 interface AutoUpdaterDependencies {
   app?: { isPackaged: boolean; getPath: (n: string) => string };
@@ -341,6 +351,9 @@ interface AutoUpdaterDependencies {
   shell?: { openPath: (p: string) => Promise<string>; openExternal: (u: string) => Promise<void> };
   quit?: () => void;
   fileSystem?: typeof fs;
+  installer?: UnattendedInstaller;
+  /** Margen para que la ventana de "instalando" se pinte antes de salir. */
+  installingDwellMs?: number;
 }
 
 let state: AutoUpdateState = { kind: "idle" };
@@ -827,6 +840,8 @@ export async function applyAndRestart(
     fileSystem?: typeof fs;
     strict?: boolean;
     env?: NodeJS.ProcessEnv;
+    installer?: UnattendedInstaller;
+    installingDwellMs?: number;
   } = {},
 ): Promise<AutoUpdateState> {
   if (state.kind !== "ready-to-apply") {
@@ -871,6 +886,41 @@ export async function applyAndRestart(
       return state;
     }
   }
+  // Primero la vía desatendida: el mismo setup en silencio, con la carpeta y
+  // el ámbito que el usuario eligió al instalar. Si no aplica (otra
+  // plataforma, build sin empaquetar, registro que no cuadra) se sigue
+  // abriendo el instalador visible, exactamente como antes.
+  const installer = options.installer ?? deps.installer;
+  if (installer) {
+    setState({
+      kind: "installing",
+      url: ready.url,
+      filepath: ready.filepath,
+      unattended: true,
+    });
+    let tookOver = false;
+    try {
+      tookOver = await installer.installSilently(ready.filepath);
+    } catch (e) {
+      console.warn("[auto-update] instalación desatendida falló:", e);
+      tookOver = false;
+    }
+    if (tookOver) {
+      // Pequeña espera para que la ventana de "instalando" llegue a pintarse
+      // antes de que el proceso desaparezca.
+      const dwell = options.installingDwellMs ?? deps.installingDwellMs ?? 400;
+      if (dwell > 0) await new Promise((r) => setTimeout(r, dwell));
+      quit();
+      return state;
+    }
+    setState({
+      kind: "installing",
+      url: ready.url,
+      filepath: ready.filepath,
+      unattended: false,
+    });
+  }
+
   try {
     const errMsg = await sh!.openPath(ready.filepath);
     if (typeof errMsg === "string" && errMsg.length > 0) {

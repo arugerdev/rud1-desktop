@@ -1081,6 +1081,9 @@ export function buildVersionCheckMenuItems(
       : t("updates.downloadingBytes", { bytes: formatBytes(auto.bytesReceived) });
     return [{ label, enabled: false, sublabel: progressBar(pct) }];
   }
+  if (auto && auto.kind === "installing") {
+    return [{ label: t("updates.installing"), enabled: false }];
+  }
   if (auto && auto.kind === "ready-to-apply") {
     return [
       {

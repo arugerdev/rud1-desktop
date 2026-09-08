@@ -16,6 +16,7 @@ import {
   vpnStatus,
   markTunnelLost,
   markPeerLost,
+  markKicked,
   clearDropReason,
   inspectConfig,
   formatUptimeMs,
@@ -47,6 +48,7 @@ import {
   notifyVpnCgnatWarning,
   notifyVpnDisconnected,
   notifyVpnPeerLost,
+  notifyVpnKicked,
   notifyVpnGaveUp,
   notifyVpnTapDriverMissing,
   notifyUsbAttached,
@@ -657,12 +659,17 @@ export function registerIpcHandlers(opts: {
     // que ve el técnico: una desconexión que él no ha pedido no puede leerse
     // igual que la que sí. Builds antiguas del panel no mandan nada y siguen
     // viendo el aviso de siempre.
-    const peerLost =
-      typeof reason === "object" &&
-      reason !== null &&
-      (reason as { kind?: unknown }).kind === "peer-lost";
+    const kind =
+      typeof reason === "object" && reason !== null
+        ? (reason as { kind?: unknown }).kind
+        : undefined;
+    const peerLost = kind === "peer-lost";
+    // `kicked`: se lo ha cerrado alguien desde la nube. No es lo mismo que una
+    // caída y el aviso no puede leerse igual.
+    const kicked = kind === "kicked";
     const peerName =
-      peerLost && typeof (reason as { deviceName?: unknown }).deviceName === "string"
+      (peerLost || kicked) &&
+      typeof (reason as { deviceName?: unknown }).deviceName === "string"
         ? ((reason as { deviceName?: string }).deviceName as string)
         : undefined;
     // Pre-flight: detach any USB devices currently attached over the
@@ -700,6 +707,7 @@ export function registerIpcHandlers(opts: {
     // sostiene el aviso si el técnico recarga el panel, y perderlo por un error
     // en el apagado sería dejarle sin explicación.
     if (peerLost) markPeerLost(peerName);
+    else if (kicked) markKicked(peerName);
     try {
       // Iter 59: capture uptime via the result envelope so the
       // notification toast can render "Tunnel dropped after 2h 14m".
@@ -711,6 +719,8 @@ export function registerIpcHandlers(opts: {
       vpnHealthMonitor.stop();
       if (peerLost) {
         notifyVpnPeerLost(peerName);
+      } else if (kicked) {
+        notifyVpnKicked(peerName);
       } else {
         notifyVpnDisconnected(undefined, formatUptimeMs(result.uptimeMs));
       }
@@ -724,6 +734,7 @@ export function registerIpcHandlers(opts: {
       // Que el apagado falle no anula el motivo: el técnico tiene que enterarse
       // igual de que el equipo dejó de responder.
       if (peerLost) notifyVpnPeerLost(peerName);
+      else if (kicked) notifyVpnKicked(peerName);
       return {
         ok: false,
         error: err instanceof Error ? err.message : String(err),

@@ -114,7 +114,7 @@ export interface VpnStatusResult {
    * El panel lo lee para explicar una desconexión que él no ha provocado, y
    * sigue ahí aunque recargue la página: el aviso no se puede perder.
    */
-  lastDropReason: "tunnel-lost" | "peer-lost" | null;
+  lastDropReason: "tunnel-lost" | "peer-lost" | "kicked" | null;
   /** Equipo que dejó de responder, cuando el motivo es `peer-lost`. */
   lastDropDeviceName: string | null;
 }
@@ -141,6 +141,11 @@ export interface ConfigPreflight {
 interface RunningProc {
   proc: ChildProcess;
   managementPort: number;
+  /** Live management connection, once attached. Null when the attach failed
+   *  (the tunnel still works — see attachManagementSocket) or on old paths
+   *  that never got one. Kept so the teardown can ask openvpn to exit
+   *  cleanly instead of only being able to shoot it. */
+  managementSocket: net.Socket | null;
   /** Parsed assigned IP, populated once the management socket reports it. */
   assignedIp: string | null;
   /** ms timestamp of the last received management heartbeat / keepalive. */
@@ -161,7 +166,7 @@ let running: RunningProc | null = null;
 let lastConnectedAt: number | null = null;
 let lastDisconnectedAt: number | null = null;
 let lastOvpnConfig: string | null = null;
-let lastDropReason: "tunnel-lost" | "peer-lost" | null = null;
+let lastDropReason: "tunnel-lost" | "peer-lost" | "kicked" | null = null;
 let lastDropDeviceName: string | null = null;
 
 // ─── Validators ───────────────────────────────────────────────────────────────
@@ -417,7 +422,11 @@ function wireManagementSocket(sock: net.Socket): void {
     }
   });
   sock.on("error", () => { /* swallow — child-process death is the source of truth */ });
-  sock.on("close", () => { /* connection lost; we'll fall back to stdout scraping */ });
+  sock.on("close", () => {
+    // Connection lost; we'll fall back to stdout scraping. Drop the handle so
+    // the teardown doesn't try to ask a dead socket for a clean exit.
+    if (live.managementSocket === sock) live.managementSocket = null;
+  });
 }
 
 /**
@@ -514,6 +523,7 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
   const live: RunningProc = {
     proc,
     managementPort,
+    managementSocket: null,
     assignedIp: null,
     lastHeartbeatAt: 0,
     initialized: false,
@@ -590,11 +600,58 @@ export function openvpnLogPath(): string {
 }
 
 /**
- * Tear down the current openvpn process (if any). Sends SIGTERM (clean
- * exit on Unix; on Windows `--management-signal SIGTERM` would be cleaner
- * but `proc.kill()` translates to a `TerminateProcess` which the child's
- * `service-wrapper` handler treats as a hard stop — the TAP adapter is
- * released either way).
+ * Ask openvpn, through its management channel, to shut down cleanly.
+ *
+ * This is the difference between leaving quietly and leaving properly. The
+ * tunnel is UDP: there is no connection to close, so unless openvpn runs its
+ * own exit path it never tells the relay it is going. Killing the process
+ * (which is what `proc.kill()` does on Windows — a `TerminateProcess`) skips
+ * that exit path entirely, and the relay kept the session listed as live
+ * until its keepalive expired: two minutes in which the cloud's VPN sessions
+ * screen still showed the technician inside.
+ *
+ * `signal SIGTERM` on the management socket runs the real shutdown, which
+ * sends the `explicit-exit-notify` the .ovpn now carries. Best-effort: the
+ * caller's hard-kill ladder still runs afterwards, so a socket that is gone,
+ * wedged or unattached costs us nothing but the wait.
+ *
+ * Returns true when the child actually exited within the grace window.
+ */
+async function requestCleanExit(live: RunningProc): Promise<boolean> {
+  const sock = live.managementSocket;
+  if (!sock || sock.destroyed) return false;
+  try {
+    sock.write("signal SIGTERM\n");
+  } catch {
+    return false;
+  }
+  // 1.5s: the exit notification is a handful of datagrams on an already-open
+  // tunnel. Anything slower than this is openvpn being stuck, and waiting
+  // longer only delays the disconnect the technician just asked for.
+  const GRACE_MS = 1_500;
+  return new Promise<boolean>((resolve) => {
+    if (live.proc.exitCode !== null || live.proc.signalCode !== null) {
+      resolve(true);
+      return;
+    }
+    const timer = setTimeout(() => {
+      live.proc.off("exit", onExit);
+      resolve(false);
+    }, GRACE_MS);
+    function onExit(): void {
+      clearTimeout(timer);
+      resolve(true);
+    }
+    live.proc.once("exit", onExit);
+  });
+}
+
+/**
+ * Tear down the current openvpn process (if any). Asks for a clean exit
+ * through the management channel first — that is what makes the relay drop
+ * the session immediately instead of two minutes later — and then falls back
+ * to SIGTERM / SIGKILL / taskkill, which is what actually guarantees the TAP
+ * adapter is released.
  */
 async function killRunning(target?: RunningProc): Promise<void> {
   // Sin `target` mata al actual. CON target mata ESE proceso, que es lo que
@@ -604,6 +661,16 @@ async function killRunning(target?: RunningProc): Promise<void> {
   const live = target ?? running;
   if (!live) return;
   const pid = live.proc.pid;
+
+  // Primero por las buenas: así openvpn se despide del relay.
+  const salidaLimpia = await requestCleanExit(live);
+  if (salidaLimpia) {
+    try { live.managementSocket?.destroy(); } catch { /* ignore */ }
+    live.managementSocket = null;
+    if (running === live) running = null;
+    return;
+  }
+
   try {
     live.proc.kill();
   } catch {
@@ -655,6 +722,11 @@ async function killRunning(target?: RunningProc): Promise<void> {
 export function killRunningSync(): void {
   if (!running) return;
   const live = running;
+  // Un intento de despedida antes del tiro de gracia: `write` sobre un socket
+  // conectado suele llegar al buffer del sistema en el acto, así que el relay
+  // se enterará aunque no podamos esperar a nada. Si no llega, la sesión cae
+  // igual cuando expire el keepalive — que es lo que pasaba siempre.
+  try { live.managementSocket?.write("signal SIGTERM\n"); } catch { /* ignore */ }
   try { live.proc.kill("SIGKILL"); } catch { /* already gone */ }
   if (process.platform === "win32" && typeof live.proc.pid === "number") {
     try {
@@ -796,6 +868,7 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   // gracefully to stdout-only scraping.
   const sock = await attachManagementSocket(live.managementPort);
   if (sock && running === live) {
+    live.managementSocket = sock;
     wireManagementSocket(sock);
   }
 
@@ -944,6 +1017,18 @@ export function markPeerLost(deviceName?: string): void {
   lastDropDeviceName = deviceName?.trim() || null;
 }
 
+/**
+ * Marca que a este técnico le han cerrado la sesión desde la nube.
+ *
+ * Se separa de una caída porque no es un problema de red: alguien con permisos
+ * lo ha echado, y el aviso tiene que decir eso. Sin este motivo el cliente se
+ * quedaba pintando "conectado" mientras OpenVPN volvía a entrar solo.
+ */
+export function markKicked(deviceName?: string): void {
+  lastDropReason = "kicked";
+  lastDropDeviceName = deviceName?.trim() || null;
+}
+
 /** Lo limpia el siguiente connect y también el "entendido" del panel. */
 export function clearDropReason(): void {
   lastDropReason = null;
@@ -984,6 +1069,10 @@ export const __test = {
   TUNNEL_NAME,
   TUNNEL_NAME_REGEX,
   parseManagementLine,
+  // No es puro, pero tampoco necesita un OpenVPN de verdad: sólo un proceso
+  // y un socket de mentira. Y es la pieza de la que depende que el relay se
+  // entere de la desconexión al instante, así que conviene tenerla probada.
+  requestCleanExit,
   snapshotFromState,
   defaultOvpnConfigPath,
 };
