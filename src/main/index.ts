@@ -82,7 +82,12 @@ import {
 } from "./usb-session-state";
 import { usbAttach, usbDetachByBusId } from "./usb-manager";
 import { registerWakeModelHandlers } from "./wake-model";
-import { initFlashIntegration, type FlashIntegration } from "./flash-integration";
+import {
+  buildSerialFlashMenuItems,
+  initFlashIntegration,
+  type FlashIntegration,
+} from "./flash-integration";
+import type { ShimOrchestratorStatus } from "./shim-orchestrator";
 import {
   PROGRAMMER_MODE_FILENAME,
   loadProgrammerModes,
@@ -159,6 +164,8 @@ let flashIntegration: FlashIntegration | null = null;
 let programmerModeFilepath: string | null = null;
 let programmerModes: ProgrammerModeMap = {};
 let trayAttentionCount = 0;
+// Extremo local de la programación serie: solo se avisa si NO está disponible.
+let serialFlashStatus: ShimOrchestratorStatus = { kind: "stopped" };
 let versionCheckManager: VersionCheckManager | null = null;
 let lastVersionCheckState: VersionCheckState = { kind: "idle" };
 let deviceListManager: DeviceListManager | null = null;
@@ -288,6 +295,11 @@ function rebuildTrayMenu(): void {
       label: t("tray.openLocalPanel", { host: lastFirmwareProbe.host }),
       click: () => { void shell.openExternal(lastFirmwareProbe!.panelUrl); },
     });
+  }
+  const serialItems = buildSerialFlashMenuItems(serialFlashStatus);
+  if (serialItems.length > 0) {
+    items.push({ type: "separator" });
+    for (const it of serialItems) items.push(it);
   }
   items.push({ type: "separator" });
   items.push({
@@ -1494,6 +1506,10 @@ app.whenReady().then(async () => {
   flashIntegration = initFlashIntegration({
     detach: (busId) => usbDetachByBusId(busId),
     attach: (host, busId) => usbAttach(host, busId).then(() => undefined),
+    onSerialStatus: (status) => {
+      serialFlashStatus = status;
+      rebuildTrayMenu();
+    },
   });
   const preferencesPath = path.join(app.getPath("userData"), PREFERENCES_FILENAME);
   // Await preferences before the launch gate so the dialog renders in the

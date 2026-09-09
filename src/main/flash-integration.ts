@@ -21,11 +21,13 @@ import path from "path";
 import { app } from "electron";
 import {
   startShimOrchestrator,
-  SHIM_ORCHESTRATOR_PORT,
   ResolvedDevice,
   OrchestratorDeps,
+  type ShimOrchestrator,
+  type ShimOrchestratorStatus,
 } from "./shim-orchestrator";
 import { ShimManager } from "./shim-lifecycle-manager";
+import { t } from "./i18n";
 import {
   DEFAULT_PROGRAMMER_MODE,
   ProgrammerMode,
@@ -37,6 +39,8 @@ export interface FlashIntegrationDeps {
   statePath?: string;
   detach: (busId: string) => Promise<void>;
   attach: (host: string, busId: string) => Promise<void>;
+  /** Cambios en el extremo local, para poder avisar en la bandeja. */
+  onSerialStatus?: (status: ShimOrchestratorStatus) => void;
 }
 
 /** Minimal shape syncSessions needs from a persisted USB session entry. */
@@ -74,23 +78,40 @@ export function projectSessions(
 export class FlashIntegration {
   private registry = new Map<string, ResolvedDevice>(); // comPort -> device
   private shim: ShimManager;
-  private server: ReturnType<typeof startShimOrchestrator>;
+  private server: ShimOrchestrator;
   private sessions: ReadonlyArray<FlashSession> = [];
   private modes: ProgrammerModeMap = {};
 
   constructor(deps: FlashIntegrationDeps) {
     const statePath =
       deps.statePath ?? path.join(app.getPath("userData"), "rud1-shim-wraps.json");
-    const endpoint = `http://127.0.0.1:${SHIM_ORCHESTRATOR_PORT}/flash`;
-    this.shim = new ShimManager({ statePath, endpoint });
+    // El endpoint real llega con el primer estado del orquestador: puede
+    // acabar en otro puerto, o no abrir ninguno.
+    this.shim = new ShimManager({ statePath, endpoint: "" });
 
     const orchestratorDeps: OrchestratorDeps = {
       resolvePort: (comPort) => this.registry.get(comPort) ?? null,
       detach: deps.detach,
       attach: deps.attach,
     };
-    this.server = startShimOrchestrator(orchestratorDeps);
-    this.refreshShims();
+    this.server = startShimOrchestrator(orchestratorDeps, {
+      onStatus: (status) => {
+        // Reescribir la config de los shims es lo que hace efectivo el cambio
+        // de puerto (o el passthrough cuando no hay extremo).
+        this.shim.setEndpoint(this.server?.endpoint() ?? "");
+        this.refreshShims();
+        try {
+          deps.onSerialStatus?.(status);
+        } catch {
+          /* la bandeja no puede tumbar esto */
+        }
+      },
+    });
+  }
+
+  /** Estado del extremo local, para la bandeja y el diagnóstico. */
+  serialStatus(): ShimOrchestratorStatus {
+    return this.server.status();
   }
 
   /**
@@ -125,8 +146,10 @@ export class FlashIntegration {
   }
 
   private refreshShims(): void {
+    // Sin extremo local no se enruta nada: mapa vacío = passthrough puro.
+    const routing = this.server?.status().kind === "listening";
     try {
-      this.shim.syncPorts(this.portsMap());
+      this.shim.syncPorts(routing ? this.portsMap() : {});
     } catch {
       /* best-effort */
     }
@@ -145,6 +168,40 @@ export class FlashIntegration {
 
 export function initFlashIntegration(deps: FlashIntegrationDeps): FlashIntegration {
   return new FlashIntegration(deps);
+}
+
+/** Fila de bandeja, en el formato mínimo que consume index.ts. */
+export interface SerialFlashMenuItem {
+  label: string;
+  enabled: boolean;
+}
+
+/** Longitud a la que se recorta el mensaje del sistema en la bandeja. */
+const REASON_MAX = 90;
+
+/**
+ * Solo se dice algo cuando la programación serie NO está disponible: es lo
+ * único sobre lo que el operador puede actuar. Funcionando en otro puerto no
+ * se cuenta en la bandeja (queda en el log), porque no hay nada que hacer.
+ */
+export function buildSerialFlashMenuItems(
+  status: ShimOrchestratorStatus,
+): SerialFlashMenuItem[] {
+  if (status.kind !== "unavailable") return [];
+  const port = status.preferredPort;
+  let reason: string;
+  if (status.code === "EADDRINUSE") {
+    reason = status.heldBy
+      ? t("serialFlash.reasonBusyBy", { port, process: status.heldBy })
+      : t("serialFlash.reasonBusy", { port });
+  } else {
+    const message = status.message.slice(0, REASON_MAX);
+    reason = t("serialFlash.reasonError", { port, message });
+  }
+  return [
+    { label: t("serialFlash.unavailable"), enabled: false },
+    { label: reason, enabled: false },
+  ];
 }
 
 /**

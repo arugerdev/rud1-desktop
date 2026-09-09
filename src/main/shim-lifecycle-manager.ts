@@ -70,6 +70,15 @@ export class ShimManager {
     }
   }
 
+  /**
+   * El extremo local puede cambiar de puerto (o desaparecer) en caliente. Con
+   * cadena vacía el shim pasa de largo al flasher del IDE, que es la
+   * degradación que queremos cuando no hay orquestador.
+   */
+  setEndpoint(endpoint: string): void {
+    this.endpoint = endpoint;
+  }
+
   private isOurShim(p: string): boolean {
     try {
       const buf = fs.readFileSync(p);
