@@ -27,6 +27,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as path from "path";
 import * as os from "os";
+import { EventEmitter } from "events";
 
 // binary-helper pulls in electron at import time; stub it so vitest can
 // load vpn-manager without a running Electron runtime.
@@ -54,6 +55,7 @@ const {
   resolveConfigPath,
   parseWgShow,
   parseNetshInterface,
+  requestCleanExit,
   TUNNEL_NAME,
   TUNNEL_NAME_REGEX,
 } = __test;
@@ -454,5 +456,83 @@ describe("classifyHandshakeSnapshot", () => {
     expect(
       classifyHandshakeSnapshot({ kind: "stale", handshakeAgeMs: 5 * 60_000 }),
     ).toEqual({ handshakeStatus: "stale", handshakeAgeMs: 5 * 60_000 });
+  });
+});
+
+// ─── requestCleanExit ────────────────────────────────────────────────────────
+//
+// El bug del 2026-09-09: al desconectar, matábamos openvpn de golpe. El túnel
+// es UDP y no tiene cierre de conexión, así que el relay mantenía la sesión
+// listada como viva hasta agotar su keepalive —dos minutos— y la pantalla de
+// sesiones de la nube seguía diciendo que el técnico estaba dentro. Pedir la
+// salida por el canal de gestión es lo que hace que openvpn se despida.
+
+describe("requestCleanExit", () => {
+  const fakeProc = () => {
+    const proc = new EventEmitter() as EventEmitter & {
+      exitCode: number | null;
+      signalCode: string | null;
+    };
+    proc.exitCode = null;
+    proc.signalCode = null;
+    return proc;
+  };
+
+  const fakeSock = () => {
+    const escrito: string[] = [];
+    return {
+      escrito,
+      sock: {
+        destroyed: false,
+        write: (s: string) => {
+          escrito.push(s);
+          return true;
+        },
+      },
+    };
+  };
+
+  const live = (proc: unknown, sock: unknown) =>
+    ({ proc, managementSocket: sock }) as unknown as Parameters<
+      typeof requestCleanExit
+    >[0];
+
+  it("pide la salida por el canal de gestión y espera a que el proceso muera", async () => {
+    const proc = fakeProc();
+    const { sock, escrito } = fakeSock();
+    const p = requestCleanExit(live(proc, sock));
+    proc.emit("exit", 0);
+    await expect(p).resolves.toBe(true);
+    expect(escrito).toEqual(["signal SIGTERM\n"]);
+  });
+
+  it("sin canal de gestión no promete nada: que mande el camino duro", async () => {
+    await expect(requestCleanExit(live(fakeProc(), null))).resolves.toBe(false);
+  });
+
+  it("un canal ya destruido tampoco cuenta", async () => {
+    const { sock } = fakeSock();
+    sock.destroyed = true;
+    await expect(requestCleanExit(live(fakeProc(), sock))).resolves.toBe(false);
+  });
+
+  it("si openvpn ya estaba muerto no se espera a un `exit` que no llegará", async () => {
+    const proc = fakeProc();
+    proc.exitCode = 0;
+    const { sock } = fakeSock();
+    await expect(requestCleanExit(live(proc, sock))).resolves.toBe(true);
+  });
+
+  it("un openvpn que se queda colgado se da por perdido y no bloquea", async () => {
+    vi.useFakeTimers();
+    try {
+      const proc = fakeProc();
+      const { sock } = fakeSock();
+      const p = requestCleanExit(live(proc, sock));
+      await vi.advanceTimersByTimeAsync(1_600);
+      await expect(p).resolves.toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

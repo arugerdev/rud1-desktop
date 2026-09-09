@@ -1,6 +1,6 @@
 {
   "name": "rud1-desktop",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Rud1",
   "main": "dist/main/index.js",
   "author": "rud1",
