@@ -98,6 +98,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastBody: "Hay un dispositivo de primer arranque en la LAN en {host}. Abre el asistente de configuración para reclamarlo.",
       openWizard: "Abrir asistente",
     },
+    serialFlash: {
+      unavailable: "Programación serie no disponible",
+      reasonBusyBy: "El puerto {port} lo está usando {process}",
+      reasonBusy: "El puerto {port} está ocupado",
+      reasonError: "No se pudo abrir el puerto {port}: {message}",
+    },
     updates: {
       downloadingPct: "Descargando actualización… {pct}%",
       downloadingBytes: "Descargando actualización… {bytes}",
@@ -346,6 +352,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastTitle: "rud1 device ready to configure",
       toastBody: "A first-boot device is on the LAN at {host}. Open the setup wizard to claim it.",
       openWizard: "Open wizard",
+    },
+    serialFlash: {
+      unavailable: "Serial programming unavailable",
+      reasonBusyBy: "Port {port} is in use by {process}",
+      reasonBusy: "Port {port} is busy",
+      reasonError: "Could not open port {port}: {message}",
     },
     updates: {
       downloadingPct: "Downloading update… {pct}%",
@@ -596,6 +608,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastBody: "Un appareil en premier démarrage est sur le réseau local à {host}. Ouvrez l'assistant de configuration pour le revendiquer.",
       openWizard: "Ouvrir l'assistant",
     },
+    serialFlash: {
+      unavailable: "Programmation série indisponible",
+      reasonBusyBy: "Le port {port} est utilisé par {process}",
+      reasonBusy: "Le port {port} est occupé",
+      reasonError: "Impossible d'ouvrir le port {port} : {message}",
+    },
     updates: {
       downloadingPct: "Téléchargement de la mise à jour… {pct} %",
       downloadingBytes: "Téléchargement de la mise à jour… {bytes}",
@@ -844,6 +862,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastTitle: "Dispositivo rud1 pronto da configurare",
       toastBody: "Un dispositivo al primo avvio è sulla LAN all'indirizzo {host}. Apri la procedura guidata di configurazione per rivendicarlo.",
       openWizard: "Apri procedura guidata",
+    },
+    serialFlash: {
+      unavailable: "Programmazione seriale non disponibile",
+      reasonBusyBy: "La porta {port} è usata da {process}",
+      reasonBusy: "La porta {port} è occupata",
+      reasonError: "Impossibile aprire la porta {port}: {message}",
     },
     updates: {
       downloadingPct: "Download dell'aggiornamento… {pct}%",
@@ -1094,6 +1118,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastBody: "Ein Erststart-Gerät befindet sich im LAN unter {host}. Öffne den Einrichtungsassistenten, um es zu beanspruchen.",
       openWizard: "Assistenten öffnen",
     },
+    serialFlash: {
+      unavailable: "Serielle Programmierung nicht verfügbar",
+      reasonBusyBy: "Port {port} wird von {process} belegt",
+      reasonBusy: "Port {port} ist belegt",
+      reasonError: "Port {port} konnte nicht geöffnet werden: {message}",
+    },
     updates: {
       downloadingPct: "Update wird heruntergeladen… {pct} %",
       downloadingBytes: "Update wird heruntergeladen… {bytes}",
@@ -1342,6 +1372,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastTitle: "Dispositivo rud1 pronto para configurar",
       toastBody: "Um dispositivo em primeira inicialização está na LAN em {host}. Abra o assistente de configuração para reivindicá-lo.",
       openWizard: "Abrir assistente",
+    },
+    serialFlash: {
+      unavailable: "Programação serial indisponível",
+      reasonBusyBy: "A porta {port} está em uso por {process}",
+      reasonBusy: "A porta {port} está ocupada",
+      reasonError: "Não foi possível abrir a porta {port}: {message}",
     },
     updates: {
       downloadingPct: "Baixando atualização… {pct}%",
@@ -1592,6 +1628,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastBody: "有一台首次启动设备位于局域网 {host}。打开设置向导以认领它。",
       openWizard: "打开向导",
     },
+    serialFlash: {
+      unavailable: "串口编程不可用",
+      reasonBusyBy: "端口 {port} 正被 {process} 占用",
+      reasonBusy: "端口 {port} 已被占用",
+      reasonError: "无法打开端口 {port}：{message}",
+    },
     updates: {
       downloadingPct: "正在下载更新… {pct}%",
       downloadingBytes: "正在下载更新… {bytes}",
@@ -1840,6 +1882,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastTitle: "rud1 デバイスが設定可能です",
       toastBody: "初回起動のデバイスが LAN 上の {host} にあります。セットアップウィザードを開いて要求してください。",
       openWizard: "ウィザードを開く",
+    },
+    serialFlash: {
+      unavailable: "シリアル書き込みは利用できません",
+      reasonBusyBy: "ポート {port} は {process} が使用中です",
+      reasonBusy: "ポート {port} は使用中です",
+      reasonError: "ポート {port} を開けませんでした: {message}",
     },
     updates: {
       downloadingPct: "更新をダウンロード中… {pct}%",
@@ -2090,6 +2138,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastBody: "최초 부팅 장치가 LAN의 {host}에 있습니다. 설정 마법사를 열어 장치를 등록하세요.",
       openWizard: "마법사 열기",
     },
+    serialFlash: {
+      unavailable: "시리얼 프로그래밍을 사용할 수 없습니다",
+      reasonBusyBy: "{process}이(가) {port} 포트를 사용 중입니다",
+      reasonBusy: "{port} 포트가 사용 중입니다",
+      reasonError: "{port} 포트를 열 수 없습니다: {message}",
+    },
     updates: {
       downloadingPct: "업데이트 다운로드 중… {pct}%",
       downloadingBytes: "업데이트 다운로드 중… {bytes}",
@@ -2339,6 +2393,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastBody: "Устройство в режиме первого запуска находится в локальной сети по адресу {host}. Откройте мастер настройки, чтобы заявить на него права.",
       openWizard: "Открыть мастер",
     },
+    serialFlash: {
+      unavailable: "Программирование по последовательному порту недоступно",
+      reasonBusyBy: "Порт {port} занят процессом {process}",
+      reasonBusy: "Порт {port} занят",
+      reasonError: "Не удалось открыть порт {port}: {message}",
+    },
     updates: {
       downloadingPct: "Загрузка обновления… {pct}%",
       downloadingBytes: "Загрузка обновления… {bytes}",
@@ -2587,6 +2647,12 @@ export const translations: Record<Locale, TranslationTree> = {
       toastTitle: "جهاز rud1 جاهز للتكوين",
       toastBody: "يوجد جهاز في الإقلاع الأول على الشبكة المحلية على {host}. افتح معالج الإعداد للمطالبة به.",
       openWizard: "فتح المعالج",
+    },
+    serialFlash: {
+      unavailable: "البرمجة التسلسلية غير متاحة",
+      reasonBusyBy: "المنفذ {port} يستخدمه {process}",
+      reasonBusy: "المنفذ {port} مشغول",
+      reasonError: "تعذّر فتح المنفذ {port}: {message}",
     },
     updates: {
       downloadingPct: "جارٍ تنزيل التحديث… {pct}%",

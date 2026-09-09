@@ -74,11 +74,14 @@ On `onVpnConnected` reattach of stored sessions, re-register each session's
   `ShimManager.syncPorts` wraps any detected IDE flasher (Arduino IDE,
   PlatformIO, …) with the shim and writes a config listing the live ports.
 - User uploads from their own IDE unchanged → the IDE's avrdude/esptool is our
-  shim → it POSTs the job to `127.0.0.1:25341/flash` → the orchestrator detaches
-  the COM, calls the device's `POST :7070/api/flash` (runs the real flasher on
-  the Pi, ~0 ms), re-attaches the COM, returns the log. Latency-immune.
-- Upload to any non-rud1 board, or with the desktop closed → the shim passes
-  through to the real flasher, untouched ("no molestar").
+  shim → it POSTs the job to the orchestrator (`127.0.0.1:25341/flash` when the
+  preferred port is free; the endpoint written into each shim config is the
+  source of truth) → the orchestrator detaches the COM, calls the device's
+  `POST :7070/api/flash` (runs the real flasher on the Pi, ~0 ms), re-attaches
+  the COM, returns the log. Latency-immune.
+- Upload to any non-rud1 board, with the desktop closed, or with no orchestrator
+  endpoint (port unavailable) → the shim passes through to the real flasher,
+  untouched ("no molestar").
 - On detach / quit: shims restored, orchestrator stopped.
 
 ## Verified so far (prototype, over the production VPN)

@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 // a plain Node vitest run, so stub the one field the import chain touches.
 vi.mock("electron", () => ({ app: { isPackaged: true } }));
 
-import { projectSessions } from "./flash-integration";
+import { buildSerialFlashMenuItems, projectSessions } from "./flash-integration";
+import type { ShimOrchestratorStatus } from "./shim-orchestrator";
 
 /**
  * The flasher shim's COM→device map is a pure projection of the live USB
@@ -79,5 +80,51 @@ describe("projectSessions con modo de programador", () => {
       { "10.8.0.2|1-1": "never" },
     );
     expect([...m.keys()]).toEqual(["COM3"]);
+  });
+});
+
+/**
+ * Lo que se le cuenta al operador. Solo se avisa de lo actionable: si la
+ * programación serie funciona (aunque sea en otro puerto) no se dice nada,
+ * porque no hay nada que hacer.
+ */
+describe("buildSerialFlashMenuItems", () => {
+  const down = (over: Partial<Extract<ShimOrchestratorStatus, { kind: "unavailable" }>> = {}) =>
+    ({
+      kind: "unavailable" as const,
+      preferredPort: 25341,
+      code: "EADDRINUSE",
+      message: "listen EADDRINUSE: address already in use 127.0.0.1:25341",
+      heldBy: null,
+      ...over,
+    });
+
+  it("callado mientras la programación serie funcione", () => {
+    expect(buildSerialFlashMenuItems({ kind: "listening", port: 25341, preferredPort: 25341 })).toEqual([]);
+    // También en otro puerto: funciona, así que no hay nada que avisar.
+    expect(buildSerialFlashMenuItems({ kind: "listening", port: 51234, preferredPort: 25341 })).toEqual([]);
+    expect(buildSerialFlashMenuItems({ kind: "stopped" })).toEqual([]);
+  });
+
+  it("avisa sin poder pulsarse (no bloquea nada) y nombra el puerto", () => {
+    const items = buildSerialFlashMenuItems(down());
+    expect(items).toHaveLength(2);
+    expect(items.every((i) => i.enabled === false)).toBe(true);
+    expect(items[0].label).toContain("Serial programming unavailable");
+    expect(items[1].label).toContain("25341");
+  });
+
+  it("dice quién tiene el puerto cuando se ha podido averiguar", () => {
+    const items = buildSerialFlashMenuItems(down({ heldBy: "eCatcher" }));
+    expect(items[1].label).toContain("eCatcher");
+    expect(items[1].label).toContain("25341");
+  });
+
+  it("con otro tipo de fallo enseña el motivo del sistema, recortado", () => {
+    const items = buildSerialFlashMenuItems(
+      down({ code: "EACCES", message: "permission denied ".repeat(20) }),
+    );
+    expect(items[1].label).toContain("permission denied");
+    expect(items[1].label.length).toBeLessThan(160);
   });
 });
