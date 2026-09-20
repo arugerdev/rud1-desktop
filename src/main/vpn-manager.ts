@@ -22,6 +22,7 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 import fs from "fs/promises";
+import { existsSync } from "fs";
 import net from "net";
 import os from "os";
 import path from "path";
@@ -621,7 +622,25 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
   // Linux/macOS: openvpn necesita root para crear el adaptador. El sistema
   // pide la contraseña con su propio diálogo (pkexec/polkit), igual que el
   // aviso de UAC en Windows.
-  const plan = planPrivilegedSpawn(exe, args);
+  //
+  // Falta un caso: /dev/net/tun lo crea el módulo `tun` del kernel, que en
+  // una máquina recién arrancada puede no estar cargado — y entonces
+  // openvpn muere con un "no such file". Sólo en ese caso se carga primero,
+  // dentro de la MISMA orden para no pedir la contraseña dos veces (`exec`
+  // sustituye al shell, así que el proceso que vigilamos sigue siendo
+  // openvpn). Cuando el módulo ya está, se lanza openvpn directo: así el
+  // diálogo del sistema nombra a openvpn y no a un shell.
+  const needsTunModule =
+    process.platform === "linux" && !existsSync("/dev/net/tun");
+  const plan = process.platform === "win32" || !needsTunModule
+    ? planPrivilegedSpawn(exe, args)
+    : planPrivilegedSpawn("/bin/sh", [
+        "-c",
+        'modprobe tun >/dev/null 2>&1; exec "$@"',
+        "sh",
+        exe,
+        ...args,
+      ]);
   if (!plan.ok) throw new ElevationUnavailableError();
   let proc: ChildProcess;
   try {

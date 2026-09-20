@@ -1,5 +1,6 @@
 // host/busId/port validados antes de execFile; sin shell.
 import { execFile } from "child_process";
+import { existsSync } from "fs";
 import { promisify } from "util";
 import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helper";
 import { usbipMissingHint } from "./install-hints";
@@ -165,7 +166,10 @@ export function parseUsbipPort(stdout: string): AttachedDevice[] {
  */
 function planUsbipRoot(args: readonly string[], withModule: boolean) {
   const usbip = usbipPath();
-  if (!withModule) return planPrivilegedSpawn(usbip, args);
+  // Si el driver ya está cargado no hace falta el rodeo por el shell, y el
+  // diálogo del sistema nombra a usbip en vez de a `sh`.
+  const loaded = existsSync("/sys/devices/platform/vhci_hcd.0");
+  if (!withModule || loaded) return planPrivilegedSpawn(usbip, args);
   const script = 'modprobe vhci-hcd >/dev/null 2>&1; exec "$@"';
   return planPrivilegedSpawn("/bin/sh", ["-c", script, "sh", usbip, ...args]);
 }
