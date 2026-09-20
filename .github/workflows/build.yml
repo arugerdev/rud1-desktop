@@ -160,6 +160,10 @@ jobs:
     name: Publish "latest" release
     needs: [build-windows, build-linux, build-mac]
     runs-on: ubuntu-latest
+    # Publicar SOLO desde master. Lanzar el workflow a mano sobre una rama
+    # (para bajarse un instalador de prueba) generaba los tres instaladores
+    # y acto seguido los publicaba como la descarga oficial "latest".
+    if: github.ref == 'refs/heads/master'
     steps:
       # Checkout so we can read the canonical version straight from
       # package.json — the same value the app reports via app.getVersion().

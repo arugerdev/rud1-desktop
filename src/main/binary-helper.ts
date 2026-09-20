@@ -9,13 +9,20 @@
  *      `%ProgramFiles%\OpenVPN\bin\` but does NOT add that directory to
  *      PATH. Without an explicit lookup, `spawn openvpn` fails ENOENT
  *      even when the user has done a clean install.
- *   3. The bare binary name, letting the OS resolve via PATH.
+ *   3. Every directory in PATH, then the standard Unix install dirs
+ *      (/usr/sbin, /usr/bin, Homebrew, NixOS...). This step is what
+ *      makes Linux / macOS work at all: nothing is bundled there, the
+ *      binary comes from the distro package, and a desktop session's
+ *      PATH frequently omits /usr/sbin — where Debian/Ubuntu put
+ *      OpenVPN. Resolving it here (instead of leaving it to spawn) is
+ *      also what lets isBinaryAvailable answer truthfully.
+ *   4. The bare binary name, letting the OS resolve via PATH.
  *
  * Required binaries per platform (bundled = shipped in resources/<platform>/,
  * system = resolved from PATH / package manager):
  *   Windows: openvpn.exe + tapctl.exe (bundled portable),
  *            USBip-installer.exe (bundled).
- *   Linux:   openvpn + usbip (system, via deb `recommends` / PATH).
+ *   Linux:   openvpn + usbip + pkexec (system, from the distro package).
  *   macOS:   openvpn (system, Homebrew / PATH).
  */
 
@@ -75,6 +82,66 @@ function systemInstallCandidates(name: string): string[] {
   return out;
 }
 
+/**
+ * True when `p` is a real file this process can execute. On Unix the
+ * execute bit is part of the answer: a dangling symlink or a file with
+ * the right name and no permissions must not win the lookup and make
+ * `isBinaryAvailable` lie.
+ */
+function isExecutableFile(p: string): boolean {
+  try {
+    const stat = fs.statSync(p); // follows symlinks on purpose
+    if (!stat.isFile()) return false;
+    if (process.platform === "win32") return true;
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** PATH split into directories, in order, empty entries dropped. */
+function pathDirs(): string[] {
+  const raw = process.env["PATH"];
+  if (!raw) return [];
+  const sep = process.platform === "win32" ? ";" : ":";
+  return raw.split(sep).map((d) => d.trim()).filter((d) => d.length > 0);
+}
+
+/**
+ * Standard Unix install directories, searched after PATH.
+ *
+ * A GUI app inherits the session's PATH, which on many desktops lacks
+ * /usr/sbin — exactly where Debian/Ubuntu install `openvpn`. Homebrew's
+ * /opt/homebrew has the same problem on macOS: it is added by the shell
+ * profile, which an app launched from Finder never runs.
+ */
+function unixInstallDirs(): string[] {
+  if (process.platform === "darwin") {
+    return [
+      "/opt/homebrew/sbin",
+      "/opt/homebrew/bin",
+      "/usr/local/sbin",
+      "/usr/local/bin",
+      "/usr/sbin",
+      "/usr/bin",
+      "/sbin",
+      "/bin",
+    ];
+  }
+  return [
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/run/current-system/sw/bin", // NixOS
+    "/var/lib/flatpak/exports/bin",
+    "/snap/bin",
+  ];
+}
+
 export function binaryPath(name: string): string {
   const base = resourcesDir();
   const exeName = process.platform === "win32" ? `${name}.exe` : name;
@@ -93,6 +160,19 @@ export function binaryPath(name: string): string {
 
   for (const candidate of systemInstallCandidates(name)) {
     if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // PATH first (the user's own choice of binary wins), then the standard
+  // install dirs a desktop session's PATH tends to miss.
+  const searchDirs = process.platform === "win32"
+    ? pathDirs()
+    : [...pathDirs(), ...unixInstallDirs()];
+  const seen = new Set<string>();
+  for (const dir of searchDirs) {
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    const candidate = path.join(dir, exeName);
+    if (isExecutableFile(candidate)) return candidate;
   }
 
   // Fallback: bare name, resolved via system PATH at spawn time.
@@ -155,6 +235,21 @@ export function usbipPath(): string {
 
 export function usbipdPath(): string {
   return binaryPath("usbipd");
+}
+
+/**
+ * Absolute path to `pkexec`, the polkit helper that asks the desktop for
+ * the administrator password and then runs a command as root. It is what
+ * UAC is on Windows: OpenVPN and usbip both need root to create the
+ * virtual adapter and to talk to the kernel.
+ *
+ * Returns null on Windows (the installer manifest already asks for
+ * elevation) and on a system with no polkit installed.
+ */
+export function pkexecPath(): string | null {
+  if (process.platform === "win32") return null;
+  const resolved = binaryPath("pkexec");
+  return path.isAbsolute(resolved) ? resolved : null;
 }
 
 /**
