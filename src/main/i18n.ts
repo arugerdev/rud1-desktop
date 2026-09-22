@@ -304,6 +304,17 @@ export const translations: Record<Locale, TranslationTree> = {
       regionLabel: "notificaciones de rud1",
       dismiss: "Descartar",
     },
+    usbFolder: {
+      busyByOther: "Este USB lo está usando otro PC. Pídele que lo suelte o espera a que se libere solo.",
+      unsupportedPlatform: "Abrir la carpeta USB solo está disponible en Windows.",
+      invalidParams: "Datos de la carpeta no válidos.",
+      unreachable: "No se alcanza el equipo. Comprueba que la VPN de rud1 está conectada.",
+      credentialsRejected: "El equipo rechazó las credenciales de la carpeta.",
+      shareNotFound: "La carpeta ya no está compartida en el equipo.",
+      credentialConflict: "Windows ya tiene otra sesión abierta con este equipo. Cierra las carpetas del equipo e inténtalo de nuevo.",
+      openFailed: "La carpeta se conectó, pero no se pudo abrir el Explorador.",
+      failed: "No se pudo abrir la carpeta (código {code}).",
+    },
   },
   en: {
     app: {
@@ -558,6 +569,17 @@ export const translations: Record<Locale, TranslationTree> = {
     toast: {
       regionLabel: "rud1 notifications",
       dismiss: "Dismiss",
+    },
+    usbFolder: {
+      busyByOther: "Another PC is using this USB. Ask them to release it or wait for it to free up.",
+      unsupportedPlatform: "Opening the USB folder is only available on Windows.",
+      invalidParams: "Invalid folder details.",
+      unreachable: "The device can't be reached. Check that the rud1 VPN is connected.",
+      credentialsRejected: "The device rejected the folder credentials.",
+      shareNotFound: "The folder is no longer shared on the device.",
+      credentialConflict: "Windows already has another session open with this device. Close the device's folders and try again.",
+      openFailed: "The folder was connected, but File Explorer could not be opened.",
+      failed: "Could not open the folder (code {code}).",
     },
   },
   fr: {
@@ -814,6 +836,17 @@ export const translations: Record<Locale, TranslationTree> = {
       regionLabel: "notifications rud1",
       dismiss: "Ignorer",
     },
+    usbFolder: {
+      busyByOther: "Un autre PC utilise cet USB. Demandez-lui de le libérer ou attendez qu'il se libère.",
+      unsupportedPlatform: "L'ouverture du dossier USB n'est disponible que sous Windows.",
+      invalidParams: "Données du dossier non valides.",
+      unreachable: "L'équipement est injoignable. Vérifiez que le VPN rud1 est connecté.",
+      credentialsRejected: "L'équipement a refusé les identifiants du dossier.",
+      shareNotFound: "Le dossier n'est plus partagé sur l'équipement.",
+      credentialConflict: "Windows a déjà une autre session ouverte avec cet équipement. Fermez ses dossiers et réessayez.",
+      openFailed: "Le dossier est connecté, mais l'Explorateur n'a pas pu s'ouvrir.",
+      failed: "Impossible d'ouvrir le dossier (code {code}).",
+    },
   },
   it: {
     app: {
@@ -1068,6 +1101,17 @@ export const translations: Record<Locale, TranslationTree> = {
     toast: {
       regionLabel: "notifiche rud1",
       dismiss: "Ignora",
+    },
+    usbFolder: {
+      busyByOther: "Un altro PC sta usando questa USB. Chiedi di rilasciarla o attendi che si liberi.",
+      unsupportedPlatform: "L'apertura della cartella USB è disponibile solo su Windows.",
+      invalidParams: "Dati della cartella non validi.",
+      unreachable: "Il dispositivo non è raggiungibile. Verifica che la VPN di rud1 sia connessa.",
+      credentialsRejected: "Il dispositivo ha rifiutato le credenziali della cartella.",
+      shareNotFound: "La cartella non è più condivisa sul dispositivo.",
+      credentialConflict: "Windows ha già un'altra sessione aperta con questo dispositivo. Chiudi le sue cartelle e riprova.",
+      openFailed: "La cartella è connessa, ma non è stato possibile aprire Esplora file.",
+      failed: "Impossibile aprire la cartella (codice {code}).",
     },
   },
   de: {
@@ -1324,6 +1368,17 @@ export const translations: Record<Locale, TranslationTree> = {
       regionLabel: "rud1-Benachrichtigungen",
       dismiss: "Schließen",
     },
+    usbFolder: {
+      busyByOther: "Ein anderer PC verwendet dieses USB-Gerät. Bitte ihn, es freizugeben, oder warte, bis es frei wird.",
+      unsupportedPlatform: "Das Öffnen des USB-Ordners ist nur unter Windows verfügbar.",
+      invalidParams: "Ungültige Ordnerdaten.",
+      unreachable: "Das Gerät ist nicht erreichbar. Prüfe, ob das rud1-VPN verbunden ist.",
+      credentialsRejected: "Das Gerät hat die Zugangsdaten des Ordners abgelehnt.",
+      shareNotFound: "Der Ordner ist auf dem Gerät nicht mehr freigegeben.",
+      credentialConflict: "Windows hat bereits eine andere Sitzung mit diesem Gerät. Schließe dessen Ordner und versuche es erneut.",
+      openFailed: "Der Ordner ist verbunden, aber der Explorer konnte nicht geöffnet werden.",
+      failed: "Der Ordner konnte nicht geöffnet werden (Code {code}).",
+    },
   },
   ptBR: {
     app: {
@@ -1578,6 +1633,17 @@ export const translations: Record<Locale, TranslationTree> = {
     toast: {
       regionLabel: "notificações do rud1",
       dismiss: "Dispensar",
+    },
+    usbFolder: {
+      busyByOther: "Outro PC está usando este USB. Peça para liberá-lo ou aguarde até ele ficar livre.",
+      unsupportedPlatform: "Abrir a pasta USB só está disponível no Windows.",
+      invalidParams: "Dados da pasta inválidos.",
+      unreachable: "O equipamento não está acessível. Verifique se a VPN do rud1 está conectada.",
+      credentialsRejected: "O equipamento recusou as credenciais da pasta.",
+      shareNotFound: "A pasta não está mais compartilhada no equipamento.",
+      credentialConflict: "O Windows já tem outra sessão aberta com este equipamento. Feche as pastas dele e tente de novo.",
+      openFailed: "A pasta foi conectada, mas não foi possível abrir o Explorador.",
+      failed: "Não foi possível abrir a pasta (código {code}).",
     },
   },
   zh: {
@@ -1834,6 +1900,17 @@ export const translations: Record<Locale, TranslationTree> = {
       regionLabel: "rud1 通知",
       dismiss: "关闭",
     },
+    usbFolder: {
+      busyByOther: "另一台电脑正在使用此 USB。请对方释放，或等待其自动释放。",
+      unsupportedPlatform: "仅在 Windows 上可以打开 USB 文件夹。",
+      invalidParams: "文件夹信息无效。",
+      unreachable: "无法连接到设备。请确认 rud1 VPN 已连接。",
+      credentialsRejected: "设备拒绝了该文件夹的凭据。",
+      shareNotFound: "该文件夹已不再在设备上共享。",
+      credentialConflict: "Windows 已与此设备建立了另一个会话。请关闭该设备的文件夹后重试。",
+      openFailed: "文件夹已连接，但无法打开文件资源管理器。",
+      failed: "无法打开文件夹（代码 {code}）。",
+    },
   },
   ja: {
     app: {
@@ -2088,6 +2165,17 @@ export const translations: Record<Locale, TranslationTree> = {
     toast: {
       regionLabel: "rud1 の通知",
       dismiss: "閉じる",
+    },
+    usbFolder: {
+      busyByOther: "別の PC がこの USB を使用中です。解放してもらうか、空くまでお待ちください。",
+      unsupportedPlatform: "USB フォルダーを開く機能は Windows でのみ利用できます。",
+      invalidParams: "フォルダーの情報が無効です。",
+      unreachable: "デバイスに接続できません。rud1 VPN が接続されているか確認してください。",
+      credentialsRejected: "デバイスがフォルダーの認証情報を拒否しました。",
+      shareNotFound: "このフォルダーはデバイスで共有されなくなりました。",
+      credentialConflict: "Windows はこのデバイスと別のセッションをすでに開いています。デバイスのフォルダーを閉じてから再試行してください。",
+      openFailed: "フォルダーは接続されましたが、エクスプローラーを開けませんでした。",
+      failed: "フォルダーを開けませんでした（コード {code}）。",
     },
   },
   ko: {
@@ -2344,6 +2432,17 @@ export const translations: Record<Locale, TranslationTree> = {
       regionLabel: "rud1 알림",
       dismiss: "닫기",
     },
+    usbFolder: {
+      busyByOther: "다른 PC가 이 USB를 사용 중입니다. 해제를 요청하거나 풀릴 때까지 기다리세요.",
+      unsupportedPlatform: "USB 폴더 열기는 Windows에서만 사용할 수 있습니다.",
+      invalidParams: "폴더 정보가 올바르지 않습니다.",
+      unreachable: "장치에 연결할 수 없습니다. rud1 VPN이 연결되어 있는지 확인하세요.",
+      credentialsRejected: "장치가 폴더 자격 증명을 거부했습니다.",
+      shareNotFound: "이 폴더는 더 이상 장치에서 공유되지 않습니다.",
+      credentialConflict: "Windows에 이 장치와의 다른 세션이 이미 열려 있습니다. 장치의 폴더를 닫고 다시 시도하세요.",
+      openFailed: "폴더는 연결되었지만 파일 탐색기를 열 수 없습니다.",
+      failed: "폴더를 열 수 없습니다(코드 {code}).",
+    },
   },
   ru: {
     app: {
@@ -2599,6 +2698,17 @@ export const translations: Record<Locale, TranslationTree> = {
       regionLabel: "уведомления rud1",
       dismiss: "Закрыть",
     },
+    usbFolder: {
+      busyByOther: "Этот USB использует другой ПК. Попросите его освободить устройство или дождитесь освобождения.",
+      unsupportedPlatform: "Открыть USB-папку можно только в Windows.",
+      invalidParams: "Недопустимые данные папки.",
+      unreachable: "Устройство недоступно. Проверьте, что VPN rud1 подключён.",
+      credentialsRejected: "Устройство отклонило учётные данные папки.",
+      shareNotFound: "Папка больше не предоставлена в общий доступ на устройстве.",
+      credentialConflict: "В Windows уже открыт другой сеанс с этим устройством. Закройте его папки и повторите попытку.",
+      openFailed: "Папка подключена, но не удалось открыть Проводник.",
+      failed: "Не удалось открыть папку (код {code}).",
+    },
   },
   ar: {
     app: {
@@ -2853,6 +2963,17 @@ export const translations: Record<Locale, TranslationTree> = {
     toast: {
       regionLabel: "إشعارات rud1",
       dismiss: "تجاهل",
+    },
+    usbFolder: {
+      busyByOther: "يستخدم جهاز كمبيوتر آخر وحدة USB هذه. اطلب منه تحريرها أو انتظر حتى تتحرر.",
+      unsupportedPlatform: "فتح مجلد USB متاح على Windows فقط.",
+      invalidParams: "بيانات المجلد غير صالحة.",
+      unreachable: "تعذّر الوصول إلى الجهاز. تحقّق من أن شبكة VPN الخاصة بـ rud1 متصلة.",
+      credentialsRejected: "رفض الجهاز بيانات اعتماد المجلد.",
+      shareNotFound: "لم يعد المجلد مشاركًا على الجهاز.",
+      credentialConflict: "يوجد لدى Windows جلسة أخرى مفتوحة مع هذا الجهاز. أغلق مجلداته وحاول مرة أخرى.",
+      openFailed: "تم توصيل المجلد، لكن تعذّر فتح مستكشف الملفات.",
+      failed: "تعذّر فتح المجلد (الرمز {code}).",
     },
   },
 };

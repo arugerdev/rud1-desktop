@@ -258,6 +258,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("usb:setProgrammerMode", host, busId, mode) as Promise<
         { ok: true; mode: string } | { ok: false; error: string }
       >,
+
+    /** Monta la memoria USB compartida por SMB (solo Windows) y la abre en el Explorador. */
+    openFolder: (params: { host: string; share: string; username: string; password: string }) =>
+      ipcRenderer.invoke("usb:openFolder", params) as Promise<{ ok: boolean; error?: string }>,
   },
 
   net: {

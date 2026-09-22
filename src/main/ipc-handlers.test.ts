@@ -114,6 +114,11 @@ vi.mock("./usb-manager", () => ({
     }
   },
 }));
+vi.mock("./usb-folder", () => ({
+  openUsbFolder: vi.fn(async () => ({ ok: true })),
+  validateUsbFolderParams: (p: unknown) =>
+    !!p && typeof p === "object" && typeof (p as { password?: unknown }).password === "string",
+}));
 vi.mock("./net-diag-manager", () => ({
   ping: vi.fn(async () => ({ ok: true })),
   interfaces: vi.fn(() => []),
@@ -953,5 +958,37 @@ describe("versionCheck:state / versionCheck:recheck (iter 37)", () => {
   it("versionCheck:recheck delegates to accessor.recheck and returns ok", async () => {
     const result = await vcHandlers["versionCheck:recheck"](allowedEvent);
     expect(result).toEqual({ ok: true });
+  });
+});
+
+describe("usb:openFolder", () => {
+  const params = { host: "10.77.5.1", share: "usb-2-1-4", username: "rud1smb", password: "abcdefgh12" };
+
+  it("rejects an unauthorized origin without delegating", async () => {
+    const { openUsbFolder } = await import("./usb-folder");
+    vi.mocked(openUsbFolder).mockClear();
+    const evilEvent = {
+      senderFrame: { url: "https://evil.example/" },
+      sender: {},
+    } as unknown as Electron.IpcMainInvokeEvent;
+    const result = await handlers["usb:openFolder"](evilEvent, params);
+    expect(result).toEqual({ ok: false, error: "Unauthorized origin" });
+    expect(openUsbFolder).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed payload without delegating", async () => {
+    const { openUsbFolder } = await import("./usb-folder");
+    vi.mocked(openUsbFolder).mockClear();
+    const result = (await handlers["usb:openFolder"](allowedEvent, "nope")) as { ok: boolean };
+    expect(result.ok).toBe(false);
+    expect(openUsbFolder).not.toHaveBeenCalled();
+  });
+
+  it("delegates a valid payload to openUsbFolder", async () => {
+    const { openUsbFolder } = await import("./usb-folder");
+    vi.mocked(openUsbFolder).mockClear();
+    const result = await handlers["usb:openFolder"](allowedEvent, params);
+    expect(result).toEqual({ ok: true });
+    expect(openUsbFolder).toHaveBeenCalledWith(params);
   });
 });
