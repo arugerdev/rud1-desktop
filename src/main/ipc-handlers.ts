@@ -43,6 +43,8 @@ import {
   getUsbipInstallerPath,
   UsbipMissingError,
 } from "./usb-manager";
+import { openUsbFolder, validateUsbFolderParams } from "./usb-folder";
+import { t } from "./i18n";
 import {
   notifyVpnConnected,
   notifyVpnCgnatWarning,
@@ -996,6 +998,19 @@ export function registerIpcHandlers(opts: {
       }
     },
   );
+
+  // Carpeta SMB de la memoria USB del equipo; la contraseña nunca se registra.
+  ipcMain.handle("usb:openFolder", async (event, params: unknown) => {
+    if (!checkSender(event)) return { ok: false, error: "Unauthorized origin" };
+    if (!validateUsbFolderParams(params)) {
+      return { ok: false, error: t("usbFolder.invalidParams") };
+    }
+    try {
+      return await openUsbFolder(params);
+    } catch {
+      return { ok: false, error: t("usbFolder.failed", { code: "?" }) };
+    }
+  });
 
   // Status probe used by the panel to decide whether to surface the
   // "Install USB/IP" CTA before the user even tries Attach.
