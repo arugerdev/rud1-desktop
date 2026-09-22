@@ -56,6 +56,8 @@ const {
   parseUsbipPort,
   HOST_REGEX,
   BUS_ID_REGEX,
+  portAttachedHere,
+  isAlreadyAttachedError,
 } = __test;
 
 // ─── 1. validateHost ────────────────────────────────────────────────────────
@@ -424,4 +426,27 @@ describe("usbAttach / usbDetach / usbList — happy paths", () => {
     "usbList returns parsed AttachedDevice rows from `usbip port` stdout " +
       "(skipped: parseUsbipPort is exercised directly via raw fixtures)",
   );
+});
+
+// ─── 9. "Device busy" no es éxito si el USB no está en este PC ──────────────
+
+describe("portAttachedHere", () => {
+  const live = [
+    { port: 1, host: "192.168.0.200", busId: "1-1" },
+    { port: 2, host: "10.0.0.5", busId: "1-2" },
+  ];
+
+  it("devuelve el puerto cuando ese USB de ese equipo ya está en este PC", () => {
+    expect(portAttachedHere(live, "192.168.0.200", "1-1")).toBe(1);
+  });
+
+  it("null si lo tiene otro cliente (mismo busId de otro equipo o ausente)", () => {
+    expect(portAttachedHere(live, "10.0.0.5", "1-1")).toBeNull();
+    expect(portAttachedHere(live, "192.168.0.200", "1-3")).toBeNull();
+    expect(portAttachedHere([], "192.168.0.200", "1-1")).toBeNull();
+  });
+
+  it("el mensaje de usbip-win2 para un USB ocupado entra por la ruta de verificación", () => {
+    expect(isAlreadyAttachedError("usbip: error: Device busy (already exported)")).toBe(true);
+  });
 });

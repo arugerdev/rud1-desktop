@@ -42,6 +42,7 @@ import {
   isUsbipInstalled,
   getUsbipInstallerPath,
   UsbipMissingError,
+  UsbBusyError,
 } from "./usb-manager";
 import { openUsbFolder, validateUsbFolderParams } from "./usb-folder";
 import { t } from "./i18n";
@@ -897,6 +898,7 @@ export function registerIpcHandlers(opts: {
             installerPath: err.installerPath,
           };
         }
+        if (err instanceof UsbBusyError) return { ok: false, error: err.message, busy: true };
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },

@@ -305,6 +305,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "Descartar",
     },
     usbFolder: {
+      busyByOther: "Este USB lo está usando otro PC. Pídele que lo suelte o espera a que se libere solo.",
       unsupportedPlatform: "Abrir la carpeta USB solo está disponible en Windows.",
       invalidParams: "Datos de la carpeta no válidos.",
       unreachable: "No se alcanza el equipo. Comprueba que la VPN de rud1 está conectada.",
@@ -570,6 +571,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "Dismiss",
     },
     usbFolder: {
+      busyByOther: "Another PC is using this USB. Ask them to release it or wait for it to free up.",
       unsupportedPlatform: "Opening the USB folder is only available on Windows.",
       invalidParams: "Invalid folder details.",
       unreachable: "The device can't be reached. Check that the rud1 VPN is connected.",
@@ -835,6 +837,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "Ignorer",
     },
     usbFolder: {
+      busyByOther: "Un autre PC utilise cet USB. Demandez-lui de le libérer ou attendez qu'il se libère.",
       unsupportedPlatform: "L'ouverture du dossier USB n'est disponible que sous Windows.",
       invalidParams: "Données du dossier non valides.",
       unreachable: "L'équipement est injoignable. Vérifiez que le VPN rud1 est connecté.",
@@ -1100,6 +1103,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "Ignora",
     },
     usbFolder: {
+      busyByOther: "Un altro PC sta usando questa USB. Chiedi di rilasciarla o attendi che si liberi.",
       unsupportedPlatform: "L'apertura della cartella USB è disponibile solo su Windows.",
       invalidParams: "Dati della cartella non validi.",
       unreachable: "Il dispositivo non è raggiungibile. Verifica che la VPN di rud1 sia connessa.",
@@ -1365,6 +1369,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "Schließen",
     },
     usbFolder: {
+      busyByOther: "Ein anderer PC verwendet dieses USB-Gerät. Bitte ihn, es freizugeben, oder warte, bis es frei wird.",
       unsupportedPlatform: "Das Öffnen des USB-Ordners ist nur unter Windows verfügbar.",
       invalidParams: "Ungültige Ordnerdaten.",
       unreachable: "Das Gerät ist nicht erreichbar. Prüfe, ob das rud1-VPN verbunden ist.",
@@ -1630,6 +1635,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "Dispensar",
     },
     usbFolder: {
+      busyByOther: "Outro PC está usando este USB. Peça para liberá-lo ou aguarde até ele ficar livre.",
       unsupportedPlatform: "Abrir a pasta USB só está disponível no Windows.",
       invalidParams: "Dados da pasta inválidos.",
       unreachable: "O equipamento não está acessível. Verifique se a VPN do rud1 está conectada.",
@@ -1895,6 +1901,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "关闭",
     },
     usbFolder: {
+      busyByOther: "另一台电脑正在使用此 USB。请对方释放，或等待其自动释放。",
       unsupportedPlatform: "仅在 Windows 上可以打开 USB 文件夹。",
       invalidParams: "文件夹信息无效。",
       unreachable: "无法连接到设备。请确认 rud1 VPN 已连接。",
@@ -2160,6 +2167,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "閉じる",
     },
     usbFolder: {
+      busyByOther: "別の PC がこの USB を使用中です。解放してもらうか、空くまでお待ちください。",
       unsupportedPlatform: "USB フォルダーを開く機能は Windows でのみ利用できます。",
       invalidParams: "フォルダーの情報が無効です。",
       unreachable: "デバイスに接続できません。rud1 VPN が接続されているか確認してください。",
@@ -2425,6 +2433,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "닫기",
     },
     usbFolder: {
+      busyByOther: "다른 PC가 이 USB를 사용 중입니다. 해제를 요청하거나 풀릴 때까지 기다리세요.",
       unsupportedPlatform: "USB 폴더 열기는 Windows에서만 사용할 수 있습니다.",
       invalidParams: "폴더 정보가 올바르지 않습니다.",
       unreachable: "장치에 연결할 수 없습니다. rud1 VPN이 연결되어 있는지 확인하세요.",
@@ -2690,6 +2699,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "Закрыть",
     },
     usbFolder: {
+      busyByOther: "Этот USB использует другой ПК. Попросите его освободить устройство или дождитесь освобождения.",
       unsupportedPlatform: "Открыть USB-папку можно только в Windows.",
       invalidParams: "Недопустимые данные папки.",
       unreachable: "Устройство недоступно. Проверьте, что VPN rud1 подключён.",
@@ -2955,6 +2965,7 @@ export const translations: Record<Locale, TranslationTree> = {
       dismiss: "تجاهل",
     },
     usbFolder: {
+      busyByOther: "يستخدم جهاز كمبيوتر آخر وحدة USB هذه. اطلب منه تحريرها أو انتظر حتى تتحرر.",
       unsupportedPlatform: "فتح مجلد USB متاح على Windows فقط.",
       invalidParams: "بيانات المجلد غير صالحة.",
       unreachable: "تعذّر الوصول إلى الجهاز. تحقّق من أن شبكة VPN الخاصة بـ rud1 متصلة.",

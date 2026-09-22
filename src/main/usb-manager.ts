@@ -6,13 +6,27 @@ import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helpe
 import { usbipMissingHint } from "./install-hints";
 import { ElevationUnavailableError, planPrivilegedSpawn } from "./elevation";
 import { diagnoseTapReachability } from "./tap-reachability";
+import { t } from "./i18n";
 
 const execFileAsync = promisify(execFile);
+
+// Un vhci colgado dejaba usbip.exe esperando para siempre y la app con él.
+const USBIP_ATTACH_TIMEOUT_MS = 30_000;
+const USBIP_DETACH_TIMEOUT_MS = 15_000;
+const USBIP_PORT_TIMEOUT_MS = 10_000;
 
 // Adapter the OpenVPN client binds; kept in sync with vpn-manager's TUNNEL_NAME.
 const TAP_ADAPTER_NAME = "rud1-tap";
 
 const USBIP_WIN_INSTALL_URL = "https://github.com/vadimgrn/usbip-win2/releases";
+
+/** El equipo dice que el USB lo tiene otro cliente. */
+export class UsbBusyError extends Error {
+  constructor(busId: string) {
+    super(`${t("usbFolder.busyByOther")} (${busId})`);
+    this.name = "UsbBusyError";
+  }
+}
 
 export class UsbipMissingError extends Error {
   /** Absolute path al NSIS bundled (Win-only); null en otros. */
@@ -204,7 +218,7 @@ async function detachLinux(port: number): Promise<void> {
 async function listLinux(): Promise<AttachedDevice[]> {
   const usbip = usbipPath();
   try {
-    const { stdout } = await execFileAsync(usbip, ["port"]);
+    const { stdout } = await execFileAsync(usbip, ["port"], { timeout: USBIP_PORT_TIMEOUT_MS });
     return parseUsbipPort(stdout);
   } catch {
     return [];
@@ -224,7 +238,9 @@ async function attachWindows(host: string, busId: string): Promise<number> {
   let stdout = "";
   let stderr = "";
   try {
-    const r = await execFileAsync(usbip, ["attach", "-r", host, "-b", busId]);
+    const r = await execFileAsync(usbip, ["attach", "-r", host, "-b", busId], {
+      timeout: USBIP_ATTACH_TIMEOUT_MS,
+    });
     stdout = r.stdout;
     stderr = r.stderr;
   } catch (err) {
@@ -251,7 +267,7 @@ async function attachWindows(host: string, busId: string): Promise<number> {
 async function detachWindows(port: number): Promise<void> {
   const usbip = usbipPath();
   try {
-    await execFileAsync(usbip, ["detach", "-p", String(port)]);
+    await execFileAsync(usbip, ["detach", "-p", String(port)], { timeout: USBIP_DETACH_TIMEOUT_MS });
   } catch (err) {
     const e = err as ExecFileError;
     throw new Error((e.stderr || e.stdout || e.message).trim());
@@ -261,7 +277,7 @@ async function detachWindows(port: number): Promise<void> {
 async function listWindows(): Promise<AttachedDevice[]> {
   const usbip = usbipPath();
   try {
-    const { stdout, stderr } = await execFileAsync(usbip, ["port"]);
+    const { stdout, stderr } = await execFileAsync(usbip, ["port"], { timeout: USBIP_PORT_TIMEOUT_MS });
     return parseUsbipPort(`${stdout}\n${stderr}`);
   } catch (err) {
     // Honour the previous "best-effort" contract for the renderer's
@@ -301,6 +317,12 @@ const DRIVER_MISSING_PATTERNS: readonly RegExp[] = [
   /driver.*not.*(loaded|installed)/i,
   /could not open.*device/i,
 ];
+
+/** Puerto vhci si ese USB de ese equipo ya está conectado en este PC. */
+function portAttachedHere(live: readonly AttachedDevice[], host: string, busId: string): number | null {
+  const mine = live.find((d) => d.busId === busId && d.host === host);
+  return mine ? mine.port : null;
+}
 
 function isAlreadyAttachedError(msg: string): boolean {
   return ALREADY_ATTACHED_PATTERNS.some((re) => re.test(msg));
@@ -438,10 +460,11 @@ export async function usbAttach(host: string, busId: string): Promise<number> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (isAlreadyAttachedError(msg)) {
-      // Idempotent: a second click after the panel reloaded shouldn't
-      // explode. Return port 0 — the kernel knows the real one, but
-      // the renderer just needs *some* truthy value to track state.
-      return 0;
+      // "Device busy" también significa que lo tiene OTRO cliente: solo es
+      // éxito si de verdad está conectado en este PC.
+      const port = portAttachedHere(await usbList().catch(() => [] as AttachedDevice[]), host, busId);
+      if (port !== null) return port;
+      throw new UsbBusyError(busId);
     }
     if (isDriverMissingError(msg)) {
       throw new UsbipMissingError(usbipInstallerPath());
@@ -573,6 +596,8 @@ export function getUsbipInstallerPath(): string | null {
  * Production callers must use the public API above.
  */
 export const __test = {
+  portAttachedHere,
+  isAlreadyAttachedError,
   assertHost,
   assertBusId,
   assertPort,
