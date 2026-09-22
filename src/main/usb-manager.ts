@@ -1,7 +1,10 @@
 // host/busId/port validados antes de execFile; sin shell.
 import { execFile } from "child_process";
+import { existsSync } from "fs";
 import { promisify } from "util";
 import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helper";
+import { usbipMissingHint } from "./install-hints";
+import { ElevationUnavailableError, planPrivilegedSpawn } from "./elevation";
 import { diagnoseTapReachability } from "./tap-reachability";
 
 const execFileAsync = promisify(execFile);
@@ -17,11 +20,11 @@ export class UsbipMissingError extends Error {
 
   constructor(installerPath: string | null = null) {
     const isWin = process.platform === "win32";
+    // En Linux el nombre del paquete y el gestor dependen de la distro: se
+    // da el comando exacto en vez de "usa tu gestor de paquetes".
     const platformHint = isWin
       ? `Install usbip-win2 (${USBIP_WIN_INSTALL_URL}) — the bundled installer runs the kernel driver setup.`
-      : process.platform === "darwin"
-      ? "Install usbip via Homebrew (it ships in linux-tools or build from source)."
-      : "Install usbip-utils via your distro package manager (apt/dnf/pacman).";
+      : usbipMissingHint();
     super(`USB/IP tools not found. ${platformHint}`);
     this.name = "UsbipMissingError";
     this.installerPath = installerPath;
@@ -151,19 +154,53 @@ export function parseUsbipPort(stdout: string): AttachedDevice[] {
 
 // ─── Linux ────────────────────────────────────────────────────────────────────
 
-async function attachLinux(host: string, busId: string): Promise<number> {
+/**
+ * Enganchar un USB remoto toca el kernel (driver vhci), y eso pide root.
+ * Windows lo tiene resuelto porque la app entera arranca elevada; en Linux
+ * hay que pedirlo, y se pide UNA vez para las dos cosas que hacen falta:
+ * cargar el módulo vhci-hcd y hacer el attach.
+ *
+ * El host y el busId no se interpolan en el texto del script: viajan como
+ * parámetros posicionales de sh, así que ni aunque burlaran el validador
+ * podrían convertirse en otro comando.
+ */
+function planUsbipRoot(args: readonly string[], withModule: boolean) {
   const usbip = usbipPath();
+  // Si el driver ya está cargado no hace falta el rodeo por el shell, y el
+  // diálogo del sistema nombra a usbip en vez de a `sh`.
+  const loaded = existsSync("/sys/devices/platform/vhci_hcd.0");
+  if (!withModule || loaded) return planPrivilegedSpawn(usbip, args);
+  const script = 'modprobe vhci-hcd >/dev/null 2>&1; exec "$@"';
+  return planPrivilegedSpawn("/bin/sh", ["-c", script, "sh", usbip, ...args]);
+}
+
+async function runUsbipRoot(
+  args: readonly string[],
+  withModule: boolean,
+): Promise<string> {
+  const plan = planUsbipRoot(args, withModule);
+  if (!plan.ok) throw new ElevationUnavailableError();
+  const { stdout, stderr } = await execFileAsync(plan.command, plan.args);
+  return `${stdout}\n${stderr}`;
+}
+
+async function attachLinux(host: string, busId: string): Promise<number> {
   // kernel.org usbip-utils only accepts -r/-b/-d; -h is rejected as
   // "invalid option" so Linux/macOS attach was silently broken.
-  const { stdout } = await execFileAsync(usbip, ["attach", "-r", host, "-b", busId]);
-  return parseAttachPort(stdout);
+  const out = await runUsbipRoot(["attach", "-r", host, "-b", busId], true);
+  return parseAttachPort(out);
 }
 
 async function detachLinux(port: number): Promise<void> {
-  const usbip = usbipPath();
-  await execFileAsync(usbip, ["detach", "-p", String(port)]);
+  await runUsbipRoot(["detach", "-p", String(port)], false);
 }
 
+/**
+ * El listado NO se eleva: lo consulta el panel en bucle y un diálogo de
+ * contraseña por cada vuelta sería inaceptable. `usbip port` lee sysfs, que
+ * es de lectura pública, así que funciona como usuario normal mientras el
+ * módulo esté cargado — y lo carga el attach.
+ */
 async function listLinux(): Promise<AttachedDevice[]> {
   const usbip = usbipPath();
   try {

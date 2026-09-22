@@ -22,11 +22,18 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 import fs from "fs/promises";
+import { existsSync } from "fs";
 import net from "net";
 import os from "os";
 import path from "path";
 import { app } from "electron";
-import { openvpnPath, isBinaryAvailable, openvpnBundledDir } from "./binary-helper";
+import { openvpnPath, isBinaryAvailable, openvpnBundledDir, binaryPath } from "./binary-helper";
+import { openvpnMissingMessage } from "./install-hints";
+import {
+  describeElevationFailure,
+  ElevationUnavailableError,
+  planPrivilegedSpawn,
+} from "./elevation";
 import {
   detectOpenVpnRuntime,
   ensureTapDriverInstalled,
@@ -43,14 +50,22 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const OPENVPN_DOWNLOAD_URL = "https://openvpn.net/community-downloads/";
-
 // Local TCP port the openvpn `--management` socket listens on. Loopback
 // only, no password — we're the only consumer and the renderer never
 // gets a port number.
 const MANAGEMENT_HOST = "127.0.0.1";
 const MANAGEMENT_PORT_BASE = 25340;
 const MANAGEMENT_PORT_RANGE = 200;
+
+// Cuántos puertos de gestión se miran al conectar buscando un openvpn
+// huérfano de una sesión anterior (Unix). Uno nuestro se queda casi
+// siempre en el puerto base; mirar los primeros basta y cuesta
+// milisegundos porque un puerto libre rechaza la conexión al instante.
+const ORPHAN_SCAN_PORTS = 4;
+
+// Margen para contestar al diálogo de contraseña del sistema (Unix). No es
+// tiempo de red: es una persona buscando el teclado.
+const AUTH_WINDOW_MS = 120_000;
 
 // Stable tunnel name used as the TAP adapter alias hint. The TAP driver
 // auto-names adapters "rud1-tap" via `tapctl create --hwid root\tap0901
@@ -64,10 +79,9 @@ const TUNNEL_NAME_REGEX = /^[a-zA-Z0-9_.\-]{1,15}$/;
 
 export class OpenVpnMissingError extends Error {
   constructor() {
-    super(
-      `OpenVPN binary not found. Re-run the rud1 installer or download ` +
-        `OpenVPN Community from ${OPENVPN_DOWNLOAD_URL} and try again.`,
-    );
+    // El texto depende del sistema: en Windows el instalador de rud1 trae
+    // OpenVPN dentro, en Linux/macOS lo pone el gestor de paquetes.
+    super(openvpnMissingMessage());
     this.name = "OpenVpnMissingError";
   }
 }
@@ -158,6 +172,14 @@ interface RunningProc {
    *  on timeout/early-exit so the operator can see what openvpn was
    *  actually doing without having to crack open the log file. */
   logRing: string[];
+  /** True when the child runs as root through pkexec (Unix). We cannot
+   *  signal it from here — teardown has to go through the management
+   *  socket. See `requestCleanExit`. */
+  elevated: boolean;
+  /** ms timestamp of the first line openvpn printed, or null. With pkexec
+   *  nothing runs until the password dialog is answered, so this is how we
+   *  tell "still waiting for the operator" from "openvpn is stuck". */
+  firstOutputAt: number | null;
 }
 
 const LOG_RING_SIZE = 80;
@@ -383,9 +405,14 @@ async function pickManagementPort(): Promise<number> {
  * stdout scraping is enough for the connected / disconnected coarse
  * states.
  */
-async function attachManagementSocket(port: number): Promise<net.Socket | null> {
-  const deadline = Date.now() + 5_000;
+async function attachManagementSocket(
+  port: number,
+  timeoutMs = 5_000,
+  stillWanted: () => boolean = () => true,
+): Promise<net.Socket | null> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (!stillWanted()) return null;
     try {
       const sock = await new Promise<net.Socket>((resolve, reject) => {
         const s = net.createConnection({ host: MANAGEMENT_HOST, port });
@@ -398,6 +425,77 @@ async function attachManagementSocket(port: number): Promise<net.Socket | null> 
     }
   }
   return null;
+}
+
+/**
+ * Open a fresh management connection and ask that openvpn to exit.
+ *
+ * This is the only way to stop an OpenVPN we started through pkexec: the
+ * child runs as root, so a signal from this process is rejected. It also
+ * doubles as the reaper for a leftover openvpn from a rud1 that crashed —
+ * with `requireBanner` we only signal a socket that greets us as an
+ * OpenVPN management interface, never some unrelated program that happens
+ * to hold the port.
+ *
+ * Returns true when the request was written to a live socket.
+ */
+function sendManagementSignal(
+  port: number,
+  requireBanner = false,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { sock.destroy(); } catch { /* ya cerrado */ }
+      resolve(value);
+    };
+    const request = (): void => {
+      try {
+        sock.write("signal SIGTERM\n");
+      } catch {
+        finish(false);
+        return;
+      }
+      // Un respiro para que el socket vacíe el buffer antes de cerrarlo.
+      setTimeout(() => finish(true), 150);
+    };
+    const sock = net.createConnection({ host: MANAGEMENT_HOST, port });
+    const timer = setTimeout(() => finish(false), 400);
+    sock.setEncoding("utf8");
+    sock.once("error", () => finish(false));
+    sock.once("connect", () => {
+      if (!requireBanner) request();
+    });
+    sock.on("data", (chunk: string) => {
+      if (requireBanner && chunk.includes("OpenVPN Management Interface")) {
+        request();
+      }
+    });
+  });
+}
+
+/**
+ * Stop an openvpn that outlived the rud1 that started it.
+ *
+ * On Unix our openvpn runs as root: if rud1 is killed (crash, logout,
+ * `kill -9`) the tunnel stays up and keeps the tap-rud1 interface, and
+ * every later Connect fails with "device busy" and no way out from the
+ * UI. Its management port is still listening though, and that channel
+ * accepts the exit request without any password.
+ */
+async function reapOrphanOpenvpn(): Promise<void> {
+  if (process.platform === "win32") return; // allí kill() sí puede con él
+  for (let i = 0; i < ORPHAN_SCAN_PORTS; i++) {
+    const port = MANAGEMENT_PORT_BASE + i;
+    const signalled = await sendManagementSignal(port, true);
+    if (!signalled) continue;
+    console.info(`[vpn] leftover openvpn asked to exit (management port ${port})`);
+    // Darle tiempo a soltar la interfaz antes de crear la nuestra.
+    await new Promise((r) => setTimeout(r, 600));
+  }
 }
 
 function wireManagementSocket(sock: net.Socket): void {
@@ -486,7 +584,21 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
   }
   const args = [
     "--config", configPath,
-    "--dev-node", TUNNEL_NAME,
+  ];
+  if (process.platform === "win32") {
+    // En Windows --dev-node ES el nombre del adaptador TAP. En Unix
+    // significa el fichero de dispositivo a abrir (/dev/net/tun), así que
+    // pasarle el nombre del adaptador hacía que openvpn buscara un
+    // /dev/rud1-tap inexistente y muriera nada más arrancar.
+    args.push("--dev-node", TUNNEL_NAME);
+  } else {
+    // El .ovpn lo escribimos nosotros en el perfil del usuario y aquí
+    // openvpn corre como root: se fija el nivel de scripts para que un
+    // fichero manipulado no pueda convertir un "conectar" en "ejecuta
+    // esto como administrador". 1 = solo las herramientas de red propias.
+    args.push("--script-security", "1");
+  }
+  args.push(
     "--management", MANAGEMENT_HOST, String(managementPort),
     // No --management-hold: it gates startup on a "hold release" reply
     // from our side, and an intermittent timing bug where the reply
@@ -502,14 +614,37 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
     // verb 4 gives us TLS handshake detail without the cleartext key
     // material that verb 6+ leaks. Useful when diagnosing connect timeouts.
     "--verb", "4",
-  ];
+  );
   // The bundled DLLs live next to openvpn.exe; spawn with that directory
   // as cwd so libssl / libcrypto resolve via the binary's import table
   // search order (the EXE's own directory wins over PATH).
   const cwd = process.platform === "win32" ? openvpnBundledDir() : undefined;
+  // Linux/macOS: openvpn necesita root para crear el adaptador. El sistema
+  // pide la contraseña con su propio diálogo (pkexec/polkit), igual que el
+  // aviso de UAC en Windows.
+  //
+  // Falta un caso: /dev/net/tun lo crea el módulo `tun` del kernel, que en
+  // una máquina recién arrancada puede no estar cargado — y entonces
+  // openvpn muere con un "no such file". Sólo en ese caso se carga primero,
+  // dentro de la MISMA orden para no pedir la contraseña dos veces (`exec`
+  // sustituye al shell, así que el proceso que vigilamos sigue siendo
+  // openvpn). Cuando el módulo ya está, se lanza openvpn directo: así el
+  // diálogo del sistema nombra a openvpn y no a un shell.
+  const needsTunModule =
+    process.platform === "linux" && !existsSync("/dev/net/tun");
+  const plan = process.platform === "win32" || !needsTunModule
+    ? planPrivilegedSpawn(exe, args)
+    : planPrivilegedSpawn("/bin/sh", [
+        "-c",
+        'modprobe tun >/dev/null 2>&1; exec "$@"',
+        "sh",
+        exe,
+        ...args,
+      ]);
+  if (!plan.ok) throw new ElevationUnavailableError();
   let proc: ChildProcess;
   try {
-    proc = spawn(exe, args, {
+    proc = spawn(plan.command, plan.args, {
       windowsHide: true,
       cwd: cwd && require("fs").existsSync(cwd) ? cwd : undefined,
       stdio: ["ignore", "pipe", "pipe"],
@@ -529,10 +664,13 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
     initialized: false,
     lastErrorLine: null,
     logRing: [],
+    elevated: plan.elevated,
+    firstOutputAt: null,
   };
 
   function recordLine(line: string): void {
     if (!line) return;
+    if (live.firstOutputAt == null) live.firstOutputAt = Date.now();
     live.logRing.push(line);
     if (live.logRing.length > LOG_RING_SIZE) {
       live.logRing.splice(0, live.logRing.length - LOG_RING_SIZE);
@@ -618,13 +756,23 @@ export function openvpnLogPath(): string {
  * Returns true when the child actually exited within the grace window.
  */
 async function requestCleanExit(live: RunningProc): Promise<boolean> {
+  let requested = false;
   const sock = live.managementSocket;
-  if (!sock || sock.destroyed) return false;
-  try {
-    sock.write("signal SIGTERM\n");
-  } catch {
-    return false;
+  if (sock && !sock.destroyed) {
+    try {
+      sock.write("signal SIGTERM\n");
+      requested = true;
+    } catch {
+      /* socket muerto: se intenta uno nuevo abajo */
+    }
   }
+  if (!requested) {
+    // Sin socket no hay despedida, y con un hijo root (pkexec) tampoco hay
+    // señales: se abre una conexión nueva al canal de gestión antes de
+    // rendirse.
+    requested = await sendManagementSignal(live.managementPort);
+  }
+  if (!requested) return false;
   // 1.5s: the exit notification is a handful of datagrams on an already-open
   // tunnel. Anything slower than this is openvpn being stuck, and waiting
   // longer only delays the disconnect the technician just asked for.
@@ -703,9 +851,42 @@ async function killRunning(target?: RunningProc): Promise<void> {
       /* already gone or never existed */
     }
   }
+  // Unix: el hijo corre como root y nuestras señales rebotan (EPERM). Si
+  // sigue vivo después de todo lo anterior se pide al sistema que lo mate,
+  // lo que vuelve a mostrar el diálogo de contraseña. Camino excepcional:
+  // el canal de gestión resuelve el 99% de las desconexiones sin molestar.
+  if (live.elevated && typeof pid === "number" && isPidAlive(pid)) {
+    await killElevatedPid(pid);
+  }
   // Solo se limpia el puntero si el que hemos matado ES el activo: en caso
   // contrario borraríamos la referencia a un proceso ajeno que sigue vivo.
   if (running === live) running = null;
+}
+
+/** True while the PID exists, even when it belongs to root and we don't. */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM = existe pero no es nuestro (justo el caso de un hijo root).
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Último recurso en Unix: pedir al sistema que mate al openvpn root. */
+async function killElevatedPid(pid: number): Promise<void> {
+  const killBin = binaryPath("kill");
+  const plan = planPrivilegedSpawn(
+    path.isAbsolute(killBin) ? killBin : "/bin/kill",
+    ["-TERM", String(pid)],
+  );
+  if (!plan.ok) return;
+  try {
+    await execFileAsync(plan.command, plan.args, { timeout: 60_000 });
+  } catch {
+    /* el usuario puede cancelar el diálogo; no hay nada más que podamos hacer */
+  }
 }
 
 /**
@@ -794,6 +975,9 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   // up the new config. The renderer always re-issues the freshest .ovpn,
   // and the server may have rotated certs.
   await killRunning();
+  // Y en Unix, también lo que dejó vivo un rud1 anterior que murió mal:
+  // ese openvpn retiene la interfaz y bloquea cualquier conexión nueva.
+  await reapOrphanOpenvpn();
 
   // Ensure both the TAP-Windows V9 kernel driver AND the actual rud1-tap
   // network adapter exist before spawning openvpn. Checking only the
@@ -861,15 +1045,37 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   running = live;
   lastOvpnConfig = ovpnConfig;
 
-  // Attach to the management socket synchronously so we have state +
-  // bytecount notifications by the time the renderer asks for status.
-  // Without --management-hold there's no critical command we MUST send;
-  // the wire-up is purely observability and failure to attach degrades
+  // Attach to the management socket so we have state + bytecount
+  // notifications by the time the renderer asks for status. Without
+  // --management-hold there's no critical command we MUST send; the
+  // wire-up is purely observability and failure to attach degrades
   // gracefully to stdout-only scraping.
-  const sock = await attachManagementSocket(live.managementPort);
-  if (sock && running === live) {
-    live.managementSocket = sock;
-    wireManagementSocket(sock);
+  if (live.elevated) {
+    // Con pkexec de por medio openvpn todavía no existe: primero hay que
+    // contestar al diálogo de contraseña. Esperar aquí los 5s de siempre
+    // dejaba la sesión SIN canal de gestión — sin IP asignada, sin latidos
+    // y con el vigilante reconectando en bucle. Se engancha en segundo
+    // plano, con margen para teclear, y se abandona en cuanto el proceso
+    // muere o deja de ser el activo.
+    void attachManagementSocket(
+      live.managementPort,
+      AUTH_WINDOW_MS + 10_000,
+      () => running === live,
+    ).then((sock) => {
+      if (!sock) return;
+      if (running !== live) {
+        try { sock.destroy(); } catch { /* ya cerrado */ }
+        return;
+      }
+      live.managementSocket = sock;
+      wireManagementSocket(sock);
+    });
+  } else {
+    const sock = await attachManagementSocket(live.managementPort);
+    if (sock && running === live) {
+      live.managementSocket = sock;
+      wireManagementSocket(sock);
+    }
   }
 
   // Wait for the rising-edge `initialized` signal (set on stdout's
@@ -890,7 +1096,15 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   };
   await new Promise<void>((resolve, reject) => {
     const onExit = (code: number | null) => {
-      const head = live.lastErrorLine
+      // Un fallo de pkexec (contraseña cancelada, sin agente de polkit) sale
+      // por aquí con un código suyo, no de openvpn: se traduce a algo que el
+      // técnico pueda resolver en vez de dejar "code 126".
+      const elevationHint = live.elevated
+        ? describeElevationFailure(code, live.logRing.join("\n"))
+        : null;
+      const head = elevationHint
+        ? elevationHint
+        : live.lastErrorLine
         ? `OpenVPN exited before initialization: ${live.lastErrorLine}`
         : `OpenVPN exited before initialization (code ${code ?? "?"})`;
       cleanup();
@@ -907,8 +1121,23 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
         resolve();
         return;
       }
-      if (Date.now() - startedAt >= INIT_TIMEOUT_MS) {
+      // Mientras el sistema pide la contraseña openvpn aún no ha arrancado,
+      // así que el cronómetro del arranque no puede correr todavía: se mide
+      // desde su primera línea. Sin esto, tardar en teclear mataba el intento.
+      const waitingForPassword = live.elevated && live.firstOutputAt == null;
+      const deadline = waitingForPassword
+        ? startedAt + AUTH_WINDOW_MS
+        : (live.firstOutputAt ?? startedAt) + INIT_TIMEOUT_MS;
+      if (Date.now() >= deadline) {
         cleanup();
+        if (waitingForPassword) {
+          reject(new Error(
+            "The administrator password was not entered, so the VPN adapter " +
+            "could not be created. Click Connect again and approve the system " +
+            "dialog.",
+          ));
+          return;
+        }
         const head = live.lastErrorLine
           ? `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s: ${live.lastErrorLine}`
           : `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s. ` +
@@ -1073,6 +1302,8 @@ export const __test = {
   // y un socket de mentira. Y es la pieza de la que depende que el relay se
   // entere de la desconexión al instante, así que conviene tenerla probada.
   requestCleanExit,
+  sendManagementSignal,
+  isPidAlive,
   snapshotFromState,
   defaultOvpnConfigPath,
 };

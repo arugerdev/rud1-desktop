@@ -27,6 +27,7 @@
 import { describe, expect, it, vi } from "vitest";
 import * as path from "path";
 import * as os from "os";
+import * as net from "net";
 import { EventEmitter } from "events";
 
 // binary-helper pulls in electron at import time; stub it so vitest can
@@ -56,6 +57,7 @@ const {
   parseWgShow,
   parseNetshInterface,
   requestCleanExit,
+  sendManagementSignal,
   TUNNEL_NAME,
   TUNNEL_NAME_REGEX,
 } = __test;
@@ -492,8 +494,10 @@ describe("requestCleanExit", () => {
     };
   };
 
-  const live = (proc: unknown, sock: unknown) =>
-    ({ proc, managementSocket: sock }) as unknown as Parameters<
+  // Puerto 1: nada escucha ahí, así que el reintento por socket nuevo
+  // falla al instante (ECONNREFUSED) y el test no espera a nadie.
+  const live = (proc: unknown, sock: unknown, managementPort = 1) =>
+    ({ proc, managementSocket: sock, managementPort }) as unknown as Parameters<
       typeof requestCleanExit
     >[0];
 
@@ -506,7 +510,7 @@ describe("requestCleanExit", () => {
     expect(escrito).toEqual(["signal SIGTERM\n"]);
   });
 
-  it("sin canal de gestión no promete nada: que mande el camino duro", async () => {
+  it("sin canal de gestión y sin nadie escuchando: que mande el camino duro", async () => {
     await expect(requestCleanExit(live(fakeProc(), null))).resolves.toBe(false);
   });
 
@@ -514,6 +518,30 @@ describe("requestCleanExit", () => {
     const { sock } = fakeSock();
     sock.destroyed = true;
     await expect(requestCleanExit(live(fakeProc(), sock))).resolves.toBe(false);
+  });
+
+  it("si nuestro canal murió, abre uno nuevo: es la única vía con un openvpn root", async () => {
+    const recibido: string[] = [];
+    const server = net.createServer((c) => {
+      c.setEncoding("utf8");
+      c.on("data", (d: string) => recibido.push(d));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      const proc = fakeProc();
+      const p = requestCleanExit(live(proc, null, port));
+      // Muere poco después de recibir la petición: el `once("exit")` se
+      // engancha cuando la escritura ya salió, así que no vale emitirlo antes.
+      setTimeout(() => {
+        proc.exitCode = 0;
+        proc.emit("exit", 0);
+      }, 400);
+      await expect(p).resolves.toBe(true);
+      expect(recibido.join("")).toContain("signal SIGTERM");
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 
   it("si openvpn ya estaba muerto no se espera a un `exit` que no llegará", async () => {
@@ -533,6 +561,56 @@ describe("requestCleanExit", () => {
       await expect(p).resolves.toBe(false);
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+// ─── sendManagementSignal (reaper del openvpn huérfano) ─────────────────────
+
+describe("sendManagementSignal", () => {
+  const conServidor = async (
+    onData: (chunk: string, socket: net.Socket) => void,
+    saludo: string | null,
+  ) => {
+    const server = net.createServer((c) => {
+      c.setEncoding("utf8");
+      if (saludo) c.write(saludo);
+      c.on("data", (d: string) => onData(d, c));
+      c.on("error", () => undefined);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    return {
+      port: (server.address() as net.AddressInfo).port,
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  };
+
+  it("no pide nada a un puerto donde no hay nadie", async () => {
+    await expect(sendManagementSignal(1)).resolves.toBe(false);
+  });
+
+  it("con `requireBanner` sólo habla si el otro lado es OpenVPN", async () => {
+    const recibido: string[] = [];
+    const srv = await conServidor((d) => recibido.push(d), "hola, soy otra cosa\n");
+    try {
+      await expect(sendManagementSignal(srv.port, true)).resolves.toBe(false);
+      expect(recibido).toEqual([]);
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("con el saludo de OpenVPN sí manda la salida", async () => {
+    const recibido: string[] = [];
+    const srv = await conServidor(
+      (d) => recibido.push(d),
+      ">INFO:OpenVPN Management Interface Version 3 -- type 'help' for more info\n",
+    );
+    try {
+      await expect(sendManagementSignal(srv.port, true)).resolves.toBe(true);
+      expect(recibido.join("")).toContain("signal SIGTERM");
+    } finally {
+      await srv.close();
     }
   });
 });
