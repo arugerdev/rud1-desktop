@@ -123,6 +123,20 @@ describe("buildMapScript", () => {
     expect(s.indexOf("Remove-SmbMapping")).toBeLessThan(s.indexOf("New-SmbMapping"));
   });
 
+  it("guarda la credencial para el Explorador antes de mapear, sin comillas simples en el C#", () => {
+    const s = buildMapScript(VALID);
+    expect(s).toContain("[Rud1Cred]::Write('10.77.5.1', '10.77.5.1\\rud1smb', '" + PASSWORD + "')");
+    expect(s.indexOf("[Rud1Cred]::Write")).toBeLessThan(s.indexOf("New-SmbMapping"));
+    const src = s.split("\r\n").find((l) => l.startsWith("$src = "))!;
+    expect(src.slice("$src = '".length, -1)).not.toContain("'");
+    expect(src).toContain("c.Persist = 2");
+  });
+
+  it("si no se puede guardar la credencial no intenta mapear", () => {
+    const line = buildMapScript(VALID).split("\r\n").find((l) => l.startsWith("if ($ce -ne 0)"))!;
+    expect(line).toMatch(/^if \(\$ce -ne 0\) \{ 'RUD1_ERR ' \+ \$ce \} else \{ try \{ New-SmbMapping/);
+  });
+
   it("ends with a newline so the last stdin line runs", () => {
     expect(buildMapScript(VALID).endsWith("\r\n")).toBe(true);
   });
