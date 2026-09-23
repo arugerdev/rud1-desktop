@@ -55,16 +55,37 @@ export function uncPath(host: string, share: string): string {
   return `\\\\${host}\\${share}`;
 }
 
+// CredWrite en el almacén de credenciales del usuario. La app corre elevada y un
+// New-SmbMapping solo lo vería la sesión de administrador, no el Explorador.
+const CRED_WRITER_CS =
+  "using System; using System.Runtime.InteropServices; public static class Rud1Cred { " +
+  "[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct CREDENTIAL { " +
+  "public int Flags; public int Type; public string TargetName; public string Comment; " +
+  "public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten; public int CredentialBlobSize; " +
+  "public IntPtr CredentialBlob; public int Persist; public int AttributeCount; public IntPtr Attributes; " +
+  "public string TargetAlias; public string UserName; } " +
+  "[DllImport(\"advapi32.dll\", CharSet = CharSet.Unicode, SetLastError = true)] " +
+  "static extern bool CredWrite(ref CREDENTIAL c, int flags); " +
+  "public static int Write(string target, string user, string pass) { " +
+  "byte[] b = System.Text.Encoding.Unicode.GetBytes(pass); CREDENTIAL c = new CREDENTIAL(); " +
+  "c.Type = 2; c.TargetName = target; c.UserName = user; c.Persist = 2; c.CredentialBlobSize = b.Length; " +
+  "c.CredentialBlob = Marshal.AllocHGlobal(b.Length); " +
+  "try { Marshal.Copy(b, 0, c.CredentialBlob, b.Length); return CredWrite(ref c, 0) ? 0 : Marshal.GetLastWin32Error(); } " +
+  "finally { Marshal.FreeHGlobal(c.CredentialBlob); } } }";
+
 // Una sentencia completa por línea: `-Command -` ejecuta stdin línea a línea.
 export function buildMapScript(p: UsbFolderParams): string {
   const remote = psLiteral(uncPath(p.host, p.share));
+  const target = psLiteral(p.host);
   const user = psLiteral(`${p.host}\\${p.username}`);
   const pass = psLiteral(p.password);
   return [
     "$ErrorActionPreference = 'Stop'",
     `$r = ${remote}`,
+    `$src = ${psLiteral(CRED_WRITER_CS)}`,
+    `try { if (-not ('Rud1Cred' -as [type])) { Add-Type -TypeDefinition $src }; $ce = [Rud1Cred]::Write(${target}, ${user}, ${pass}) } catch { $ce = -1 }`,
     "try { Get-SmbMapping -RemotePath $r -ErrorAction SilentlyContinue | Remove-SmbMapping -Force -ErrorAction SilentlyContinue } catch { }",
-    `try { New-SmbMapping -RemotePath $r -UserName ${user} -Password ${pass} -Persistent $false | Out-Null; 'RUD1_OK' } catch { $c = $null; $d = $_.Exception.ErrorData; if ($d) { $c = $d.CimInstanceProperties['error_Code'].Value }; if (-not $c) { $c = $_.Exception.HResult }; 'RUD1_ERR ' + $c }`,
+    `if ($ce -ne 0) { 'RUD1_ERR ' + $ce } else { try { New-SmbMapping -RemotePath $r -UserName ${user} -Password ${pass} -Persistent $false | Out-Null; 'RUD1_OK' } catch { $c = $null; $d = $_.Exception.ErrorData; if ($d) { $c = $d.CimInstanceProperties['error_Code'].Value }; if (-not $c) { $c = $_.Exception.HResult }; 'RUD1_ERR ' + $c } }`,
     "",
   ].join("\r\n");
 }
