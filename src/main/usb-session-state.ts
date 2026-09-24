@@ -19,6 +19,8 @@ import * as path from "path";
 export interface AttachedUsbSession {
   /** Hostname or IP we passed to `usbip attach -r host`. */
   host: string;
+  /** Alternative address (legacy LAN IP) to retry when `host` is unreachable. */
+  fallbackHost?: string;
   /** Linux-style bus id, e.g. "1-1.4". Stable across reconnects. */
   busId: string;
   /** Optional human-readable label captured at attach time so the
