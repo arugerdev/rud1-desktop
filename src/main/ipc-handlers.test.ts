@@ -104,6 +104,8 @@ vi.mock("./usb-manager", () => ({
   usbList: vi.fn(async () => []),
   isUsbipInstalled: vi.fn(() => true),
   getUsbipInstallerPath: vi.fn(() => null),
+  prepareHostForDial: vi.fn(async (host: string) => ({ host })),
+  UsbBusyError: class UsbBusyError extends Error {},
   // Re-exported error class so `instanceof UsbipMissingError` checks
   // inside ipc-handlers compile and behave under the mock.
   UsbipMissingError: class UsbipMissingError extends Error {

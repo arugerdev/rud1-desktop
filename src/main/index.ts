@@ -538,9 +538,12 @@ async function reattachStoredUsbSessions(): Promise<void> {
   const snapshot = [...usbSessions];
   for (const session of snapshot) {
     try {
-      const port = await usbAttach(session.host, session.busId);
+      const port = await usbAttach(session.host, session.busId, {
+        fallbackHost: session.fallbackHost ?? null,
+      });
       usbSessions = addUsbSessionEntry(usbSessions, {
         host: session.host,
+        fallbackHost: session.fallbackHost,
         busId: session.busId,
         label: session.label,
         port,
@@ -1431,6 +1434,7 @@ app.whenReady().then(async () => {
       recordAttach: async (entry) => {
         usbSessions = addUsbSessionEntry(usbSessions, {
           host: entry.host,
+          fallbackHost: entry.fallbackHost,
           busId: entry.busId,
           label: entry.label,
           port: entry.port,

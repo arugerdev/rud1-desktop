@@ -91,6 +91,22 @@ describe("diagnoseTapReachability (read-only — never mutates)", () => {
     expect(d.reason).toBe("link-local-both-169254");
   });
 
+  it("link-local host + routable client + pinned on-link route → reachable", async () => {
+    mockAdapterIp = "192.168.0.50";
+    const d = await diagnoseTapReachability("169.254.0.77", ADAPTER, { onLinkRouteEnsured: true });
+    expect(d).toEqual({
+      likelyReachable: true,
+      reason: "link-local-host-via-route",
+      adapterIp: "192.168.0.50",
+    });
+  });
+
+  it("caller-supplied adapter IP skips the netsh read", async () => {
+    mockAdapterIp = "10.9.9.9"; // would be different-subnet if read
+    const d = await diagnoseTapReachability("192.168.0.10", ADAPTER, { adapterIp: "192.168.0.77" });
+    expect(d).toEqual({ likelyReachable: true, reason: "same-subnet", adapterIp: "192.168.0.77" });
+  });
+
   it("link-local host + routable client → flagged unreachable", async () => {
     mockAdapterIp = "192.168.0.50";
     const d = await diagnoseTapReachability("169.254.10.20", ADAPTER);

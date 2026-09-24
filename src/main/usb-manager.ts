@@ -5,7 +5,13 @@ import { promisify } from "util";
 import { isBinaryAvailable, usbipInstallerPath, usbipPath } from "./binary-helper";
 import { usbipMissingHint } from "./install-hints";
 import { ElevationUnavailableError, planPrivilegedSpawn } from "./elevation";
-import { diagnoseTapReachability } from "./tap-reachability";
+import { diagnoseTapReachability, isIpv4Literal, type TapReachabilityDiag } from "./tap-reachability";
+import {
+  ensureOnLinkRoute,
+  isLinkLocalIpv4,
+  needsOnLinkRoute,
+  waitForAdapterIpv4,
+} from "./mgmt-route";
 import { t } from "./i18n";
 
 const execFileAsync = promisify(execFile);
@@ -428,49 +434,172 @@ async function unbindOnPi(host: string, busId: string): Promise<void> {
   }
 }
 
-export async function usbAttach(host: string, busId: string): Promise<number> {
+export interface UsbAttachOptions {
+  /** Alternative address (legacy LAN IP) tried when `host` is unreachable. */
+  fallbackHost?: string | null;
+}
+
+export interface UsbAttachResult {
+  port: number;
+  /** Address the attach actually succeeded against (host or fallbackHost). */
+  host: string;
+  /** Reachability verdict of the winning target, for logs/diagnostics. */
+  reason: string;
+}
+
+/** One dial target with what the desktop did to make it reachable. */
+export interface HostPreparation {
+  host: string;
+  diag: TapReachabilityDiag;
+  routeEnsured: boolean;
+  routeError?: string;
+}
+
+/**
+ * Plans the dial order: the requested host first, the fallback second, never
+ * the same address twice. Pure — unit-tested.
+ */
+export function planAttachTargets(host: string, fallbackHost?: string | null): string[] {
+  const targets = [host];
+  if (fallbackHost && fallbackHost !== host) targets.push(fallbackHost);
+  return targets;
+}
+
+// Errors that mean "the address didn't answer" — only these justify trying the
+// fallback address. Anything else (policy, driver, busId) is final.
+const CONNECTIVITY_ERROR_PATTERNS: RegExp[] = [
+  /timed? ?out/i,
+  /unreachable/i,
+  /connection refused|conexión rechazada/i,
+  /no route/i,
+  /ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ENOTFOUND/i,
+  /fetch failed/i,
+  /\b1006[015]\b/, // WSAETIMEDOUT / WSAECONNREFUSED / WSAEHOSTUNREACH
+  /no respondió|no ha podido responder|no se pudo establecer/i,
+  /failed to connect|cannot connect|connect to .* failed/i,
+];
+
+export function isConnectivityError(msg: string): boolean {
+  return CONNECTIVITY_ERROR_PATTERNS.some((re) => re.test(msg));
+}
+
+/**
+ * Makes `host` dialable through rud1-tap without touching the adapter's
+ * addressing: waits for the adapter to carry an IPv4 and, when the host is the
+ * device's link-local management address and the adapter holds a routable
+ * lease/pool IP, pins an on-link /32 route (mgmt-route.ts). Never throws.
+ */
+export async function prepareHostForDial(host: string): Promise<HostPreparation> {
+  let adapterIp: string | null = null;
+  let routeEnsured = false;
+  let routeError: string | undefined;
+  if (process.platform === "win32" && isIpv4Literal(host)) {
+    adapterIp = await waitForAdapterIpv4(TAP_ADAPTER_NAME);
+    if (needsOnLinkRoute(host, adapterIp)) {
+      const r = await ensureOnLinkRoute(TAP_ADAPTER_NAME, host);
+      routeEnsured = r.ok;
+      if (!r.ok) routeError = r.error;
+    }
+  } else if (process.platform !== "win32" && isLinkLocalIpv4(host)) {
+    // Linux/macOS: we can't read the adapter address cheaply; an on-link host
+    // route is harmless when the adapter is already on 169.254/16.
+    const r = await ensureOnLinkRoute(TAP_ADAPTER_NAME, host);
+    routeEnsured = r.ok;
+    if (!r.ok) routeError = r.error;
+  }
+  let diag: TapReachabilityDiag;
+  try {
+    diag = await diagnoseTapReachability(host, TAP_ADAPTER_NAME, {
+      onLinkRouteEnsured: routeEnsured,
+      adapterIp: process.platform === "win32" ? adapterIp : undefined,
+    });
+  } catch (err) {
+    diag = {
+      likelyReachable: true,
+      reason: `diag-error: ${err instanceof Error ? err.message : String(err)}`,
+      adapterIp,
+    };
+  }
+  const line = `[usb] ${host}: ${diag.reason} (adapter ip: ${diag.adapterIp ?? "none"}` +
+    `${routeEnsured ? ", on-link route pinned" : ""}${routeError ? ", route error: " + routeError : ""})`;
+  if (diag.likelyReachable) console.info(line);
+  else console.warn(line);
+  return { host, diag, routeEnsured, routeError };
+}
+
+function describePreparation(p: HostPreparation): string {
+  const bits = [`rud1-tap: ${p.diag.adapterIp ?? "no IPv4"}`, p.diag.reason];
+  if (p.routeEnsured) bits.push("on-link route pinned");
+  if (p.routeError) bits.push(`route error: ${p.routeError}`);
+  return `${p.host} (${bits.join(", ")})`;
+}
+
+async function attachOnce(host: string, busId: string): Promise<number> {
+  await bindOnPi(host, busId);
+  if (process.platform === "win32") return await attachWindows(host, busId);
+  return await attachLinux(host, busId);
+}
+
+/**
+ * Attaches `busId` trying `host` and then `opts.fallbackHost`. Only a
+ * connectivity failure moves on to the next address; policy, driver and
+ * already-attached outcomes are final. The error of a total failure names every
+ * address tried and why the tap could not reach it.
+ */
+export async function usbAttachEx(
+  host: string,
+  busId: string,
+  opts: UsbAttachOptions = {},
+): Promise<UsbAttachResult> {
   assertHost(host);
+  if (opts.fallbackHost) assertHost(opts.fallbackHost);
   assertBusId(busId);
   ensureUsbipAvailable();
-  // Read-only reachability diagnostic — logs whether rud1-tap's current
-  // addressing can reach `host`, but NEVER mutates the adapter (the desktop
-  // must never write a static IP to rud1-tap: it can go stale and block the
-  // link-local path, or fight the server's STATIC push). Fixing the address is
-  // DHCP / APIPA / the OpenVPN push's job. Best-effort — never throws.
-  try {
-    const diag = await diagnoseTapReachability(host, TAP_ADAPTER_NAME);
-    if (!diag.likelyReachable) {
-      console.warn(
-        `[usb] rud1-tap may not reach ${host}: ${diag.reason} ` +
-          `(adapter ip: ${diag.adapterIp ?? "none"})`,
-      );
-    } else {
-      console.info(`[usb] rud1-tap reachability: ${diag.reason} → ${host}`);
+
+  const targets = planAttachTargets(host, opts.fallbackHost);
+  const tried: { prep: HostPreparation; error: string }[] = [];
+  for (const target of targets) {
+    const prep = await prepareHostForDial(target);
+    try {
+      const port = await attachOnce(target, busId);
+      return { port, host: target, reason: prep.diag.reason };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isAlreadyAttachedError(msg)) {
+        // "Device busy" también significa que lo tiene OTRO cliente: solo es
+        // éxito si está de verdad en este PC, por cualquiera de sus direcciones.
+        const live = await usbList().catch(() => [] as AttachedDevice[]);
+        for (const h of targets) {
+          const port = portAttachedHere(live, h, busId);
+          if (port !== null) return { port, host: h, reason: "already-attached" };
+        }
+        throw new UsbBusyError(busId);
+      }
+      if (isDriverMissingError(msg)) {
+        throw new UsbipMissingError(usbipInstallerPath());
+      }
+      tried.push({ prep, error: msg });
+      const last = target === targets[targets.length - 1];
+      if (last || !isConnectivityError(msg)) break;
+      console.warn(`[usb] ${target} did not answer (${msg.split("\n")[0]}); trying ${targets[targets.indexOf(target) + 1]}`);
     }
-  } catch (err) {
-    console.warn(
-      "[usb] rud1-tap reachability diagnostic errored (non-fatal):",
-      err instanceof Error ? err.message : err,
-    );
   }
-  await bindOnPi(host, busId);
-  try {
-    if (process.platform === "win32") return await attachWindows(host, busId);
-    return await attachLinux(host, busId);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (isAlreadyAttachedError(msg)) {
-      // "Device busy" también significa que lo tiene OTRO cliente: solo es
-      // éxito si de verdad está conectado en este PC.
-      const port = portAttachedHere(await usbList().catch(() => [] as AttachedDevice[]), host, busId);
-      if (port !== null) return port;
-      throw new UsbBusyError(busId);
-    }
-    if (isDriverMissingError(msg)) {
-      throw new UsbipMissingError(usbipInstallerPath());
-    }
-    throw err;
+
+  const failure = tried[tried.length - 1];
+  if (tried.length > 1 || !failure.prep.diag.likelyReachable || failure.prep.routeError) {
+    const where = tried.map((t) => describePreparation(t.prep)).join("; ");
+    throw new Error(`${failure.error}\nTried: ${where}`);
   }
+  throw new Error(failure.error);
+}
+
+export async function usbAttach(
+  host: string,
+  busId: string,
+  opts: UsbAttachOptions = {},
+): Promise<number> {
+  const r = await usbAttachEx(host, busId, opts);
+  return r.port;
 }
 
 export async function usbDetach(port: number): Promise<void> {
