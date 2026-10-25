@@ -73,8 +73,9 @@ export async function readAdapterIpV4(adapterName: string): Promise<string | nul
       ["interface", "ipv4", "show", "addresses", `name=${adapterName}`],
       { timeout: NETSH_TIMEOUT_MS },
     );
-    const m = /IP Address:\s*([\d.]+)/i.exec(stdout) ||
-      /Dirección IP:\s*([\d.]+)/i.exec(stdout);
+    // "Direcci.n": según la página de códigos con la que netsh escriba, la ó
+    // puede llegar como otro carácter y la IP pasaría por inexistente.
+    const m = /(?:IP Address|Direcci.n IP):\s*([\d.]+)/i.exec(stdout);
     return m ? m[1] : null;
   } catch {
     return null;
