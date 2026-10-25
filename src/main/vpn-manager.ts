@@ -49,6 +49,14 @@ import {
   maybeApplyApipaFallback,
   parseLanFallbackHint,
 } from "./apipa-fallback";
+import {
+  initDeadlineWithTapWait,
+  isWaitingForTapLine,
+  markTapStatic,
+  rescueTapAddress,
+  restoreTapDhcpIfOurs,
+  shouldRescueTapAddress,
+} from "./tap-address";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -182,6 +190,11 @@ interface RunningProc {
    *  nothing runs until the password dialog is answered, so this is how we
    *  tell "still waiting for the operator" from "openvpn is stuck". */
   firstOutputAt: number | null;
+  /** ms timestamp of openvpn's first "Waiting for TUN/TAP interface" line,
+   *  i.e. desde cuándo espera a que el adaptador tenga dirección. */
+  waitingForTapSince: number | null;
+  /** True once the rud1-tap address rescue has been fired for this child. */
+  tapRescueStarted: boolean;
 }
 
 const LOG_RING_SIZE = 80;
@@ -668,6 +681,8 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
     logRing: [],
     elevated: plan.elevated,
     firstOutputAt: null,
+    waitingForTapSince: null,
+    tapRescueStarted: false,
   };
 
   function recordLine(line: string): void {
@@ -699,6 +714,8 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
           live.lastErrorLine = line.slice(0, 240);
         } else if (line.includes("Inactivity timeout")) {
           live.initialized = false;
+        } else if (isWaitingForTapLine(line)) {
+          if (live.waitingForTapSince == null) live.waitingForTapSince = Date.now();
         } else if (line.startsWith("PUSH:")) {
           // First push from the server lands the assigned IP. We also
           // pick it up from the management socket — duplicate work is
@@ -737,6 +754,11 @@ async function spawnOpenvpn(configPath: string): Promise<RunningProc> {
  */
 export function openvpnLogPath(): string {
   return path.join(app.getPath("userData"), "logs", "openvpn.log");
+}
+
+/** Marca de "la IP fija de rud1-tap la puso rud1" (ver tap-address.ts). */
+function tapStaticMarkerPath(): string {
+  return path.join(app.getPath("userData"), "ovpn", "tap-static.json");
 }
 
 /**
@@ -980,6 +1002,10 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   // Y en Unix, también lo que dejó vivo un rud1 anterior que murió mal:
   // ese openvpn retiene la interfaz y bloquea cualquier conexión nueva.
   await reapOrphanOpenvpn();
+  // Si una conexión anterior dejó rud1-tap con IP fija (rescate o fallback de
+  // LAN) y no llegó a desconectar limpio, vuelve a DHCP antes de empezar: este
+  // equipo puede tener DHCP de planta o un `ifconfig-push` que dar.
+  await restoreTapDhcpIfOurs(TUNNEL_NAME, tapStaticMarkerPath());
 
   // Ensure both the TAP-Windows V9 kernel driver AND the actual rud1-tap
   // network adapter exist before spawning openvpn. Checking only the
@@ -1086,6 +1112,14 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
   // handshake over a marginal cellular uplink; failure beyond that is
   // almost always a configuration error worth surfacing.
   //
+  // En Windows openvpn espera además hasta 5 + 30 s a que rud1-tap tenga
+  // dirección y, pasado eso, termina igualmente ("Initialization Sequence
+  // Completed With Errors"). Con 25 s fijos se cortaba justo antes. Mientras
+  // dura esa espera el relay ya contestó, así que el plazo se alarga hasta
+  // su final (initDeadlineWithTapWait): normalmente el rescate de dirección
+  // (más abajo) la acorta, y si no pudiera aplicarse openvpn acaba solo. Un
+  // relay que no contesta sigue fallando a los 25 s.
+  //
   // If the child process exits before we see init, that's also a
   // failure — propagate the captured last error line so the renderer
   // can show what openvpn complained about.
@@ -1123,13 +1157,33 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
         resolve();
         return;
       }
+      // openvpn lleva el margen esperando a que rud1-tap tenga dirección y
+      // nadie se la da (equipo sin LAN detrás): se la pone rud1. En cuanto la
+      // tiene, openvpn lo detecta en su siguiente comprobación y termina.
+      // `assignedIp` aquí solo puede venir del PUSH: con una IP empujada por el
+      // relay no se rescata (ver shouldRescueTapAddress).
+      if (
+        process.platform === "win32" &&
+        !live.tapRescueStarted &&
+        shouldRescueTapAddress(live.waitingForTapSince, Date.now(), live.assignedIp)
+      ) {
+        live.tapRescueStarted = true;
+        void rescueTapAddress(TUNNEL_NAME, tapStaticMarkerPath()).then((r) => {
+          if (r.applied) {
+            console.info(`[vpn] rud1-tap sin dirección: asignada ${r.ip}`);
+          } else {
+            console.warn(`[vpn] rescate de dirección de rud1-tap no aplicado: ${r.reason}`);
+          }
+        });
+      }
       // Mientras el sistema pide la contraseña openvpn aún no ha arrancado,
       // así que el cronómetro del arranque no puede correr todavía: se mide
       // desde su primera línea. Sin esto, tardar en teclear mataba el intento.
       const waitingForPassword = live.elevated && live.firstOutputAt == null;
+      const initStart = live.firstOutputAt ?? startedAt;
       const deadline = waitingForPassword
         ? startedAt + AUTH_WINDOW_MS
-        : (live.firstOutputAt ?? startedAt) + INIT_TIMEOUT_MS;
+        : initDeadlineWithTapWait(initStart + INIT_TIMEOUT_MS, live.waitingForTapSince);
       if (Date.now() >= deadline) {
         cleanup();
         if (waitingForPassword) {
@@ -1140,9 +1194,10 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
           ));
           return;
         }
+        const limitS = Math.round((deadline - initStart) / 1000);
         const head = live.lastErrorLine
-          ? `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s: ${live.lastErrorLine}`
-          : `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s. ` +
+          ? `Tunnel did not initialize within ${limitS}s: ${live.lastErrorLine}`
+          : `Tunnel did not initialize within ${limitS}s. ` +
             `Most likely the OpenVPN server is unreachable, the .ovpn config is stale, ` +
             `or another process is holding the rud1-tap adapter.`;
         reject(new Error(`${head}\n\nLast OpenVPN output:${tailLog()}\n\nFull log: ${logPath}`));
@@ -1175,6 +1230,8 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
       const hint = parseLanFallbackHint(ovpnConfig);
       const result = await maybeApplyApipaFallback("rud1-tap", hint);
       if (result.applied) {
+        // Fija como el rescate: misma marca para volver a DHCP al desconectar.
+        await markTapStatic(tapStaticMarkerPath(), TUNNEL_NAME, result.finalIp ?? "");
         console.info(
           `[vpn] APIPA fallback applied: ${result.finalIp} (reason: ${result.reason})`,
         );
@@ -1214,6 +1271,9 @@ export async function vpnDisconnect(): Promise<VpnDisconnectResult> {
     // up; drop them before the adapter goes away (best-effort).
     await removeTrackedRoutes().catch(() => undefined);
     await killRunning();
+    // Una IP fija que puso rud1 no puede sobrevivir a la sesión: el siguiente
+    // equipo podría tener DHCP de planta y el técnico se quedaría sin lease.
+    await restoreTapDhcpIfOurs(TUNNEL_NAME, tapStaticMarkerPath());
     lastDisconnectedAt = Date.now();
     lastOvpnConfig = null;
     return { uptimeMs };
