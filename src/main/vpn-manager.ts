@@ -50,6 +50,7 @@ import {
   parseLanFallbackHint,
 } from "./apipa-fallback";
 import {
+  initDeadlineWithTapWait,
   isWaitingForTapLine,
   markTapStatic,
   rescueTapAddress,
@@ -1107,17 +1108,22 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
 
   // Wait for the rising-edge `initialized` signal (set on stdout's
   // "Initialization Sequence Completed" line OR on a >STATE:CONNECTED
-  // notification from the management socket). 25s covered a slow TLS
-  // handshake over a marginal cellular uplink, pero en Windows openvpn
-  // espera además hasta 5 + 30 s a que rud1-tap tenga dirección y, pasado
-  // eso, termina igualmente ("Initialization Sequence Completed With
-  // Errors"). Con 25 s se cortaba justo antes. 40 s deja acabar esa espera
-  // si el rescate de dirección (más abajo) no pudiera aplicarse.
+  // notification from the management socket). 25s covers a slow TLS
+  // handshake over a marginal cellular uplink; failure beyond that is
+  // almost always a configuration error worth surfacing.
+  //
+  // En Windows openvpn espera además hasta 5 + 30 s a que rud1-tap tenga
+  // dirección y, pasado eso, termina igualmente ("Initialization Sequence
+  // Completed With Errors"). Con 25 s fijos se cortaba justo antes. Mientras
+  // dura esa espera el relay ya contestó, así que el plazo se alarga hasta
+  // su final (initDeadlineWithTapWait): normalmente el rescate de dirección
+  // (más abajo) la acorta, y si no pudiera aplicarse openvpn acaba solo. Un
+  // relay que no contesta sigue fallando a los 25 s.
   //
   // If the child process exits before we see init, that's also a
   // failure — propagate the captured last error line so the renderer
   // can show what openvpn complained about.
-  const INIT_TIMEOUT_MS = 40_000;
+  const INIT_TIMEOUT_MS = 25_000;
   const startedAt = Date.now();
   const logPath = openvpnLogPath();
   const tailLog = (n = 12): string => {
@@ -1154,10 +1160,12 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
       // openvpn lleva el margen esperando a que rud1-tap tenga dirección y
       // nadie se la da (equipo sin LAN detrás): se la pone rud1. En cuanto la
       // tiene, openvpn lo detecta en su siguiente comprobación y termina.
+      // `assignedIp` aquí solo puede venir del PUSH: con una IP empujada por el
+      // relay no se rescata (ver shouldRescueTapAddress).
       if (
         process.platform === "win32" &&
         !live.tapRescueStarted &&
-        shouldRescueTapAddress(live.waitingForTapSince, Date.now())
+        shouldRescueTapAddress(live.waitingForTapSince, Date.now(), live.assignedIp)
       ) {
         live.tapRescueStarted = true;
         void rescueTapAddress(TUNNEL_NAME, tapStaticMarkerPath()).then((r) => {
@@ -1172,9 +1180,10 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
       // así que el cronómetro del arranque no puede correr todavía: se mide
       // desde su primera línea. Sin esto, tardar en teclear mataba el intento.
       const waitingForPassword = live.elevated && live.firstOutputAt == null;
+      const initStart = live.firstOutputAt ?? startedAt;
       const deadline = waitingForPassword
         ? startedAt + AUTH_WINDOW_MS
-        : (live.firstOutputAt ?? startedAt) + INIT_TIMEOUT_MS;
+        : initDeadlineWithTapWait(initStart + INIT_TIMEOUT_MS, live.waitingForTapSince);
       if (Date.now() >= deadline) {
         cleanup();
         if (waitingForPassword) {
@@ -1185,9 +1194,10 @@ async function vpnConnectSerialized(ovpnConfig: string): Promise<void> {
           ));
           return;
         }
+        const limitS = Math.round((deadline - initStart) / 1000);
         const head = live.lastErrorLine
-          ? `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s: ${live.lastErrorLine}`
-          : `Tunnel did not initialize within ${INIT_TIMEOUT_MS / 1000}s. ` +
+          ? `Tunnel did not initialize within ${limitS}s: ${live.lastErrorLine}`
+          : `Tunnel did not initialize within ${limitS}s. ` +
             `Most likely the OpenVPN server is unreachable, the .ovpn config is stale, ` +
             `or another process is holding the rud1-tap adapter.`;
         reject(new Error(`${head}\n\nLast OpenVPN output:${tailLog()}\n\nFull log: ${logPath}`));

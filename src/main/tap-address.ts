@@ -32,10 +32,21 @@ const NETSH_TIMEOUT_MS = 5_000;
 
 /**
  * Cuánto se deja esperar a openvpn al adaptador antes de ponerle dirección.
- * Se cuenta desde su primer "Waiting for TUN/TAP": el DHCP de planta y el del
- * driver contestan en 1-3 s, así que pasado esto ya no va a llegar.
+ * Se cuenta desde su primer "Waiting for TUN/TAP", que llega 5 s después de
+ * abrir el adaptador. El DHCP de planta contesta en 1-3 s, pero si la primera
+ * petición se pierde (por SIM pasa) Windows la repite a los ~4 s y la
+ * respuesta cruza otra vez el móvil. Con 10 s el rescate llega a los ~15 s y
+ * no le quita el lease a ese reintento: fijar la dirección apaga el DHCP.
  */
-export const TAP_RESCUE_GRACE_MS = 6_000;
+export const TAP_RESCUE_GRACE_MS = 10_000;
+
+/**
+ * Lo que openvpn sigue esperando desde su primer "Waiting for TUN/TAP" antes
+ * de dar el arranque por terminado igualmente ("Initialization Sequence
+ * Completed With Errors"): su ventana de route-delay, 30 s.
+ */
+export const OPENVPN_TAP_WAIT_MS = 30_000;
+const TAP_WAIT_SLACK_MS = 5_000;
 
 export const LINK_LOCAL_MASK = "255.255.0.0";
 
@@ -44,13 +55,31 @@ export function isWaitingForTapLine(line: string): boolean {
   return line.includes("Waiting for TUN/TAP interface to come up");
 }
 
-/** Toca rescatar: openvpn lleva el margen entero esperando al adaptador. */
+/**
+ * Toca rescatar: openvpn lleva el margen entero esperando al adaptador y el
+ * relay no le ha empujado una IP propia.
+ */
 export function shouldRescueTapAddress(
   waitingSince: number | null,
   now: number,
+  pushedIp: string | null = null,
   graceMs = TAP_RESCUE_GRACE_MS,
 ): boolean {
+  // Con `ifconfig-push` (LAN STATIC) openvpn espera a ver ESA dirección en el
+  // adaptador, no una cualquiera: una 169.254 no lo desbloquea, y fijarla
+  // apaga el DHCP por el que el driver tiene que entregarle la suya.
+  if (pushedIp) return false;
   return waitingSince != null && now - waitingSince >= graceMs;
+}
+
+/**
+ * Plazo de arranque mientras openvpn espera al adaptador. Para entonces ya
+ * habló con el relay, así que no se corta antes de que acabe su propia espera,
+ * se haya podido aplicar el rescate o no.
+ */
+export function initDeadlineWithTapWait(baseDeadline: number, waitingSince: number | null): number {
+  if (waitingSince == null) return baseDeadline;
+  return Math.max(baseDeadline, waitingSince + OPENVPN_TAP_WAIT_MS + TAP_WAIT_SLACK_MS);
 }
 
 /**

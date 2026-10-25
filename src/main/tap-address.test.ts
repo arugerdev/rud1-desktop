@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  OPENVPN_TAP_WAIT_MS,
   TAP_RESCUE_GRACE_MS,
   buildSetDhcpArgs,
   buildSetStaticArgs,
+  initDeadlineWithTapWait,
   isWaitingForTapLine,
   parseDhcpEnabled,
   pickLinkLocalIpv4,
@@ -38,9 +40,37 @@ describe("tap-address: cuándo rescatar", () => {
     expect(shouldRescueTapAddress(10_000, 10_000 + TAP_RESCUE_GRACE_MS)).toBe(true);
   });
 
-  it("el margen cabe de sobra en la espera de openvpn y en el plazo de la app", () => {
+  it("el margen cabe de sobra en la espera de openvpn", () => {
     // openvpn espera 5 s antes de la primera comprobación y 30 s después.
     expect(5_000 + TAP_RESCUE_GRACE_MS).toBeLessThan(35_000);
+    expect(TAP_RESCUE_GRACE_MS).toBeLessThan(OPENVPN_TAP_WAIT_MS);
+  });
+
+  it("no rescata si el relay empujó una IP (LAN STATIC)", () => {
+    // openvpn espera esa IP exacta; fijar una 169.254 apagaría el DHCP del
+    // driver que se la tiene que dar.
+    expect(shouldRescueTapAddress(10_000, 10_000 + TAP_RESCUE_GRACE_MS, "192.168.1.240")).toBe(false);
+  });
+
+  it("sin IP empujada sí rescata", () => {
+    expect(shouldRescueTapAddress(10_000, 10_000 + TAP_RESCUE_GRACE_MS, null)).toBe(true);
+  });
+});
+
+describe("tap-address: plazo de arranque", () => {
+  it("si openvpn no espera al adaptador, el plazo no cambia", () => {
+    expect(initDeadlineWithTapWait(25_000, null)).toBe(25_000);
+  });
+
+  it("si espera, deja acabar su propia espera con margen", () => {
+    const waitingSince = 8_000;
+    const deadline = initDeadlineWithTapWait(25_000, waitingSince);
+    expect(deadline).toBeGreaterThan(waitingSince + OPENVPN_TAP_WAIT_MS);
+    expect(deadline).toBeLessThanOrEqual(waitingSince + OPENVPN_TAP_WAIT_MS + 10_000);
+  });
+
+  it("nunca acorta un plazo que ya era mayor", () => {
+    expect(initDeadlineWithTapWait(100_000, 1_000)).toBe(100_000);
   });
 });
 
